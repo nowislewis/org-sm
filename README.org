@@ -1,0 +1,107 @@
+#+title: org-sm
+#+author: Lewis Liu
+
+Minimal incremental reading for org-mode, inspired by SuperMemo.
+
+* Card Types
+
+*topic* — repeated reading, no grading required.
+Scheduled by the A-Factor algorithm. org priority controls how fast the interval grows:
+
+| Priority | Meaning       | Interval growth                       |
+|----------+---------------+---------------------------------------|
+| =[#A]=   | high interest | stays short (floor 1.2, no growth)    |
+| =[#B]=   | normal        | gentle growth (default)               |
+| =[#C]=   | low interest  | aggressive growth, spreads out fast   |
+
+*cloze* — memory testing with ~{{answer}}~ markers, scheduled by [[https://github.com/open-spaced-repetition/fsrs4anki][FSRS]].
+During review, answers are hidden as ~[___]~; rated on a 4-point scale (again / hard / good / easy).
+
+* Installation & Configuration
+
+Requires Emacs 29.1+, org 9.6+, and the [[https://github.com/bohonghuang/fsrs.el][fsrs]] package.
+
+#+begin_src elisp
+(use-package org-sm
+  :commands (org-sm-start-review org-sm-mark org-sm-extract)
+  :hook (org-mode . org-sm-mode)
+  :config
+  ;; Scan a dedicated directory instead of org-agenda-files
+  (setq org-sm-directory "~/notes/")
+
+  ;; Only include files whose name contains "srs"
+  (setq org-sm-file-filter-regexp "[^/]*srs[^/]*\\.org$")
+
+  ;; Max length of auto-generated heading titles (default 40)
+  (setq org-sm-title-max-length 50)
+
+  ;; Initial A-Factor for new topic cards (default 1.2)
+  (setq org-sm-initial-afactor 1.5))
+#+end_src
+
+~org-sm-mode~ enables ~{{cloze}}~ font-lock only — safe to add to ~org-mode-hook~ without
+loading anything eagerly. The scheduler and agenda view are initialized automatically
+on the first call to ~org-sm-start-review~.
+
+* Commands
+
+| Command                | Description                                    |
+|------------------------+------------------------------------------------|
+| ~org-sm-mark~          | Mark current heading as topic or cloze         |
+| ~org-sm-extract~       | Extract selected region as child topic or cloze |
+| ~org-sm-start-review~  | Start a review session                         |
+| ~org-sm-review-confirm~ | Confirm topic read / advance cloze state      |
+| ~org-sm-dismiss~       | Dismiss current item (schedules to year 2999)  |
+
+Suggested keybindings:
+
+#+begin_src elisp
+(with-eval-after-load 'org-sm
+  (define-key org-mode-map (kbd "C-c s m") #'org-sm-mark)
+  (define-key org-mode-map (kbd "C-c s x") #'org-sm-extract)
+  (define-key org-mode-map (kbd "C-c s r") #'org-sm-start-review)
+  (define-key org-mode-map (kbd "C-c s SPC")     #'org-sm-review-confirm)
+  (define-key org-mode-map (kbd "C-c s d") #'org-sm-dismiss))
+#+end_src
+
+* Review Flow
+
+*Topic:*
+1. ~org-sm-start-review~ — opens the due item, narrowed to its subtree.
+2. Read the content.
+3. ~org-sm-review-confirm~ — reschedules and moves to next item.
+
+*Cloze:*
+1. ~org-sm-start-review~ — opens the due item with answers hidden as ~[___]~.
+2. ~org-sm-review-confirm~ — reveals answers as ~[answer]~.
+3. ~org-sm-review-confirm~ — prompt to rate: again / hard / good / easy.
+
+Early or late reviews do not distort the interval — the next interval is always
+calculated from the originally scheduled date, and the new schedule starts from
+the actual review time.
+
+* How org-sm-extract Works
+
+Select any text in an org buffer and call ~org-sm-extract~:
+
+- *topic* — the selected text becomes the child heading's body.
+- *cloze* — the full parent body is copied to the child; the selected text is
+  wrapped as ~{{answer}}~.
+
+In both cases the selection in the parent is replaced with an ~[[id:...][title]]~
+link, keeping the parent readable.
+
+* Org Properties Written
+
+| Property         | Type              | Description                    |
+|------------------+-------------------+--------------------------------|
+| ~SRS_TYPE~       | ~topic~ / ~cloze~ | Card type                      |
+| ~SRS_AFACTOR~    | float             | A-Factor (topic only)          |
+| ~SRS_LAST~       | ISO 8601          | Last review time               |
+| ~SRS_STATE~      | symbol            | FSRS state (cloze only)        |
+| ~SRS_STABILITY~  | float             | FSRS stability (cloze only)    |
+| ~SRS_DIFFICULTY~ | float             | FSRS difficulty (cloze only)   |
+| ~SRS_STEP~       | int               | FSRS learning step (cloze only) |
+
+The ~SCHEDULED~ timestamp is the due date for both types and is used directly
+by the org agenda.
