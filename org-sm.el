@@ -331,7 +331,12 @@ The selected region in the parent is replaced with an [[id:...][title]] link.
 
 (defun org-sm--goto-marker (marker)
   "Jump to MARKER, narrow to subtree, apply cloze overlays if needed."
-  (switch-to-buffer (marker-buffer marker))
+  (let ((buf (marker-buffer marker)))
+    (unless buf
+      ;; Marker is stale (agenda closed the visiting buffer).
+      ;; Try to re-visit the file via the marker's last known position.
+      (error "org-sm: marker is stale — try restarting the review session"))
+    (switch-to-buffer buf))
   (widen)
   (goto-char marker)
   (org-back-to-heading t)
@@ -367,25 +372,20 @@ The selected region in the parent is replaced with an [[id:...][title]] link.
         (org-sm--show-prompt prev)
       (message "org-sm: done 🎉%s" (if prev (format "  (last: %s)" prev) "")))))
 
-(defun org-sm--ensure-agenda-buf ()
-  "Return up-to-date SRS agenda buffer, opening it if necessary.
-Handles both sticky (`*Org Agenda(KEY)*') and non-sticky (`*Org Agenda*')
-buffer naming conventions."
-  (let* ((sticky-name   (format "*Org Agenda(%s)*" org-sm--agenda-key))
-         (nonsticky-name "*Org Agenda*")
-         (existing       (or (get-buffer sticky-name)
-                             (with-current-buffer (or (get-buffer nonsticky-name)
-                                                      (current-buffer))
-                               (when (derived-mode-p 'org-agenda-mode)
-                                 (current-buffer))))))
-    (if existing
-        (with-current-buffer existing (org-agenda-redo) existing)
-      (org-agenda nil org-sm--agenda-key)
-      ;; After org-agenda returns, the agenda buffer is current.
-      (let ((buf (current-buffer)))
-        (unless (derived-mode-p 'org-agenda-mode)
-          (error "org-sm: agenda buffer not found after opening"))
-        buf))))
+(defun org-sm--build-agenda-buf ()
+  "Build a fresh SRS agenda buffer and return it.
+Always rebuilds so that the caller's `org-agenda-files' binding is respected."
+  ;; Kill any stale agenda buffer first so org-agenda builds a clean one.
+  (when-let* ((old (get-buffer (format "*Org Agenda(%s)*" org-sm--agenda-key))))
+    (kill-buffer old))
+  (when-let* ((old (get-buffer "*Org Agenda*")))
+    (when (with-current-buffer old (derived-mode-p 'org-agenda-mode))
+      (kill-buffer old)))
+  (org-agenda nil org-sm--agenda-key)
+  (let ((buf (current-buffer)))
+    (unless (derived-mode-p 'org-agenda-mode)
+      (error "org-sm: agenda buffer not found after opening"))
+    buf))
 
 ;;;###autoload
 (defun org-sm-start-review ()
@@ -398,7 +398,7 @@ buffer naming conventions."
                                 (lambda (f) (string-match-p org-sm-file-filter-regexp f))
                                 (directory-files-recursively org-sm-directory "\\.org$"))
                              (bound-and-true-p org-agenda-files)))
-         (buf     (org-sm--ensure-agenda-buf))
+         (buf     (org-sm--build-agenda-buf))
          (markers (with-current-buffer buf
                     (cl-delete-duplicates
                      (cl-loop for pos from (point-min) below (point-max)
