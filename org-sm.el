@@ -131,21 +131,23 @@ Falls back to 1 day if either timestamp is absent."
 (defun org-sm--topic-review ()
   "Reschedule current topic using the A-Factor algorithm.
 No grade is needed: confirming you have read the topic is sufficient.
-The A-Factor grows automatically each review, stretching the interval."
+The A-Factor grows automatically each review, stretching the interval.
+Returns the new interval in days."
   (let* ((a     (org-sm--topic-afactor))
          (new-a (max 1.2 (min 6.9 (+ (* 1.18 a) -0.20))))
          (ivl   (max 1 (ceiling (* (org-sm--topic-last-interval) new-a)))))
     (org-sm-set "SRS_AFACTOR" (number-to-string new-a))
     (org-sm-set "SRS_LAST"    (format-time-string "%FT%TZ" (current-time) "UTC0"))
     (org-schedule nil (format-time-string
-                       "%F" (time-add (current-time) (days-to-time ivl))))))
+                       "%F" (time-add (current-time) (days-to-time ivl))))
+    ivl))
 
 ;;;; ---- Cloze overlay -------------------------------------------------------
 
 (defvar org-sm--cloze-regexp
-  "\\(?:^\\|[ \t]\\)\\(~\\([^~\n]+\\)~\\)"
+  "~\\([^~\n]+\\)~"
   "Regexp matching org ~verbatim~ markup used as cloze markers.
-Group 1 = full ~text~, group 2 = text inside tildes.")
+Group 1 = text inside tildes.")
 
 (defun org-sm--cloze-overlays-in (start end)
   "Return all org-sm-cloze overlays between START and END."
@@ -159,10 +161,10 @@ Group 1 = full ~text~, group 2 = text inside tildes.")
     (save-excursion
       (goto-char start)
       (while (re-search-forward org-sm--cloze-regexp end t)
-        (let ((ov (make-overlay (match-beginning 1) (match-end 1))))
+        (let ((ov (make-overlay (match-beginning 0) (match-end 0))))
           (overlay-put ov 'category     'org-sm-cloze)
           (overlay-put ov 'display      (propertize "[___]" 'face '(bold highlight)))
-          (overlay-put ov 'org-sm-answer (match-string 2)))))))
+          (overlay-put ov 'org-sm-answer (match-string 1)))))))
 
 (defun org-sm-cloze-reveal-overlays ()
   "Show answers in all cloze overlays of the current heading."
@@ -188,12 +190,27 @@ Group 1 = full ~text~, group 2 = text inside tildes.")
           (org-entry-end-position))))
 
 (defun org-sm--body-clean (raw)
-  "Strip leading whitespace from every line of RAW and trim the whole string."
-  (mapconcat #'string-trim-left
-             (split-string (string-trim raw) "\n")
-             "\n"))
+  "Remove the common leading indentation from RAW and trim surrounding whitespace.
+Org heading bodies are typically indented by a uniform number of spaces
+relative to the heading star; this function strips that shared prefix so
+the extracted text is flush-left, while preserving relative indentation
+within the body (e.g. nested lists, code blocks)."
+  (let* ((trimmed (string-trim raw))
+         (lines   (split-string trimmed "\n"))
+         ;; Find the minimum indentation among non-empty lines.
+         (min-indent
+          (apply #'min
+                 (mapcar (lambda (l)
+                           (if (string-match "\\`[ \t]*\\'" l)
+                               most-positive-fixnum   ; ignore blank lines
+                             (length (car (split-string l "\\S-" t)))))
+                         lines))))
+    (mapconcat (lambda (l)
+                 (if (< (length l) min-indent) l
+                   (substring l min-indent)))
+               lines "\n")))
 
-(defun org-sm--cloze-body-at (sel-beg sel-end selected)
+(defun org-sm--cloze-body-at (sel-beg _sel-end selected)
   "Return parent body text with only the selection at SEL-BEG..SEL-END cloze-marked.
 SELECTED is the selected text.  All other occurrences are left untouched."
   (let* ((bounds     (org-sm--body-bounds))
@@ -206,20 +223,76 @@ SELECTED is the selected text.  All other occurrences are left untouched."
              (substring body-raw (+ offset (length selected)))))))
 
 (defun org-sm--truncate-title (str)
-  "Return first line of STR truncated to `org-sm-title-max-length' display columns."
-  (let* ((line  (car (split-string (string-trim str) "\n")))
+  "Return STR truncated to `org-sm-title-max-length' display columns.
+Newlines are collapsed to a single space so multi-line selections
+produce a readable single-line title rather than cutting at the first
+newline (which may be very short)."
+  (let* ((flat  (replace-regexp-in-string "[ \t]*\n[ \t]*" " " (string-trim str)))
          (limit (- org-sm-title-max-length 1))     ; reserve 1 col for ellipsis
-         (width (string-width line)))
+         (width (string-width flat)))
     (if (<= width org-sm-title-max-length)
-        line
+        flat
       ;; Binary-search the cut point: find largest n where string-width<=limit
-      (let ((lo 0) (hi (length line)))
+      (let ((lo 0) (hi (length flat)))
         (while (< lo hi)
           (let ((mid (/ (+ lo hi 1) 2)))
-            (if (<= (string-width (substring line 0 mid)) limit)
+            (if (<= (string-width (substring flat 0 mid)) limit)
                 (setq lo mid)
               (setq hi (1- mid)))))
-        (concat (substring line 0 lo) "…")))))
+        (concat (substring flat 0 lo) "…")))))
+
+;;;; ---- Mark ----------------------------------------------------------------
+
+;;;###autoload
+(defun org-sm-mark ()
+  "Mark the current heading itself as an SRS item (topic or cloze).
+
+Unlike `org-sm-extract', which creates a *child* heading from a selected
+region, this command registers the heading you are already on — no region
+needed.  Useful for:
+  - Converting existing notes into SRS items in bulk.
+  - Quickly scheduling a newly written heading without extracting.
+
+For cloze: the heading body must already contain ~cloze~ markers.
+A warning is shown if none are found, but the heading is still marked
+so you can add markers afterwards.
+
+If the heading is already an SRS item you are prompted to confirm
+before overwriting its scheduling data."
+  (interactive)
+  (unless (org-at-heading-p)
+    (org-back-to-heading t))
+  ;; Guard: already an SRS heading?
+  (when (org-sm-type)
+    (unless (yes-or-no-p
+             (format "Heading is already a %s item.  Re-mark and reset schedule? "
+                     (org-sm-type)))
+      (user-error "Aborted")))
+  (let* ((type (intern (completing-read "Mark as: " '("topic" "cloze") nil t)))
+         (due  (format-time-string
+                "%F" (time-add (current-time) (days-to-time 1)))))
+    ;; Ensure a stable ID exists
+    (org-id-get-create)
+    (org-sm-set "SRS_TYPE" (symbol-name type))
+    (org-schedule nil due)
+    (pcase type
+      ('topic
+       (org-sm-set "SRS_AFACTOR" (number-to-string org-sm-initial-afactor))
+       (org-sm-set "SRS_LAST"    (format-time-string "%FT%TZ" (current-time) "UTC0"))
+       ;; Remove any stale cloze-only properties
+       (org-delete-property "SRS_STATE")
+       (message "org-sm: marked as topic — due %s" due))
+      ('cloze
+       (org-sm-set "SRS_STATE" ":learning")
+       ;; Remove any stale topic-only properties
+       (org-delete-property "SRS_AFACTOR")
+       (org-delete-property "SRS_LAST")
+       ;; Warn if no cloze markers present yet
+       (let* ((bounds (org-sm--body-bounds))
+              (body   (buffer-substring-no-properties (car bounds) (cdr bounds))))
+         (if (string-match-p org-sm--cloze-regexp body)
+             (message "org-sm: marked as cloze — due %s" due)
+           (message "org-sm: marked as cloze (⚠ no ~cloze~ markers found) — due %s" due)))))))
 
 ;;;; ---- Extract -------------------------------------------------------------
 
@@ -249,9 +322,11 @@ The selected region in the parent is replaced with an [[id:...][text]] link."
          (level    (org-current-level))
          (due      (format-time-string
                     "%F" (time-add (current-time) (days-to-time 1)))))
-    ;; 1. Replace selection with id link in parent
+    ;; 1. Replace selection with id link in parent.
+    ;;    The link description must be single-line; use the same truncated
+    ;;    title that the child heading will carry.
     (delete-region sel-beg sel-end)
-    (insert (format "[[id:%s][%s]]" id selected))
+    (insert (format "[[id:%s][%s]]" id (org-sm--truncate-title selected)))
     ;; 2. Insert child heading after the current subtree
     (save-excursion
       (org-end-of-subtree t t)
@@ -307,7 +382,7 @@ Opens a fresh agenda if none exists; calls `org-agenda-redo' if stale."
           (error "org-sm: agenda buffer not found after opening")))))
 
 (defun org-sm--markers-from-agenda (buf)
-  "Return a list of org-hd-markers from agenda buffer BUF, in display order."
+  "Return a deduplicated list of org-hd-markers from agenda buffer BUF, in display order."
   (with-current-buffer buf
     (let (markers)
       (save-excursion
@@ -316,7 +391,7 @@ Opens a fresh agenda if none exists; calls `org-agenda-redo' if stale."
           (when-let* ((m (get-text-property (point) 'org-hd-marker)))
             (push m markers))
           (forward-line 1)))
-      (nreverse markers))))
+      (cl-delete-duplicates (nreverse markers) :test #'equal))))
 
 (defun org-sm--goto-marker (marker)
   "Jump to MARKER, narrow to its subtree, and recenter.
@@ -356,15 +431,16 @@ PREV-RESULT, when non-nil, is a short string describing the last action.
 Skips any queued marker that no longer points to a valid SRS heading
 \(e.g. the heading was deleted or refiled during the session)."
   (when (buffer-narrowed-p) (widen))
-  (if (null org-sm--queue)
-      (message "org-sm: session complete — nothing more due 🎉%s"
-               (if prev-result (format "  (last: %s)" prev-result) ""))
-    (let ((marker (pop org-sm--queue)))
+  (let (marker found)
+    (while (and org-sm--queue (not found))
+      (setq marker (pop org-sm--queue))
       (org-sm--goto-marker marker)
-      (if (org-sm-type)
-          (org-sm--show-review-prompt prev-result)
-        ;; Heading was deleted/refiled; skip silently and try the next one.
-        (org-sm--advance prev-result)))))
+      (when (org-sm-type)
+        (setq found t)))
+    (if found
+        (org-sm--show-review-prompt prev-result)
+      (message "org-sm: session complete — nothing more due 🎉%s"
+               (if prev-result (format "  (last: %s)" prev-result) "")))))
 
 (defun org-sm--show-review-prompt (&optional prev-result)
   "Display a usage hint for the current item type.
@@ -407,9 +483,8 @@ For cloze headings, three-step flow:
   (interactive)
   (pcase (or (org-sm-type) (user-error "Not on an SRS heading"))
     ('topic
-     (org-sm--topic-review)
-     (org-sm--advance (format "topic → due in %s days"
-                               (org-sm--topic-last-interval))))
+     (let ((ivl (org-sm--topic-review)))
+       (org-sm--advance (format "topic → due in %d days" ivl))))
     ('cloze
      (pcase org-sm--cloze-state
        ('hidden
@@ -494,6 +569,7 @@ first, so high-priority topics naturally surface before low-priority ones."
 
 (defvar org-sm-mode-map
   (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "C-c s m")   #'org-sm-mark)
     (define-key m (kbd "C-c s e")   #'org-sm-extract)
     (define-key m (kbd "C-c s SPC") #'org-sm-review-confirm)
     (define-key m (kbd "C-c s d")   #'org-sm-dismiss)
