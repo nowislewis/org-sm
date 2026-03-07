@@ -252,8 +252,9 @@ moves point into the PROPERTIES drawer."
 ;;;; ---- Mark / Extract ------------------------------------------------------
 
 ;;;###autoload
-(defun org-sm-item-mark ()
-  "Mark current heading as a topic or cloze SRS item."
+(defun org-sm-item-mark (&optional type)
+  "Mark current heading as a topic or cloze SRS item.
+TYPE is a symbol (`topic' or `cloze'); when nil, prompt interactively."
   (interactive)
   (require 'org)
   (require 'org-id)
@@ -261,7 +262,7 @@ moves point into the PROPERTIES drawer."
   (when (org-sm-type)
     (unless (yes-or-no-p (format "Already a %s item.  Re-mark and reset? " (org-sm-type)))
       (user-error "Aborted")))
-  (let ((type (intern (completing-read "Mark as: " '("topic" "cloze") nil t))))
+  (let ((type (or type (intern (completing-read "Mark as: " '("topic" "cloze") nil t))))))
     (org-sm--schedule (time-add (current-time) (days-to-time 1)))
     (org-id-get-create)
     (org-sm--init-item type)
