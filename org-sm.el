@@ -167,13 +167,13 @@ Uses scheduled time as interval reference to avoid early/late review distortion.
   "Face for {{cloze}} markers during normal reading."
   :group 'org-sm)
 
-(defun org-sm--cloze-font-lock-keywords ()
-  "Return font-lock keywords that render {{cloze}} markers."
+(defvar org-sm--font-lock-keywords
   (let ((re "\\({{\\)\\([^}\n]+\\)\\(}}\\)"))
     `((,re
        (1 '(face nil display "") prepend)   ; hide "{{"
        (2 'org-sm-cloze-face    prepend)    ; show answer with face
-       (3 '(face nil display "") prepend))))) ; hide "}}"
+       (3 '(face nil display "") prepend)))) ; hide "}}"
+  "Font-lock keywords for {{cloze}} markers; cached for reliable add/remove.")
 
 (defun org-sm--cloze-overlays ()
   "Return all org-sm cloze overlays in the current entry."
@@ -217,15 +217,8 @@ Uses scheduled time as interval reference to avoid early/late review distortion.
           (org-entry-end-position))))
 
 (defun org-sm--body-clean (raw)
-  "Strip common leading indentation from RAW and trim surrounding whitespace."
-  (with-temp-buffer
-    (insert (string-trim raw))
-    (indent-rigidly (point-min) (point-max)
-                    (- (save-excursion
-                         (goto-char (point-min))
-                         (skip-chars-forward " \t")
-                         (current-column))))
-    (string-trim (buffer-string))))
+  "Trim surrounding whitespace from RAW."
+  (string-trim raw))
 
 (defun org-sm--cloze-markers-p ()
   "Return non-nil if current heading body contains {{cloze}} markers."
@@ -240,7 +233,9 @@ Uses scheduled time as interval reference to avoid early/late review distortion.
 
 (defconst org-sm--all-srs-props
   '("SRS_LAST" "SRS_STATE" "SRS_STABILITY" "SRS_DIFFICULTY" "SRS_STEP")
-  "All SRS scheduling properties; cleared on re-mark.")
+  "All SRS scheduling properties cleared on re-mark.
+SRS_TYPE is intentionally excluded: it is overwritten by `org-sm--init-item',
+not deleted, so that re-marking always sets a valid type.")
 
 (defun org-sm--init-item (type)
   "Write SRS_TYPE and type-specific properties for TYPE (symbol).
@@ -381,10 +376,9 @@ The selected region in the parent is replaced with an [[id:...][title]] link.
   "Show review hint in the echo area, optionally prefixed with PREV result."
   (let ((pre (if prev (format "✓ %s  |  " prev) "")))
     (pcase (org-sm-type)
-      ('cloze (message "org-sm %s[%d left] cloze: %s" pre (length org-sm--queue)
-                       (if (eq org-sm--cloze-state 'hidden)
-                           "SPC to reveal" "SPC to rate: a/h/g/e")))
-      ('topic (message "org-sm %s[%d left] topic: SPC to confirm" pre (length org-sm--queue)))
+      ('cloze (message "org-sm %s[%d left] cloze: %s — M-x review-confirm" pre (length org-sm--queue)
+                       (if (eq org-sm--cloze-state 'hidden) "hidden" "revealed")))
+      ('topic (message "org-sm %s[%d left] topic — M-x review-confirm" pre (length org-sm--queue)))
       (_      (message "org-sm: not an SRS heading")))))
 
 (defun org-sm--advance (&optional prev)
@@ -421,6 +415,7 @@ PREV is a string describing the last action, shown in the echo area."
 (defun org-sm-review-confirm ()
   "Confirm topic read or advance cloze state, then move to next item."
   (interactive)
+  (org-sm--ensure-scheduler)
   (unless (or org-sm--queue org-sm--cloze-state)
     (user-error "No active review session — call org-sm-review-start"))
   (pcase (or (org-sm-type) (user-error "Not on an SRS heading"))
@@ -433,7 +428,7 @@ PREV is a string describing the last action, shown in the echo area."
        ('hidden
         (org-sm-cloze-reveal-overlays)
         (setq org-sm--cloze-state 'revealed)
-        (message "org-sm: revealed — SPC to rate"))
+        (message "org-sm: cloze revealed — edit if needed, M-x review-confirm to rate"))
        ('revealed
         (org-sm-cloze-remove-overlays)
         (let* ((card      (org-sm--read-card))
@@ -476,11 +471,16 @@ PREV is a string describing the last action, shown in the echo area."
 (defun org-sm-review-abort ()
   "Abort the current review session, cleaning up state and overlays."
   (interactive)
-  (unless (or org-sm--queue org-sm--cloze-state)
+  (unless (or org-sm--queue
+              (cl-some (lambda (b) (buffer-local-value 'org-sm--cloze-state b))
+                       (buffer-list)))
     (user-error "No active review session"))
   (setq org-sm--queue nil)
-  (setq org-sm--cloze-state nil)
-  (org-sm-cloze-remove-overlays)
+  (dolist (b (buffer-list))
+    (with-current-buffer b
+      (when org-sm--cloze-state
+        (org-sm-cloze-remove-overlays)
+        (setq org-sm--cloze-state nil))))
   (when (buffer-narrowed-p) (widen))
   (message "org-sm: review aborted"))
 
@@ -500,8 +500,8 @@ PREV is a string describing the last action, shown in the echo area."
   :lighter " SRS"
   :group 'org-sm
   (if org-sm-mode
-      (font-lock-add-keywords nil (org-sm--cloze-font-lock-keywords) 'append)
-    (font-lock-remove-keywords nil (org-sm--cloze-font-lock-keywords)))
+      (font-lock-add-keywords nil org-sm--font-lock-keywords 'append)
+    (font-lock-remove-keywords nil org-sm--font-lock-keywords))
   (when (fboundp 'font-lock-flush) (font-lock-flush)))
 
 (provide 'org-sm)
