@@ -23,7 +23,7 @@ Requires Emacs 29.1+, org 9.6+, and the [[https://github.com/bohonghuang/fsrs.el
 
 #+begin_src elisp
 (use-package org-sm
-  :commands (org-sm-start-review org-sm-mark org-sm-extract org-sm-list)
+  :commands (org-sm-review-start org-sm-item-mark org-sm-item-extract org-sm-review-list)
   :hook (org-mode . org-sm-mode)
   :config
   ;; Scan a dedicated directory instead of org-agenda-files
@@ -43,34 +43,38 @@ Suggested keybindings:
 
 #+begin_src elisp
 (with-eval-after-load 'org-sm
-  (define-key org-mode-map (kbd "C-c s m")   #'org-sm-mark)
-  (define-key org-mode-map (kbd "C-c s x")   #'org-sm-extract)
-  (define-key org-mode-map (kbd "C-c s r")   #'org-sm-start-review)
+  (define-key org-mode-map (kbd "C-c s m")   #'org-sm-item-mark)
+  (define-key org-mode-map (kbd "C-c s x")   #'org-sm-item-extract)
+  (define-key org-mode-map (kbd "C-c s r")   #'org-sm-review-start)
   (define-key org-mode-map (kbd "C-c s SPC") #'org-sm-review-confirm)
-  (define-key org-mode-map (kbd "C-c s d")   #'org-sm-dismiss)
-  (define-key org-mode-map (kbd "C-c s l")   #'org-sm-list))
+  (define-key org-mode-map (kbd "C-c s d")   #'org-sm-item-dismiss)
+  (define-key org-mode-map (kbd "C-c s q")   #'org-sm-review-abort)
+  (define-key org-mode-map (kbd "C-c s l")   #'org-sm-review-list))
 #+end_src
 
 * Commands
 
 | Command                 | Description                                     |
 |-------------------------+-------------------------------------------------|
-| ~org-sm-mark~           | Mark current heading as topic or cloze          |
-| ~org-sm-extract~        | Extract selected region as child topic or cloze |
-| ~org-sm-start-review~   | Start review session                            |
-| ~org-sm-review-confirm~ | Confirm topic read / advance cloze state        |
-| ~org-sm-dismiss~        | Remove current item from SRS                    |
-| ~org-sm-list~           | Browse all SRS items                            |
+| Command                  | Description                                     |
+|--------------------------+-------------------------------------------------|
+| ~org-sm-item-mark~       | Mark current heading as topic or cloze          |
+| ~org-sm-item-extract~    | Extract selected region as child topic or cloze |
+| ~org-sm-item-dismiss~    | Remove current item from SRS                    |
+| ~org-sm-review-start~    | Start review session                            |
+| ~org-sm-review-confirm~  | Confirm topic read / advance cloze state        |
+| ~org-sm-review-abort~    | Abort current review session                    |
+| ~org-sm-review-list~     | Browse all SRS items                            |
 
 * Review Flow
 
 *Topic:*
-1. ~org-sm-start-review~ — opens due item, narrowed to its heading body.
+1. ~org-sm-review-start~ — opens due item, narrowed to its heading body.
 2. Read the content.
 3. ~org-sm-review-confirm~ — reschedules and moves to next item.
 
 *Cloze:*
-1. ~org-sm-start-review~ — opens due item with answers hidden as ~[___]~.
+1. ~org-sm-review-start~ — opens due item with answers hidden as ~[___]~.
 2. ~org-sm-review-confirm~ — reveals answers as ~[answer]~.
 3. ~org-sm-review-confirm~ — rate: again / hard / good / easy.
 
@@ -79,7 +83,7 @@ early or late reviews do not distort future spacing.
 
 * Extract
 
-Select any text and call ~org-sm-extract~:
+Select any text and call ~org-sm-item-extract~:
 
 - *topic* — selected text becomes the child heading's body.
 - *cloze* — full parent body is copied to the child; selection is wrapped as ~{{answer}}~.
@@ -97,4 +101,4 @@ The selection in the parent is replaced with an ~[[id:...][title]]~ link.
 | ~SRS_DIFFICULTY~ | float             | FSRS difficulty (cloze only)    |
 | ~SRS_STEP~       | int               | FSRS learning step (cloze only) |
 
-~SCHEDULED~ is the due date for both types, used directly by ~org-sm-start-review~.
+~SCHEDULED~ is the due date for both types, used directly by ~org-sm-review-start~.

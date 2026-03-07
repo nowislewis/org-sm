@@ -12,15 +12,16 @@
 ;;   cloze  - memory testing with {{cloze}} markers, FSRS scheduling.
 ;;
 ;; Commands:
-;;   org-sm-mark           - mark heading as topic or cloze
-;;   org-sm-extract        - extract region as child topic or cloze
-;;   org-sm-start-review   - start review session
+;;   org-sm-item-mark      - mark heading as topic or cloze
+;;   org-sm-item-extract   - extract region as child topic or cloze
+;;   org-sm-item-dismiss   - remove item from SRS
+;;   org-sm-review-start   - start review session
 ;;   org-sm-review-confirm - confirm topic read / advance cloze state
-;;   org-sm-dismiss        - dismiss current item
-;;   org-sm-list           - browse all SRS items
+;;   org-sm-review-abort   - abort review session
+;;   org-sm-review-list    - browse all SRS items
 ;;
 ;;   (use-package org-sm
-;;     :commands (org-sm-start-review org-sm-mark org-sm-extract org-sm-list)
+;;     :commands (org-sm-review-start org-sm-item-mark org-sm-item-extract org-sm-review-list)
 ;;     :hook (org-mode . org-sm-mode))
 
 ;;; Code:
@@ -75,7 +76,7 @@ that `org-schedule' (called internally) would climb to the wrong heading."
 ;;;; ---- FSRS ----------------------------------------------------------------
 
 (defvar org-sm--scheduler nil
-  "FSRS scheduler instance, initialized on first call to `org-sm-start-review'.")
+  "FSRS scheduler instance, initialized on first call to `org-sm-review-start'.")
 
 (defun org-sm--ensure-scheduler ()
   "Initialize `org-sm--scheduler' if not already done."
@@ -256,7 +257,7 @@ moves point into the PROPERTIES drawer."
 ;;;; ---- Mark / Extract ------------------------------------------------------
 
 ;;;###autoload
-(defun org-sm-mark ()
+(defun org-sm-item-mark ()
   "Mark current heading as a topic or cloze SRS item."
   (interactive)
   (require 'org)
@@ -274,7 +275,7 @@ moves point into the PROPERTIES drawer."
                  " (⚠ no {{cloze}} markers found)" ""))))
 
 ;;;###autoload
-(defun org-sm-extract ()
+(defun org-sm-item-extract ()
   "Extract selected region as a child topic or cloze heading.
 
 The selected region in the parent is replaced with an [[id:...][title]] link.
@@ -403,7 +404,7 @@ PREV is a string describing the last action, shown in the echo area."
       (message "org-sm: done 󱁖 %s" (if prev (format "  (last: %s)" prev) "")))))
 
 ;;;###autoload
-(defun org-sm-start-review ()
+(defun org-sm-review-start ()
   "Collect all due SRS items and start a review session."
   (interactive)
   (require 'org)
@@ -421,7 +422,7 @@ PREV is a string describing the last action, shown in the echo area."
   "Confirm topic read or advance cloze state, then move to next item."
   (interactive)
   (unless (or org-sm--queue org-sm--cloze-state)
-    (user-error "No active review session — call org-sm-start-review"))
+    (user-error "No active review session — call org-sm-review-start"))
   (pcase (or (org-sm-type) (user-error "Not on an SRS heading"))
     ('topic
      (let* ((a   (org-sm--topic-afactor))
@@ -463,7 +464,7 @@ PREV is a string describing the last action, shown in the echo area."
           (org-sm--advance (format "cloze %s → %s" rating next-due))))))))
 
 ;;;###autoload
-(defun org-sm-dismiss ()
+(defun org-sm-item-dismiss ()
   "Dismiss current SRS item by removing its SRS_TYPE property."
   (interactive)
   (unless (org-sm-type) (user-error "Not on an SRS heading"))
@@ -472,7 +473,19 @@ PREV is a string describing the last action, shown in the echo area."
   (org-sm--advance "dismissed"))
 
 ;;;###autoload
-(defun org-sm-list ()
+(defun org-sm-review-abort ()
+  "Abort the current review session, cleaning up state and overlays."
+  (interactive)
+  (unless (or org-sm--queue org-sm--cloze-state)
+    (user-error "No active review session"))
+  (setq org-sm--queue nil)
+  (setq org-sm--cloze-state nil)
+  (org-sm-cloze-remove-overlays)
+  (when (buffer-narrowed-p) (widen))
+  (message "org-sm: review aborted"))
+
+;;;###autoload
+(defun org-sm-review-list ()
   "Browse all SRS items across `org-sm--files' in an agenda-style buffer."
   (interactive)
   (require 'org-agenda)
