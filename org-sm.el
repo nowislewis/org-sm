@@ -8,7 +8,7 @@
 ;;
 ;; Minimal incremental reading for org-mode.  Two card types:
 ;;   topic  - repeated reading, A-Factor scheduling, no grading.
-;;            org priority [#A]/[#B]/[#C] controls interval growth.
+;;            org priority [#A]/[#B]/[#C] controls interval growth rate.
 ;;   cloze  - memory testing with {{cloze}} markers, FSRS scheduling.
 ;;
 ;; Commands:
@@ -17,18 +17,15 @@
 ;;   org-sm-start-review   - start review session
 ;;   org-sm-review-confirm - confirm topic read / advance cloze state
 ;;   org-sm-dismiss        - dismiss current item
+;;   org-sm-list           - browse all SRS items
 ;;
 ;;   (use-package org-sm
-;;     :commands (org-sm-start-review org-sm-mark org-sm-extract)
+;;     :commands (org-sm-start-review org-sm-mark org-sm-extract org-sm-list)
 ;;     :hook (org-mode . org-sm-mode))
 
 ;;; Code:
 
 (require 'cl-lib)
-
-(defvar org-agenda-files)
-(defvar org-agenda-custom-commands)
-(defvar org-agenda-sticky)
 
 ;;;; ---- Customization -------------------------------------------------------
 
@@ -49,10 +46,6 @@
   "Prefix string prepended to auto-generated cloze heading titles."
   :type 'string)
 
-(defcustom org-sm-initial-afactor 1.2
-  "Initial A-Factor for new topic cards."
-  :type 'float)
-
 (defcustom org-sm-directory nil
   "Directory to scan for SRS org files.  Nil falls back to `org-agenda-files'."
   :type '(choice (const nil) directory))
@@ -61,9 +54,37 @@
   "Regexp to filter files under `org-sm-directory'."
   :type 'regexp)
 
+;;;; ---- File list -----------------------------------------------------------
+
+(defun org-sm--files ()
+  "Return the list of org files to scan for SRS items."
+  (if org-sm-directory
+      (seq-filter (lambda (f) (string-match-p org-sm-file-filter-regexp f))
+                  (directory-files-recursively org-sm-directory "\\.org$"))
+    (bound-and-true-p org-agenda-files)))
+
+;;;; ---- Schedule helper -----------------------------------------------------
+
+(defun org-sm--schedule (time)
+  "Set SCHEDULED of current heading to TIME.
+Must be called before any `org-entry-put' / `org-set-property' on the same
+heading, because those functions move point into the PROPERTIES drawer; after
+that `org-schedule' (called internally) would climb to the wrong heading."
+  (org-schedule nil (format-time-string "%F %a %H:%M" time)))
+
 ;;;; ---- FSRS ----------------------------------------------------------------
 
-(defvar org-sm--scheduler nil)
+(defvar org-sm--scheduler nil
+  "FSRS scheduler instance, initialized on first call to `org-sm-start-review'.")
+
+(defun org-sm--ensure-scheduler ()
+  "Initialize `org-sm--scheduler' if not already done."
+  (unless org-sm--scheduler
+    (require 'fsrs)
+    (setq org-sm--scheduler
+          (fsrs-make-scheduler :desired-retention 0.9
+                               :learning-steps    '((1 :minute) (10 :minute))
+                               :enable-fuzzing-p  t))))
 
 (defun org-sm--read-card ()
   "Build an `fsrs-card' from the current heading's properties."
@@ -84,6 +105,8 @@
 
 (defun org-sm--write-card (card)
   "Persist CARD to current heading's properties and SCHEDULED."
+  ;; Schedule first — org-entry-put moves point into PROPERTIES drawer.
+  (org-sm--schedule (parse-iso8601-time-string (fsrs-card-due card)))
   (org-entry-put nil "SRS_STATE" (prin1-to-string (fsrs-card-state card)))
   (org-sm--put-or-delete "SRS_STABILITY"
                          (when-let* ((s (fsrs-card-stability card))) (number-to-string s)))
@@ -91,54 +114,47 @@
                          (when-let* ((d (fsrs-card-difficulty card))) (number-to-string d)))
   (org-sm--put-or-delete "SRS_LAST" (fsrs-card-last-review card))
   (org-sm--put-or-delete "SRS_STEP"
-                         (when-let* ((s (fsrs-card-step card))) (number-to-string s)))
-  (org-sm--schedule (parse-iso8601-time-string (fsrs-card-due card))))
+                         (when-let* ((s (fsrs-card-step card))) (number-to-string s))))
 
 ;;;; ---- Review log ----------------------------------------------------------
 
-(defun org-sm--log-review (type &optional rating)
-  "Log a review entry for TYPE (symbol) with optional RATING."
+(defun org-sm--log-review (type &optional rating extra)
+  "Log a review entry for TYPE (symbol) with optional RATING and EXTRA string."
   (org-with-wide-buffer
    (let* ((ts   (format-time-string (org-time-stamp-format 'long 'inactive)))
           (name (symbol-name type))
-          (line (if rating
-                    (format "- review %s  %s  %s\n" name rating ts)
-                  (format "- %s  %s\n" name ts))))
+          (line (concat "- " name
+                        (when rating (format "  %s" rating))
+                        (when extra  (format "  %s" extra))
+                        (format "  %s\n" ts))))
      (goto-char (org-log-beginning t))
      (insert line))))
 
 ;;;; ---- Topic scheduling ----------------------------------------------------
 
-(defun org-sm--topic-review ()
-  "Reschedule current topic via A-Factor; return new interval in days.
-Uses scheduled time (not now) as interval reference, so early/late
-reviews don't distort the interval.  Priority controls A-Factor growth:
-  [#A] floor=1.2, no growth   [#B] ceil=2.0, gentle   [#C] ceil=6.9, fast"
-  (let* ((a    (string-to-number (or (org-entry-get nil "SRS_AFACTOR")
-                                     (number-to-string org-sm-initial-afactor))))
-         (last (org-entry-get nil "SRS_LAST"))
-         (ref-time (or (org-get-scheduled-time nil) (current-time)))
-         (ivl-actual (if last
-                         (max 1 (round (/ (float-time
-                                           (time-subtract ref-time
-                                                          (parse-iso8601-time-string last)))
-                                          86400.0)))
-                       1))
-         (p    (org-get-priority (org-get-heading t t t t)))
-         (pri-params (cond ((>= p 2000) '(1.2  1.00  0.00))
-                           ((>= p 1000) '(2.0  1.04 -0.02))
-                           (t           '(6.9  1.18  0.00))))
-         (target-ceil (nth 0 pri-params))
-         (growth      (nth 1 pri-params))
-         (offset      (nth 2 pri-params))
-         (new-a (if (> a target-ceil)
-                    (max target-ceil (+ a (* 0.4 (- target-ceil a))))
-                  (max 1.2 (min target-ceil (+ (* growth a) offset)))))
-         (ivl   (max 1 (ceiling (* ivl-actual new-a)))))
-    (org-entry-put nil "SRS_AFACTOR" (number-to-string new-a))
-    (org-entry-put nil "SRS_LAST"    (format-time-string "%FT%TZ" (current-time) "UTC0"))
+(defun org-sm--topic-afactor ()
+  "Return A-Factor for current heading derived from org priority.
+  [#A] → 1.2 (slow growth, review frequently)
+  [#B] → 1.5
+  [#C] or none → 1.8 (fast growth, review less)"
+  (pcase (org-entry-get nil "PRIORITY")
+    ("A" 1.2)
+    ("B" 1.5)
+    (_   1.8)))
+
+(defun org-sm--topic-review (a)
+  "Reschedule current topic with A-Factor A; return new interval in days.
+Uses scheduled time as interval reference to avoid early/late review distortion."
+  (let* ((last (org-entry-get nil "SRS_LAST"))
+         (ref  (or (org-get-scheduled-time nil) (current-time)))
+         (ivl  (max 1 (round (* a (if last
+                                      (max 1 (/ (float-time (time-subtract ref (parse-iso8601-time-string last)))
+                                                86400.0))
+                                    1))))))
+    ;; Schedule first — org-entry-put moves point into PROPERTIES drawer.
     (org-sm--schedule (time-add (current-time) (days-to-time ivl)))
-    (org-sm--log-review 'topic)
+    (org-entry-put nil "SRS_LAST" (format-time-string "%FT%TZ" (current-time) "UTC0"))
+    (org-sm--log-review 'topic nil (format "a=%.1f" a))
     ivl))
 
 ;;;; ---- Cloze overlays ------------------------------------------------------
@@ -151,14 +167,15 @@ reviews don't distort the interval.  Priority controls A-Factor growth:
   :group 'org-sm)
 
 (defun org-sm--cloze-font-lock-keywords ()
-  ;; Hide the {{ and }} delimiters; show the answer with cloze face.
+  "Return font-lock keywords that render {{cloze}} markers."
   (let ((re "\\({{\\)\\([^}\n]+\\)\\(}}\\)"))
     `((,re
        (1 '(face nil display "") prepend)   ; hide "{{"
        (2 'org-sm-cloze-face    prepend)    ; show answer with face
-       (3 '(face nil display "") prepend)))))  ; hide "}}"
+       (3 '(face nil display "") prepend))))) ; hide "}}"
 
 (defun org-sm--cloze-overlays ()
+  "Return all org-sm cloze overlays in the current entry."
   (seq-filter (lambda (ov) (eq (overlay-get ov 'category) 'org-sm-cloze))
               (overlays-in (org-entry-beginning-position) (org-entry-end-position))))
 
@@ -192,7 +209,7 @@ reviews don't distort the interval.  Priority controls A-Factor growth:
   (when-let* ((v (org-entry-get nil "SRS_TYPE"))) (intern v)))
 
 (defun org-sm--body-bounds ()
-  "Return (start . end) of current heading's body."
+  "Return (start . end) of current heading's body (excluding meta-data)."
   (save-excursion
     (org-back-to-heading t)
     (cons (progn (org-end-of-meta-data t) (point))
@@ -220,23 +237,19 @@ reviews don't distort the interval.  Priority controls A-Factor growth:
   (let ((flat (replace-regexp-in-string "[ \t]*\n[ \t]*" " " (string-trim str))))
     (truncate-string-to-width flat org-sm-title-max-length nil nil "…")))
 
-(defun org-sm--schedule (time)
-  "Set SCHEDULED of current heading to TIME."
-  (org-schedule nil (format-time-string "%F %a %H:%M" time)))
-
 (defconst org-sm--all-srs-props
-  '("SRS_AFACTOR" "SRS_LAST" "SRS_STATE" "SRS_STABILITY" "SRS_DIFFICULTY" "SRS_STEP")
-  "All SRS properties across card types; cleared on re-mark.")
+  '("SRS_LAST" "SRS_STATE" "SRS_STABILITY" "SRS_DIFFICULTY" "SRS_STEP")
+  "All SRS scheduling properties; cleared on re-mark.")
 
 (defun org-sm--init-item (type)
-  "Initialize TYPE (symbol) SRS properties and schedule to tomorrow."
+  "Write SRS_TYPE and type-specific properties for TYPE (symbol).
+Caller must call `org-sm--schedule' before this function, as `org-entry-put'
+moves point into the PROPERTIES drawer."
   (org-entry-put nil "SRS_TYPE" (symbol-name type))
-  (org-sm--schedule (time-add (current-time) (days-to-time 1)))
   (dolist (p org-sm--all-srs-props) (org-delete-property p))
   (pcase type
     ('topic
-     (org-entry-put nil "SRS_AFACTOR" (number-to-string org-sm-initial-afactor))
-     (org-entry-put nil "SRS_LAST"    (format-time-string "%FT%TZ" (current-time) "UTC0")))
+     (org-entry-put nil "SRS_LAST" (format-time-string "%FT%TZ" (current-time) "UTC0")))
     ('cloze
      (org-entry-put nil "SRS_STATE" ":learning"))))
 
@@ -253,6 +266,7 @@ reviews don't distort the interval.  Priority controls A-Factor growth:
     (unless (yes-or-no-p (format "Already a %s item.  Re-mark and reset? " (org-sm-type)))
       (user-error "Aborted")))
   (let ((type (intern (completing-read "Mark as: " '("topic" "cloze") nil t))))
+    (org-sm--schedule (time-add (current-time) (days-to-time 1)))
     (org-id-get-create)
     (org-sm--init-item type)
     (message "org-sm: marked as %s%s — due tomorrow" type
@@ -272,7 +286,7 @@ The selected region in the parent is replaced with an [[id:...][title]] link.
   (require 'org)
   (require 'org-id)
   (unless (region-active-p) (user-error "Select text to extract first"))
-  ;; Read everything from the buffer before completing-read moves point.
+  ;; Capture all buffer state before any minibuffer interaction moves point.
   (let* ((sel-beg    (region-beginning))
          (sel-end    (region-end))
          (selected   (buffer-substring-no-properties sel-beg sel-end))
@@ -280,7 +294,6 @@ The selected region in the parent is replaced with an [[id:...][title]] link.
          (bounds     (org-sm--body-bounds))
          (body-raw   (buffer-substring-no-properties (car bounds) (cdr bounds)))
          (sel-offset (- sel-beg (car bounds)))
-         ;; Minibuffer interaction happens here, after all buffer reads.
          (type       (intern (completing-read "Extract as: " '("topic" "cloze") nil t)))
          (id         (org-id-new))
          (title      (pcase type
@@ -295,26 +308,23 @@ The selected region in the parent is replaced with an [[id:...][title]] link.
                                         (format "{{%s}}" selected)
                                         (substring body-raw (+ sel-offset
                                                                (length selected)))))))))
-    ;; Replace selection in parent with id link.
-    ;; Link description uses the original selected text so the parent body
-    ;; remains readable and coherent (not the prefixed/truncated heading title).
+    ;; Replace selection in parent with a readable id link.
     (delete-region sel-beg sel-end)
     (insert (format "[[id:%s][%s]]" id (org-sm--truncate-title selected)))
-    ;; Insert child heading at end of subtree.
+    ;; Append child heading at end of current subtree.
     (save-excursion
       (org-end-of-subtree t t)
       (unless (bolp) (insert "\n"))
       (org-insert-heading nil t (1+ level))
       (insert title)
-      (newline)
-      ;; Pin the body insertion point now, before org-sm--init-item moves point.
-      (let ((body-marker (point-marker)))
-        (org-set-property "ID" id)
-        (org-sm--init-item type)
-        (goto-char body-marker)
-        (set-marker body-marker nil)
-        (org-end-of-meta-data t)
-        (insert child-body "\n"))))
+      ;; Schedule before org-set-property / org-entry-put: those functions move
+      ;; point into the PROPERTIES drawer, after which org-schedule would climb
+      ;; up to the previous sibling heading.
+      (org-sm--schedule (time-add (current-time) (days-to-time 1)))
+      (org-set-property "ID" id)
+      (org-sm--init-item type)
+      (org-end-of-meta-data t)
+      (insert child-body "\n")))
   (when (eq org-sm--cloze-state 'revealed)
     (org-sm-cloze-remove-overlays)
     (org-sm-cloze-apply-overlays)))
@@ -324,23 +334,41 @@ The selected region in the parent is replaced with an [[id:...][title]] link.
 (defvar org-sm--queue nil
   "Active review queue: list of markers consumed by `org-sm--advance'.")
 
-(defconst org-sm--agenda-key "r")
-
 (defvar-local org-sm--cloze-state nil
-  "Cloze state: nil | `hidden' | `revealed'.")
+  "Cloze review state for the current buffer: `hidden' or `revealed'.")
+
+(defun org-sm--due-p ()
+  "Return non-nil if current heading is a due SRS item."
+  (and (org-entry-get nil "SRS_TYPE")
+       (when-let* ((t_ (org-get-scheduled-time nil)))
+         (<= (float-time t_) (float-time)))))
+
+(defun org-sm--collect-due-markers ()
+  "Return markers for all due SRS items across `org-sm--files', sorted by priority."
+  (let ((results
+         (org-map-entries
+          (lambda ()
+            (when (org-sm--due-p)
+              (cons (org-get-priority (org-get-heading t t t t))
+                    (point-marker))))
+          nil
+          (org-sm--files))))
+    (mapcar #'cdr
+            (sort (delq nil results)
+                  (lambda (a b) (> (car a) (car b)))))))
 
 (defun org-sm--goto-marker (marker)
-  "Jump to MARKER, narrow to subtree, apply cloze overlays if needed."
-  (let ((buf (marker-buffer marker)))
-    (unless buf
-      ;; Marker is stale (agenda closed the visiting buffer).
-      ;; Try to re-visit the file via the marker's last known position.
-      (error "org-sm: marker is stale — try restarting the review session"))
-    (switch-to-buffer buf))
+  "Switch to MARKER's buffer, narrow to its subtree, set up cloze state."
+  (unless (marker-buffer marker)
+    (error "org-sm: stale marker — restart the review session"))
+  (switch-to-buffer (marker-buffer marker))
   (widen)
   (goto-char marker)
   (org-back-to-heading t)
-  (org-fold-show-subtree)
+  ;; Fold subtree first so any previously-open children are hidden, then
+  ;; re-open only the current entry's body (not its children).
+  (org-fold-hide-subtree)
+  (org-fold-show-entry)
   (org-narrow-to-subtree)
   (goto-char (point-min))
   (recenter 0)
@@ -349,7 +377,7 @@ The selected region in the parent is replaced with an [[id:...][title]] link.
     (setq org-sm--cloze-state 'hidden)))
 
 (defun org-sm--show-prompt (&optional prev)
-  "Show review hint for current item, optionally prefixed with PREV result."
+  "Show review hint in the echo area, optionally prefixed with PREV result."
   (let ((pre (if prev (format "✓ %s  |  " prev) "")))
     (pcase (org-sm-type)
       ('cloze (message "org-sm %s[%d left] cloze: %s" pre (length org-sm--queue)
@@ -359,54 +387,30 @@ The selected region in the parent is replaced with an [[id:...][title]] link.
       (_      (message "org-sm: not an SRS heading")))))
 
 (defun org-sm--advance (&optional prev)
-  "Advance to the next queued item, or end session.  PREV is last result string."
+  "Advance to the next queued item, or end the session.
+PREV is a string describing the last action, shown in the echo area."
   (when (buffer-narrowed-p) (widen))
   (let (found)
     (while (and org-sm--queue (not found))
       (let ((marker (pop org-sm--queue)))
-        (when-let* ((buf (marker-buffer marker)))
-          (when (buffer-live-p buf)
-            (org-sm--goto-marker marker)
-            (when (org-sm-type) (setq found t))))))
+        (if (marker-buffer marker)
+            (progn (org-sm--goto-marker marker)
+                   (when (org-sm-type) (setq found t)))
+          (message "org-sm: skipping stale marker"))))
     (if found
         (org-sm--show-prompt prev)
-      (message "org-sm: done 🎉%s" (if prev (format "  (last: %s)" prev) "")))))
-
-(defun org-sm--build-agenda-buf ()
-  "Build a fresh SRS agenda buffer and return it.
-Always rebuilds so that the caller's `org-agenda-files' binding is respected."
-  ;; Kill any stale agenda buffer first so org-agenda builds a clean one.
-  (when-let* ((old (get-buffer (format "*Org Agenda(%s)*" org-sm--agenda-key))))
-    (kill-buffer old))
-  (when-let* ((old (get-buffer "*Org Agenda*")))
-    (when (with-current-buffer old (derived-mode-p 'org-agenda-mode))
-      (kill-buffer old)))
-  (org-agenda nil org-sm--agenda-key)
-  (let ((buf (current-buffer)))
-    (unless (derived-mode-p 'org-agenda-mode)
-      (error "org-sm: agenda buffer not found after opening"))
-    buf))
+      (setq org-sm--cloze-state nil)
+      (message "org-sm: done 󱁖 %s" (if prev (format "  (last: %s)" prev) "")))))
 
 ;;;###autoload
 (defun org-sm-start-review ()
-  "Build review queue from agenda and start session."
+  "Collect all due SRS items and start a review session."
   (interactive)
-  (org-sm-setup)
-  (require 'org-agenda)
-  (let* ((org-agenda-files (if org-sm-directory
-                               (seq-filter
-                                (lambda (f) (string-match-p org-sm-file-filter-regexp f))
-                                (directory-files-recursively org-sm-directory "\\.org$"))
-                             (bound-and-true-p org-agenda-files)))
-         (buf     (org-sm--build-agenda-buf))
-         (markers (with-current-buffer buf
-                    (cl-delete-duplicates
-                     (cl-loop for pos from (point-min) below (point-max)
-                              for m = (get-text-property pos 'org-hd-marker)
-                              when m collect m)
-                     :test #'equal))))
+  (require 'org)
+  (org-sm--ensure-scheduler)
+  (let ((markers (org-sm--collect-due-markers)))
     (if (null markers)
-        (message "org-sm: nothing due 🎉")
+        (message "org-sm: nothing due 󱁖")
       (setq org-sm--queue (cdr markers))
       (message "org-sm: %d items due" (length markers))
       (org-sm--goto-marker (car markers))
@@ -414,11 +418,15 @@ Always rebuilds so that the caller's `org-agenda-files' binding is respected."
 
 ;;;###autoload
 (defun org-sm-review-confirm ()
-  "Confirm read (topic) or advance cloze state, then move to next item."
+  "Confirm topic read or advance cloze state, then move to next item."
   (interactive)
+  (unless (or org-sm--queue org-sm--cloze-state)
+    (user-error "No active review session — call org-sm-start-review"))
   (pcase (or (org-sm-type) (user-error "Not on an SRS heading"))
     ('topic
-     (org-sm--advance (format "topic → %d days" (org-sm--topic-review))))
+     (let* ((a   (org-sm--topic-afactor))
+            (ivl (org-sm--topic-review a)))
+       (org-sm--advance (format "topic [a=%.1f] → %d days" a ivl))))
     ('cloze
      (pcase org-sm--cloze-state
        ('hidden
@@ -426,81 +434,56 @@ Always rebuilds so that the caller's `org-agenda-files' binding is respected."
         (setq org-sm--cloze-state 'revealed)
         (message "org-sm: revealed — SPC to rate"))
        ('revealed
-        (setq org-sm--cloze-state nil)
         (org-sm-cloze-remove-overlays)
-        (let* ((choice (read-multiple-choice
-                        "Rate: " '((?a "again") (?h "hard") (?g "good") (?e "easy"))))
-               (rating (pcase (car choice) (?a :again) (?h :hard) (?g :good) (?e :easy)))
-               (card     (org-sm--read-card))
-               (new-card (cl-nth-value 0 (fsrs-scheduler-review-card
-                                          org-sm--scheduler card rating)))
-               (next-due (format-time-string "%F %H:%M"
-                                             (parse-iso8601-time-string
-                                              (fsrs-card-due new-card)))))
+        (let* ((card      (org-sm--read-card))
+               (now       (fsrs-now))
+               (previews  (mapcar
+                           (lambda (r)
+                             (let* ((rating  (caddr r))
+                                    (c       (cl-nth-value 0 (fsrs-scheduler-review-card
+                                                              org-sm--scheduler card rating)))
+                                    (secs    (fsrs-timestamp-difference (fsrs-card-due c) now))
+                                    (days    (fsrs-seconds-days secs))
+                                    (label   (if (< days 1)
+                                                 (format "%s(%dm)" (cadr r) (round (/ secs 60)))
+                                               (format "%s(%dd)" (cadr r) days))))
+                               (list (car r) label rating c)))
+                           '((?a "again" :again) (?h "hard" :hard)
+                             (?g "good"  :good)  (?e "easy" :easy))))
+               (choice    (read-multiple-choice
+                           "Rate: " (mapcar (lambda (p) (list (car p) (cadr p))) previews)))
+               (matched   (assq (car choice) previews))
+               (rating    (caddr matched))
+               (new-card  (cadddr matched))
+               (next-due  (format-time-string "%F %H:%M"
+                                              (parse-iso8601-time-string
+                                               (fsrs-card-due new-card)))))
           (org-sm--write-card new-card)
           (org-sm--log-review 'cloze rating)
-          (org-sm--advance (format "cloze %s → %s" rating next-due))))
-       (_
-        (org-sm-cloze-apply-overlays)
-        (setq org-sm--cloze-state 'hidden)
-        (message "org-sm: hidden — SPC to reveal"))))))
+          (org-sm--advance (format "cloze %s → %s" rating next-due))))))))
 
 ;;;###autoload
 (defun org-sm-dismiss ()
-  "Dismiss current SRS item (schedule to year 2999)."
+  "Dismiss current SRS item by removing its SRS_TYPE property."
   (interactive)
   (unless (org-sm-type) (user-error "Not on an SRS heading"))
   (org-sm--log-review 'dismissed)
-  (org-sm--schedule (parse-iso8601-time-string "2999-12-31T00:00:00Z"))
+  (org-delete-property "SRS_TYPE")
   (org-sm--advance "dismissed"))
 
-;;;; ---- Agenda --------------------------------------------------------------
-
-(defun org-sm--agenda-skip-non-srs ()
-  "Skip non-SRS or not-yet-due entries."
-  (when-let* ((m (org-get-at-bol 'org-hd-marker)))
-    (org-with-point-at m
-      (when (or (null (org-entry-get nil "SRS_TYPE"))
-                (when-let* ((t_ (org-get-scheduled-time nil)))
-                  (> (float-time t_) (float-time))))
-        (line-end-position)))))
-
-(defun org-sm--agenda-type-label ()
-  "Return type label for agenda prefix."
-  (when-let* ((m (org-get-at-bol 'org-hd-marker)))
-    (org-with-point-at m
-      (pcase (org-entry-get nil "SRS_TYPE")
-        ("topic" "[topic]") ("cloze" "[cloze]") (_ "")))))
-
-;;;; ---- Setup / Minor mode --------------------------------------------------
-
-(defvar org-sm--setup-done nil)
-
 ;;;###autoload
-(defun org-sm-setup ()
-  "Initialize FSRS scheduler and register SRS agenda view.  Idempotent."
+(defun org-sm-list ()
+  "Browse all SRS items across `org-sm--files' in an agenda-style buffer."
   (interactive)
-  (unless org-sm--setup-done
-    (require 'org-agenda)
-    (require 'fsrs)
-    (setq org-sm--scheduler
-          (fsrs-make-scheduler :desired-retention 0.9
-                               :learning-steps    '((1 :minute) (10 :minute))
-                               :enable-fuzzing-p  t))
-    (add-to-list 'org-agenda-custom-commands
-                 `(,org-sm--agenda-key "SRS Review"
-                   ((agenda ""
-                     ((org-agenda-span             'day)
-                      (org-agenda-start-on-weekday nil)
-                      (org-agenda-skip-function    '(org-sm--agenda-skip-non-srs))
-                      (org-agenda-sorting-strategy '(priority-down scheduled-up))
-                      (org-agenda-prefix-format    "  %-10(org-sm--agenda-type-label) "))))
-                   nil nil))
-    (setq org-sm--setup-done t)))
+  (require 'org-agenda)
+  (let ((org-agenda-files (org-sm--files)))
+    (org-tags-view nil "SRS_TYPE={.+}")))
+
+;;;; ---- Minor mode ----------------------------------------------------------
 
 ;;;###autoload
 (define-minor-mode org-sm-mode
-  "Font-lock {{cloze}} markers in org buffers."
+  "Font-lock {{cloze}} markers in org-mode buffers."
   :lighter " SRS"
   :group 'org-sm
   (if org-sm-mode
