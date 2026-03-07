@@ -163,7 +163,7 @@ Uses scheduled time as interval reference to avoid early/late review distortion.
 (defvar org-sm--cloze-regexp "{{\\([^}\n]+\\)}}"
   "Regexp matching {{cloze}} markup; group 1 is the answer.")
 
-(defface org-sm-cloze-face '((t :inherit bold :underline t))
+(defface org-sm-cloze-face '((t :inherit bold :box t))
   "Face for {{cloze}} markers during normal reading."
   :group 'org-sm)
 
