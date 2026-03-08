@@ -489,6 +489,12 @@ PREV is a string describing the last action, shown in the echo area."
   "Browse all SRS items across `org-sm--files' in an agenda-style buffer."
   (interactive)
   (require 'org-agenda)
+  ;; Declare these as special (dynamic) variables so the byte-compiler does not
+  ;; treat the `let' bindings below as lexical locals.  Without this, compiled
+  ;; code silently ignores the bindings and `org-tags-view' sees the global
+  ;; (empty) values instead of ours.
+  (defvar org-agenda-files)
+  (defvar org-agenda-prefix-format)
   (let ((org-agenda-files org-sm--files)
         (org-agenda-prefix-format
          '((tags . "%(org-sm--review-list-prefix)"))))
