@@ -489,6 +489,10 @@ PREV is a string describing the last action, shown in the echo area."
   (when (buffer-narrowed-p) (widen))
   (message "org-sm: review aborted"))
 
+(defun org-sm--review-list-prefix ()
+  "Return indentation string for current heading level (2 spaces per level)."
+  (make-string (* 2 (1- (or (org-current-level) 1))) ?\s))
+
 ;;;###autoload
 (defun org-sm-review-list ()
   "Browse all SRS items across `org-sm--files' in an agenda-style buffer."
@@ -496,9 +500,7 @@ PREV is a string describing the last action, shown in the echo area."
   (require 'org-agenda)
   (let ((org-agenda-files (org-sm--files))
         (org-agenda-prefix-format
-         `((tags . ,(lambda ()
-                      (let ((level (or (org-current-level) 1)))
-                        (make-string (* 2 (1- level)) ?\s))))))
+         '((tags . "%(org-sm--review-list-prefix)"))))
     (org-tags-view nil "SRS_TYPE={.+}")))
 
 ;;;; ---- Minor mode ----------------------------------------------------------
