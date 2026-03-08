@@ -20,9 +20,13 @@
 ;;   org-sm-review-abort   - abort review session
 ;;   org-sm-review-list    - browse all SRS items
 ;;
+;; Set `org-sm--files' to the list of org files you want org-sm to scan:
+;;
 ;;   (use-package org-sm
 ;;     :commands (org-sm-review-start org-sm-item-mark org-sm-item-extract org-sm-review-list)
-;;     :hook (org-mode . org-sm-mode))
+;;     :hook (org-mode . org-sm-mode)
+;;     :config
+;;     (setq org-sm--files (directory-files-recursively "~/org" "\\.org$")))
 
 ;;; Code:
 
@@ -47,22 +51,12 @@
   "Prefix string prepended to auto-generated cloze heading titles."
   :type 'string)
 
-(defcustom org-sm-directory nil
-  "Directory to scan for SRS org files.  Nil falls back to `org-agenda-files'."
-  :type '(choice (const nil) directory))
-
-(defcustom org-sm-file-filter-regexp "\\.org$"
-  "Regexp to filter files under `org-sm-directory'."
-  :type 'regexp)
-
 ;;;; ---- File list -----------------------------------------------------------
 
-(defun org-sm--files ()
-  "Return the list of org files to scan for SRS items."
-  (if org-sm-directory
-      (seq-filter (lambda (f) (string-match-p org-sm-file-filter-regexp f))
-                  (directory-files-recursively org-sm-directory "\\.org$"))
-    (when (boundp 'org-agenda-files) org-agenda-files)))
+(defvar org-sm--files nil
+  "List of org files for org-sm to scan for SRS items.
+Set this variable directly in your configuration, e.g.:
+  (setq org-sm--files (directory-files-recursively \"~/org\" \"\\\\.org$\"))")
 
 ;;;; ---- Schedule helper -----------------------------------------------------
 
@@ -206,7 +200,6 @@ Uses scheduled time as interval reference to avoid early/late review distortion.
 
 (defun org-sm-type ()
   "Return SRS_TYPE of current heading as a symbol, or nil."
-  (require 'org)
   (when-let* ((v (org-entry-get nil "SRS_TYPE"))) (intern v)))
 
 (defun org-sm--body-bounds ()
@@ -353,7 +346,7 @@ The selected region in the parent is replaced with an [[id:...][title]] link.
               (cons (org-get-priority (org-get-heading t t t t))
                     (point-marker))))
           nil
-          (org-sm--files))))
+          org-sm--files)))
     (mapcar #'cdr
             (sort (delq nil results)
                   (lambda (a b) (> (car a) (car b)))))))
@@ -411,10 +404,8 @@ PREV is a string describing the last action, shown in the echo area."
   (let ((markers (org-sm--collect-due-markers)))
     (if (null markers)
         (message "org-sm: nothing due 󱁖")
-      (setq org-sm--queue (cdr markers))
-      (message "org-sm: %d items due" (length markers))
-      (org-sm--goto-marker (car markers))
-      (org-sm--show-prompt))))
+      (setq org-sm--queue markers)
+      (org-sm--advance))))
 
 ;;;###autoload
 (defun org-sm-review-confirm ()
@@ -498,7 +489,7 @@ PREV is a string describing the last action, shown in the echo area."
   "Browse all SRS items across `org-sm--files' in an agenda-style buffer."
   (interactive)
   (require 'org-agenda)
-  (let ((org-agenda-files (org-sm--files))
+  (let ((org-agenda-files org-sm--files)
         (org-agenda-prefix-format
          '((tags . "%(org-sm--review-list-prefix)"))))
     (org-tags-view nil "SRS_TYPE={.+}")))

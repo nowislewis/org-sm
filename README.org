@@ -26,11 +26,8 @@ Requires Emacs 29.1+, org 9.6+, and the [[https://github.com/bohonghuang/fsrs.el
   :commands (org-sm-review-start org-sm-item-mark org-sm-item-extract org-sm-review-list)
   :hook (org-mode . org-sm-mode)
   :config
-  ;; Scan a dedicated directory instead of org-agenda-files
-  (setq org-sm-directory "~/notes/")
-
-  ;; Only include files matching this regexp (default: all .org files)
-  (setq org-sm-file-filter-regexp "[^/]*srs[^/]*\\.org$")
+  ;; Set the list of org files to scan for SRS items
+  (setq org-sm--files (directory-files-recursively "~/notes/" "\\.org$"))
 
   ;; Max length of auto-generated heading titles (default 40)
   (setq org-sm-title-max-length 50))
@@ -56,8 +53,6 @@ Suggested keybindings:
 
 | Command                 | Description                                     |
 |-------------------------+-------------------------------------------------|
-| Command                  | Description                                     |
-|--------------------------+-------------------------------------------------|
 | ~org-sm-item-mark~       | Mark current heading as topic or cloze          |
 | ~org-sm-item-extract~    | Extract selected region as child topic or cloze |
 | ~org-sm-item-dismiss~    | Remove current item from SRS                    |
