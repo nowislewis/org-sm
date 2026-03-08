@@ -62,7 +62,7 @@
   (if org-sm-directory
       (seq-filter (lambda (f) (string-match-p org-sm-file-filter-regexp f))
                   (directory-files-recursively org-sm-directory "\\.org$"))
-    (bound-and-true-p org-agenda-files)))
+    (when (boundp 'org-agenda-files) org-agenda-files)))
 
 ;;;; ---- Schedule helper -----------------------------------------------------
 
