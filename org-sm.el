@@ -481,8 +481,9 @@ PREV is a string describing the last action, shown in the echo area."
   (message "org-sm: review aborted"))
 
 (defun org-sm--review-list-prefix ()
-  "Return indentation string for current heading level (2 spaces per level)."
-  (make-string (* 2 (1- (or (org-current-level) 1))) ?\s))
+  "Return indentation string with │ guide lines for current heading level."
+  (let ((depth (1- (or (org-current-level) 1))))
+    (apply #'concat (make-list depth "│  "))))
 
 ;;;###autoload
 (defun org-sm-review-list ()
