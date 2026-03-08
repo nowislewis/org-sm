@@ -262,7 +262,11 @@ TYPE is a symbol (`topic' or `cloze'); when nil, prompt interactively."
   (when (org-sm-type)
     (unless (yes-or-no-p (format "Already a %s item.  Re-mark and reset? " (org-sm-type)))
       (user-error "Aborted")))
-  (let ((type (or type (intern (completing-read "Mark as: " '("topic" "cloze") nil t))))))
+  (let ((type (or type (intern (completing-read "Mark as: " '("topic" "cloze") nil t)))))
+    (org-edit-headline (concat (pcase type
+                                 ('topic org-sm-topic-prefix)
+                                 ('cloze org-sm-cloze-prefix))
+                               (org-get-heading t t t t)))
     (org-sm--schedule (time-add (current-time) (days-to-time 1)))
     (org-id-get-create)
     (org-sm--init-item type)
@@ -490,7 +494,11 @@ PREV is a string describing the last action, shown in the echo area."
   "Browse all SRS items across `org-sm--files' in an agenda-style buffer."
   (interactive)
   (require 'org-agenda)
-  (let ((org-agenda-files (org-sm--files)))
+  (let ((org-agenda-files (org-sm--files))
+        (org-agenda-prefix-format
+         `((tags . ,(lambda ()
+                      (let ((level (or (org-current-level) 1)))
+                        (make-string (* 2 (1- level)) ?\s))))))
     (org-tags-view nil "SRS_TYPE={.+}")))
 
 ;;;; ---- Minor mode ----------------------------------------------------------
