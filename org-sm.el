@@ -31,6 +31,10 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'org)
+(require 'org-id)
+(require 'org-macs)
+(require 'fsrs)
 
 ;;;; ---- Customization -------------------------------------------------------
 
@@ -75,7 +79,6 @@ that `org-schedule' (called internally) would climb to the wrong heading."
 (defun org-sm--ensure-scheduler ()
   "Initialize `org-sm--scheduler' if not already done."
   (unless org-sm--scheduler
-    (require 'fsrs)
     (setq org-sm--scheduler
           (fsrs-make-scheduler :desired-retention 0.9
                                :learning-steps    '((1 :minute) (10 :minute))
@@ -83,7 +86,6 @@ that `org-schedule' (called internally) would climb to the wrong heading."
 
 (defun org-sm--read-card ()
   "Build an `fsrs-card' from the current heading's properties."
-  (require 'fsrs)
   (fsrs-make-card
    :state       (or (when-let* ((s (org-entry-get nil "SRS_STATE"))) (read s)) :learning)
    :step        (if-let* ((s (org-entry-get nil "SRS_STEP"))) (string-to-number s) 0)
@@ -249,8 +251,6 @@ moves point into the PROPERTIES drawer."
   "Mark current heading as a topic or cloze SRS item.
 TYPE is a symbol (`topic' or `cloze'); when nil, prompt interactively."
   (interactive)
-  (require 'org)
-  (require 'org-id)
   (unless (org-at-heading-p) (org-back-to-heading t))
   (when (org-sm-type)
     (unless (yes-or-no-p (format "Already a %s item.  Re-mark and reset? " (org-sm-type)))
@@ -277,8 +277,6 @@ The selected region in the parent is replaced with an [[id:...][title]] link.
 - cloze: title is `org-sm-cloze-prefix' + first N chars of the parent body;
          child body is the full parent body with the selection wrapped as {{answer}}."
   (interactive)
-  (require 'org)
-  (require 'org-id)
   (unless (region-active-p) (user-error "Select text to extract first"))
   ;; Capture all buffer state before any minibuffer interaction moves point.
   (let* ((sel-beg    (region-beginning))
@@ -399,7 +397,6 @@ PREV is a string describing the last action, shown in the echo area."
 (defun org-sm-review-start ()
   "Collect all due SRS items and start a review session."
   (interactive)
-  (require 'org)
   (org-sm--ensure-scheduler)
   (let ((markers (org-sm--collect-due-markers)))
     (if (null markers)
