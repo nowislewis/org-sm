@@ -244,6 +244,48 @@ moves point into the PROPERTIES drawer."
     ('cloze
      (org-entry-put nil "SRS_STATE" ":learning"))))
 
+;;;; ---- Capture from clipboard ---------------------------------------------
+
+(defcustom org-sm-capture-file nil
+  "Target org file for `org-sm-capture-topic'."
+  :type '(choice (const nil) file)
+  :group 'org-sm)
+
+(defvar org-sm--pending-content ""
+  "Temporary content buffer for the capture template.")
+
+;;;###autoload
+(defun org-sm-setup-capture ()
+  "Register the org-sm topic capture template.
+Call once after setting `org-sm-capture-file'."
+  (add-to-list 'org-capture-templates
+               `("org-sm-topic" "org-sm topic" entry
+                 (file org-sm-capture-file)
+                 ,(concat "** %(org-sm--truncate-title org-sm--pending-content)\n"
+                          ":PROPERTIES:\n:CREATED: %U\n:END:\n%i")
+                 :before-finalize (lambda () (org-sm-item-mark 'topic)))))
+
+;;;###autoload
+(defun org-sm-capture-topic (&optional ask-file)
+  "Capture clipboard or region as a topic card.
+With prefix arg, prompt to update `org-sm-capture-file' first."
+  (interactive "P")
+  (when ask-file
+    (setq org-sm-capture-file
+          (read-file-name "Capture to file: " nil nil t nil
+                          (lambda (f) (string-match-p "\\.org$" f)))))
+  (unless org-sm-capture-file
+    (user-error "Set `org-sm-capture-file' and call `org-sm-setup-capture' first"))
+  (setq org-sm--pending-content
+        (if (use-region-p)
+            (prog1 (buffer-substring-no-properties (region-beginning) (region-end))
+              (deactivate-mark))
+          (or (and (fboundp 'gui-get-selection)
+                   (gui-get-selection 'CLIPBOARD 'STRING))
+              (ignore-errors (current-kill 0 t))
+              "")))
+  (org-capture nil "org-sm-topic"))
+
 ;;;; ---- Mark / Extract ------------------------------------------------------
 
 ;;;###autoload
