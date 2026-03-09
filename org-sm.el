@@ -262,7 +262,7 @@ Call once after setting `org-sm-capture-file'."
                `("org-sm-topic" "org-sm topic" entry
                  (file org-sm-capture-file)
                  ,(concat "** %(org-sm--truncate-title org-sm--pending-content)\n"
-                          ":PROPERTIES:\n:CREATED: %U\n:END:\n%i")
+                          "%(identity org-sm--pending-content)")
                  :before-finalize (lambda () (org-sm-item-mark 'topic)))))
 
 ;;;###autoload
