@@ -23,14 +23,14 @@ Requires Emacs 29.1+, org 9.6+, and the [[https://github.com/bohonghuang/fsrs.el
 
 #+begin_src elisp
 (use-package org-sm
-  :commands (org-sm-review-start org-sm-item-mark org-sm-item-extract org-sm-review-list)
+  :commands (org-sm-review-start org-sm-item-mark org-sm-item-extract org-sm-review-list
+             org-sm-capture-topic org-sm-setup-capture)
   :hook (org-mode . org-sm-mode)
   :config
-  ;; Set the list of org files to scan for SRS items
   (setq org-sm--files (directory-files-recursively "~/notes/" "\\.org$"))
-
-  ;; Max length of auto-generated heading titles (default 40)
-  (setq org-sm-title-max-length 50))
+  (setq org-sm-title-max-length 50)
+  (setq org-sm-capture-file "~/notes/inbox.org")
+  (org-sm-setup-capture))
 #+end_src
 
 ~org-sm-mode~ enables ~{{cloze}}~ font-lock only — safe to add to ~org-mode-hook~
@@ -46,7 +46,8 @@ Suggested keybindings:
   (define-key org-mode-map (kbd "C-c s SPC") #'org-sm-review-confirm)
   (define-key org-mode-map (kbd "C-c s d")   #'org-sm-item-dismiss)
   (define-key org-mode-map (kbd "C-c s q")   #'org-sm-review-abort)
-  (define-key org-mode-map (kbd "C-c s l")   #'org-sm-review-list))
+  (define-key org-mode-map (kbd "C-c s l")   #'org-sm-review-list)
+  (define-key global-map   (kbd "C-c s c")   #'org-sm-capture-topic))
 #+end_src
 
 * Commands
@@ -60,6 +61,7 @@ Suggested keybindings:
 | ~org-sm-review-confirm~  | Confirm topic read / advance cloze state        |
 | ~org-sm-review-abort~    | Abort current review session                    |
 | ~org-sm-review-list~     | Browse all SRS items                            |
+| ~org-sm-capture-topic~   | Capture clipboard or region as a topic card     |
 
 * Review Flow
 
@@ -75,6 +77,18 @@ Suggested keybindings:
 
 Interval is always calculated from the originally scheduled date, so
 early or late reviews do not distort future spacing.
+
+* Capture
+
+~org-sm-capture-topic~ captures the clipboard (or active region) as a topic card
+via ~org-capture~.  Set the target file and register the template once at startup:
+
+#+begin_src elisp
+(setq org-sm-capture-file "~/notes/inbox.org")
+(org-sm-setup-capture)
+#+end_src
+
+With a prefix argument, you are prompted to update ~org-sm-capture-file~ first.
 
 * Extract
 
