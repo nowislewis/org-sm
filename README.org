@@ -5,36 +5,29 @@ Minimal incremental reading for org-mode, inspired by SuperMemo.
 
 * Card Types
 
-*topic* — repeated reading, no grading required.
-Interval grows by A-Factor each review.  org priority controls the rate:
+*topic* — repeated reading passage.  No grading; interval grows by A-Factor each review.
 
-| Priority    | A-Factor | Behavior                          |
-|-------------+----------+-----------------------------------|
-| =[#A]=      |      1.2 | slow growth, review frequently    |
-| =[#B]=      |      1.5 | moderate growth                   |
-| =[#C]= / none |    1.8 | fast growth, fades out quickly    |
+| Priority      | A-Factor | Behavior                       |
+|---------------+----------+--------------------------------|
+| =[#A]=        |      1.2 | slow growth, review frequently |
+| =[#B]=        |      1.5 | moderate                       |
+| =[#C]= / none |      1.8 | fast growth, fades out quickly |
 
-*cloze* — fill-in-the-blank testing with ~{{answer}}~ markers, scheduled by [[https://github.com/bohonghuang/fsrs.el][FSRS]].
+*cloze* — fill-in-the-blank with ~{{answer}}~ markers, scheduled by [[https://github.com/bohonghuang/fsrs.el][FSRS]].
 Answers are hidden as ~[___]~ during review; rated again / hard / good / easy.
 
 * Installation
 
-Requires Emacs 29.1+, org 9.6+, and the [[https://github.com/bohonghuang/fsrs.el][fsrs]] package.
+Requires Emacs 29.1+, org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]].
 
 #+begin_src elisp
 (use-package org-sm
-  :commands (org-sm-review-start org-sm-item-mark org-sm-item-extract org-sm-review-list
-             org-sm-capture-topic org-sm-setup-capture)
   :hook (org-mode . org-sm-mode)
   :config
   (setq org-sm--files (directory-files-recursively "~/notes/" "\\.org$"))
-  (setq org-sm-title-max-length 50)
   (setq org-sm-capture-file "~/notes/inbox.org")
   (org-sm-setup-capture))
 #+end_src
-
-~org-sm-mode~ enables ~{{cloze}}~ font-lock only — safe to add to ~org-mode-hook~
-without loading anything eagerly.
 
 Suggested keybindings:
 
@@ -52,50 +45,37 @@ Suggested keybindings:
 
 * Commands
 
-| Command                 | Description                                     |
-|-------------------------+-------------------------------------------------|
-| ~org-sm-item-mark~       | Mark current heading as topic or cloze          |
-| ~org-sm-item-extract~    | Extract selected region as child topic or cloze |
-| ~org-sm-item-dismiss~    | Remove current item from SRS                    |
-| ~org-sm-review-start~    | Start review session                            |
-| ~org-sm-review-confirm~  | Confirm topic read / advance cloze state        |
-| ~org-sm-review-abort~    | Abort current review session                    |
-| ~org-sm-review-list~     | Browse all SRS items                            |
-| ~org-sm-capture-topic~   | Capture clipboard or region as a topic card     |
+| Command                | Description                                     |
+|------------------------+-------------------------------------------------|
+| ~org-sm-item-mark~     | Mark current heading as topic or cloze          |
+| ~org-sm-item-extract~  | Extract selected region as child topic or cloze |
+| ~org-sm-item-dismiss~  | Remove current item from SRS                    |
+| ~org-sm-review-start~  | Start review session                            |
+| ~org-sm-review-confirm~| Confirm topic read / advance cloze state        |
+| ~org-sm-review-abort~  | Abort current review session                    |
+| ~org-sm-review-list~   | Browse all SRS items                            |
+| ~org-sm-capture-topic~ | Capture clipboard or region as a topic          |
 
 * Review Flow
 
-*Topic:*
-1. ~org-sm-review-start~ — opens due item, narrowed to its heading body.
-2. Read the content.
-3. ~org-sm-review-confirm~ — reschedules and moves to next item.
+*Topic:* ~review-start~ → read → ~review-confirm~ (reschedules, next item).
 
-*Cloze:*
-1. ~org-sm-review-start~ — opens due item with answers hidden as ~[___]~.
-2. ~org-sm-review-confirm~ — reveals answers as ~[answer]~.
-3. ~org-sm-review-confirm~ — rate: again / hard / good / easy.
+*Cloze:* ~review-start~ (answers hidden) → ~review-confirm~ (reveals answers) → ~review-confirm~ (rate: again / hard / good / easy).
 
-Interval is always calculated from the originally scheduled date, so
-early or late reviews do not distort future spacing.
+Intervals are always calculated from the originally scheduled date, so early or late reviews do not distort future spacing.
 
 * Capture
 
-~org-sm-capture-topic~ captures the clipboard (or active region) as a topic card
-via ~org-capture~.  Set the target file and register the template once at startup:
-
-#+begin_src elisp
-(setq org-sm-capture-file "~/notes/inbox.org")
-(org-sm-setup-capture)
-#+end_src
-
-With a prefix argument, you are prompted to update ~org-sm-capture-file~ first.
+Captures the clipboard (or active region) as a topic via ~org-capture~.
+Call ~org-sm-setup-capture~ once after setting ~org-sm-capture-file~.
+With a prefix argument, you are prompted to update the target file first.
 
 * Extract
 
-Select any text and call ~org-sm-item-extract~:
+Select text, then call ~org-sm-item-extract~:
 
-- *topic* — selected text becomes the child heading's body.
-- *cloze* — full parent body is copied to the child; selection is wrapped as ~{{answer}}~.
+- *topic* — selected text becomes the child body.
+- *cloze* — full parent body copied to child; selection wrapped as ~{{answer}}~.
 
 The selection in the parent is replaced with an ~[[id:...][title]]~ link.
 
@@ -110,4 +90,65 @@ The selection in the parent is replaced with an ~[[id:...][title]]~ link.
 | ~SRS_DIFFICULTY~ | float             | FSRS difficulty (cloze only)    |
 | ~SRS_STEP~       | int               | FSRS learning step (cloze only) |
 
-~SCHEDULED~ is the due date for both types, used directly by ~org-sm-review-start~.
+~SCHEDULED~ is the due date for both types.
+
+* AI Assistant (org-sm-gptel)
+
+Optional extension powered by [[https://github.com/karthink/gptel][gptel]], designed around SuperMemo's 20 Rules.
+Load after both ~org-sm~ and ~gptel~ are configured:
+
+#+begin_src elisp
+(with-eval-after-load 'gptel
+  (require 'org-sm-gptel)
+  (define-key org-mode-map (kbd "C-c s ?") #'org-sm-gptel-explain)
+  (define-key org-mode-map (kbd "C-c s i") #'org-sm-gptel-refine)
+  (define-key org-mode-map (kbd "C-c s M") #'org-sm-gptel-generate-concept))
+#+end_src
+
+** Commands
+
+*** ~org-sm-gptel-explain~ (=C-c s ?=)
+
+Streams an AI explanation into a side window without interrupting the review.
+For cloze: explains the concept behind ~{{}}~ and flags interference risks.
+For topic: highlights the most card-worthy facts and explains jargon.
+Press ~q~ to abort and close.
+
+*** ~org-sm-gptel-refine~ (=C-c s i=)
+
+Refines the current heading body in-place using ~gptel-rewrite~.
+Works on any org heading — including org-capture buffers before ~C-c C-c~.
+
+The system prompt is chosen automatically by card type:
+
+- *cloze* → enforces minimum-information principle: one ~{{}}~ per card,
+  answer ≤ 5 words, split multi-fact content into separate cards.
+- *topic / unset* → cleans prose for incremental reading: strips filler,
+  resolves pronoun ambiguity, preserves paragraph structure (not a summary).
+
+The instruction is pre-filled in the minibuffer; press ~RET~ to confirm or
+edit it first.  gptel-rewrite overlay keys:
+
+| Key       | Action          |
+|-----------+-----------------|
+| ~C-c C-a~ | Accept rewrite  |
+| ~C-c C-k~ | Reject rewrite  |
+| ~C-c C-d~ | Diff view       |
+| ~C-c C-e~ | Ediff view      |
+| ~C-c C-r~ | Iterate / retry |
+
+Typical workflow after ~org-sm-capture-topic~ or ~org-sm-item-extract~:
+1. Land on the new child heading.
+2. ~C-c s i~ to refine raw content.
+3. ~C-c C-a~ to accept, then continue.
+
+*** ~org-sm-gptel-generate-concept~ (=C-c s M=)
+
+Synthesizes the current subtree (or active region) into a concept-map Topic.
+Inserts a new =[#A]= heading immediately after the subtree, scheduled for SRS.
+
+Output structure:
+1. *Core logic thread* — causal / chronological chain linking the items.
+2. *Confusion analysis* — side-by-side "decisive feature" comparison of easily
+   mixed concepts (table format when applicable).
+3. *Knowledge gaps* — prerequisite concepts missing for full understanding.
