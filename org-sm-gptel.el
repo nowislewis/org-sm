@@ -22,12 +22,9 @@
 ;;; Code:
 
 (require 'org-sm)
-;; gptel is guaranteed to be loaded already: this file is intended to be
-;; loaded via (with-eval-after-load 'gptel ...).  We only tell the
-;; byte-compiler about the symbols we use.
-(declare-function gptel-request    "gptel")
-(declare-function gptel-abort      "gptel")
-(declare-function gptel-rewrite    "gptel-rewrite")
+(require 'gptel)
+
+(declare-function gptel-rewrite "gptel-rewrite")
 (defvar gptel--rewrite-directive)
 (defvar-local gptel--rewrite-message nil)
 
@@ -105,11 +102,19 @@ Used by `org-sm-gptel-refine' on cloze items."
 ;;;; ---- Internal helpers ----------------------------------------------------
 
 (defun org-sm-gptel--explain-stream (prompt)
-  "Send PROMPT to gptel and stream the response into a side window."
+  "Send PROMPT to gptel and stream the response into a side window.
+The buffer uses `org-mode' so Org and gptel syntax highlighting applies."
   (let ((buf (get-buffer-create "*org-sm-explain*")))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
-        (erase-buffer)
+        (erase-buffer))
+      ;; Enable org-mode for Org syntax highlighting, then gptel-mode
+      ;; for streamed-response highlighting (font-lock overlays, etc.).
+      (unless (derived-mode-p 'org-mode)
+        (org-mode))
+      (unless gptel-mode
+        (gptel-mode 1))
+      (let ((inhibit-read-only t))
         (insert (propertize "Explaining...\n\n" 'face 'bold)))
       (local-set-key (kbd "q")
                      (lambda () (interactive) (gptel-abort buf) (quit-window t)))
@@ -194,13 +199,26 @@ Card type determines the system prompt and instruction:
 ;;;###autoload
 (defun org-sm-gptel-generate-concept ()
   "Build a concept-map Topic from the current subtree or region.
+If called on a leaf node (e.g. a single cloze card) without a region,
+it automatically moves up to the parent heading to capture the entire
+concept group (sibling cards) for a broader context.
+
 Inserts a new [#A] Topic immediately after the subtree and marks it for SRS."
   (interactive)
   (let* ((region-p (use-region-p))
-         (beg      (if region-p (region-beginning)
-                     (save-excursion (org-back-to-heading t) (point))))
-         (end      (if region-p (region-end)
-                     (save-excursion (org-end-of-subtree t t) (point))))
+         (bounds
+          (if region-p
+              (cons (region-beginning) (region-end))
+            (save-excursion
+              (org-back-to-heading t)
+              ;; If on a leaf node (no children), go up one level
+              ;; to capture the whole concept group context.
+              (unless (save-excursion (org-goto-first-child))
+                (org-up-heading-safe))
+              (cons (point)
+                    (save-excursion (org-end-of-subtree t t) (point))))))
+         (beg      (car bounds))
+         (end      (cdr bounds))
          (end-mark (copy-marker end t))
          (content  (buffer-substring-no-properties beg end))
          (src-buf  (current-buffer))
