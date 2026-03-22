@@ -291,8 +291,8 @@ Call once after setting `org-sm-capture-file' and `org-sm-capture-olp'."
 ;;;###autoload
 (defun org-sm-capture-topic (&optional ask-file)
   "Capture region or clipboard as a topic card.
-With a region, triggers `M-w' (works in any buffer: pdf, nov, etc.) then
-reads the clipboard.  Without a region, reads the clipboard directly.
+Triggers `M-w' when a region is active or in `reader-mode' (where selection
+is not tracked by Emacs region).  Otherwise reads the clipboard directly.
 With prefix arg, prompt to update `org-sm-capture-file' and `org-sm-capture-olp'."
   (interactive "P")
   (when ask-file
@@ -304,7 +304,7 @@ With prefix arg, prompt to update `org-sm-capture-file' and `org-sm-capture-olp'
     (org-sm--select-capture-olp))
   (unless org-sm-capture-file
     (user-error "Set `org-sm-capture-file' and call `org-sm-setup-capture' first"))
-  (when (use-region-p)
+  (when (or (use-region-p) (derived-mode-p 'reader-mode))
     (execute-kbd-macro (kbd "M-w")))
   (setq org-sm--pending-content
         (or (and (fboundp 'gui-get-selection)
