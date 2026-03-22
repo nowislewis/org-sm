@@ -19,6 +19,11 @@
 ;;   org-sm-review-confirm - confirm topic read / advance cloze state
 ;;   org-sm-review-abort   - abort review session
 ;;   org-sm-review-list    - browse all SRS items
+;;   org-sm-capture-inc    - copy region with M-w and capture as topic (bound to M-z)
+;;
+;; Two minor modes are provided:
+;;   org-sm-mode             - buffer-local; {{cloze}} font-lock (use via :hook)
+;;   global-org-sm-read-mode - global; binds M-z to `org-sm-capture-inc'
 ;;
 ;; Set `org-sm--files' to the list of org files you want org-sm to scan:
 ;;
@@ -26,8 +31,8 @@
 ;;     :commands (org-sm-review-start org-sm-item-mark org-sm-item-extract org-sm-review-list)
 ;;     :hook (org-mode . org-sm-mode)
 ;;     :config
-;;     (setq org-sm--files (directory-files-recursively "~/org" "\\.org$")))
-
+;;     (setq org-sm--files (directory-files-recursively "~/org" "\\.org$"))
+;;     (global-org-sm-read-mode 1))
 ;;; Code:
 
 (require 'cl-lib)
@@ -262,6 +267,7 @@ Call once after setting `org-sm-capture-file'."
                `("org-sm-topic" "org-sm topic" entry
                  (file org-sm-capture-file)
                  ,(concat "** %(org-sm--truncate-title org-sm--pending-content)\n"
+                          "%a"
                           "%(identity org-sm--pending-content)")
                  :before-finalize (lambda () (org-sm-item-mark 'topic)))))
 
@@ -540,7 +546,7 @@ PREV is a string describing the last action, shown in the echo area."
          '((tags . "%(org-sm--review-list-prefix)"))))
     (org-tags-view nil "SRS_TYPE={.+}")))
 
-;;;; ---- Minor mode ----------------------------------------------------------
+;;;; ---- Minor modes ---------------------------------------------------------
 
 ;;;###autoload
 (define-minor-mode org-sm-mode
@@ -551,6 +557,30 @@ PREV is a string describing the last action, shown in the echo area."
       (font-lock-add-keywords nil org-sm--font-lock-keywords 'append)
     (font-lock-remove-keywords nil org-sm--font-lock-keywords))
   (when (fboundp 'font-lock-flush) (font-lock-flush)))
+
+;;;###autoload
+(defun org-sm-capture-inc ()
+  "Copy region with M-w and capture as an org-sm topic.
+Reads text via `buffer-substring-no-properties' to preserve UTF-8."
+  (interactive)
+  (let ((text (buffer-substring-no-properties (region-beginning) (region-end))))
+    (execute-kbd-macro (kbd "M-w"))
+    (setq org-sm--pending-content text)
+    (org-capture nil "org-sm-topic")))
+
+(defvar org-sm-read-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "M-z") #'org-sm-capture-inc)
+    map))
+
+(define-minor-mode org-sm-read-mode
+  "Buffer-local keymap layer for `global-org-sm-read-mode'."
+  :lighter nil :keymap org-sm-read-mode-map)
+
+;;;###autoload
+(define-globalized-minor-mode global-org-sm-read-mode
+  org-sm-read-mode (lambda () (org-sm-read-mode 1))
+  :group 'org-sm)
 
 (provide 'org-sm)
 ;;; org-sm.el ends here

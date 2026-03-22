@@ -26,7 +26,8 @@ Requires Emacs 29.1+, org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
   :config
   (setq org-sm--files (directory-files-recursively "~/notes/" "\\.org$"))
   (setq org-sm-capture-file "~/notes/inbox.org")
-  (org-sm-setup-capture))
+  (org-sm-setup-capture)
+  (global-org-sm-read-mode 1))  ; M-z captures region as topic from any buffer
 #+end_src
 
 Suggested keybindings:
@@ -45,30 +46,33 @@ Suggested keybindings:
 
 * Commands
 
-| Command                | Description                                     |
-|------------------------+-------------------------------------------------|
-| ~org-sm-item-mark~     | Mark current heading as topic or cloze          |
-| ~org-sm-item-extract~  | Extract selected region as child topic or cloze |
-| ~org-sm-item-dismiss~  | Remove current item from SRS                    |
-| ~org-sm-review-start~  | Start review session                            |
-| ~org-sm-review-confirm~| Confirm topic read / advance cloze state        |
-| ~org-sm-review-abort~  | Abort current review session                    |
-| ~org-sm-review-list~   | Browse all SRS items                            |
-| ~org-sm-capture-topic~ | Capture clipboard or region as a topic          |
+| Command                 | Description                                     |
+|-------------------------+-------------------------------------------------|
+| ~org-sm-item-mark~      | Mark current heading as topic or cloze          |
+| ~org-sm-item-extract~   | Extract selected region as child topic or cloze |
+| ~org-sm-item-dismiss~   | Remove current item from SRS                    |
+| ~org-sm-review-start~   | Start review session                            |
+| ~org-sm-review-confirm~ | Confirm topic read / advance cloze state        |
+| ~org-sm-review-abort~   | Abort current review session                    |
+| ~org-sm-review-list~    | Browse all SRS items                            |
+| ~org-sm-capture-topic~  | Capture clipboard or region as a topic          |
+| ~org-sm-capture-inc~    | Copy region with M-w and capture as topic       |
 
 * Review Flow
 
 *Topic:* ~review-start~ → read → ~review-confirm~ (reschedules, next item).
 
-*Cloze:* ~review-start~ (answers hidden) → ~review-confirm~ (reveals answers) → ~review-confirm~ (rate: again / hard / good / easy).
+*Cloze:* ~review-start~ (answers hidden) → ~review-confirm~ (reveals) → ~review-confirm~ (rate).
 
-Intervals are always calculated from the originally scheduled date, so early or late reviews do not distort future spacing.
+Intervals are calculated from the scheduled date, so early/late reviews don't distort spacing.
 
 * Capture
 
-Captures the clipboard (or active region) as a topic via ~org-capture~.
+~org-sm-capture-topic~ captures clipboard or active region via ~org-capture~.
 Call ~org-sm-setup-capture~ once after setting ~org-sm-capture-file~.
-With a prefix argument, you are prompted to update the target file first.
+
+~global-org-sm-read-mode~ binds ~M-z~ globally to ~org-sm-capture-inc~, which
+copies the region with ~M-w~ then immediately captures it as a topic.
 
 * Extract
 
@@ -94,8 +98,7 @@ The selection in the parent is replaced with an ~[[id:...][title]]~ link.
 
 * AI Assistant (org-sm-gptel)
 
-Optional extension powered by [[https://github.com/karthink/gptel][gptel]], designed around SuperMemo's 20 Rules.
-Load after both ~org-sm~ and ~gptel~ are configured:
+Optional extension powered by [[https://github.com/karthink/gptel][gptel]].
 
 #+begin_src elisp
 (with-eval-after-load 'gptel
