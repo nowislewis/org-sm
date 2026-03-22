@@ -19,11 +19,11 @@
 ;;   org-sm-review-confirm - confirm topic read / advance cloze state
 ;;   org-sm-review-abort   - abort review session
 ;;   org-sm-review-list    - browse all SRS items
-;;   org-sm-capture-inc    - copy region with M-w and capture as topic (bound to M-z)
+;;   org-sm-capture-topic  - capture region (with M-w) or clipboard as topic (bound to M-z)
 ;;
 ;; Two minor modes are provided:
 ;;   org-sm-mode             - buffer-local; {{cloze}} font-lock (use via :hook)
-;;   global-org-sm-read-mode - global; binds M-z to `org-sm-capture-inc'
+;;   global-org-sm-read-mode - global; binds M-z to `org-sm-capture-topic'
 ;;
 ;; Set `org-sm--files' to the list of org files you want org-sm to scan:
 ;;
@@ -249,49 +249,78 @@ moves point into the PROPERTIES drawer."
     ('cloze
      (org-entry-put nil "SRS_STATE" ":learning"))))
 
-;;;; ---- Capture from clipboard ---------------------------------------------
+;;;; ---- Capture ---------------------------------------------
 
 (defcustom org-sm-capture-file nil
   "Target org file for `org-sm-capture-topic'."
   :type '(choice (const nil) file)
   :group 'org-sm)
 
+(defcustom org-sm-capture-olp '("org-sm topics")
+  "Outline path for the capture target (list of heading strings).
+The card is inserted as a child of the deepest heading in the path.
+Example: \\='(\"Topics\" \"Physics\")"
+  :type '(repeat string)
+  :group 'org-sm)
+
 (defvar org-sm--pending-content ""
-  "Temporary content buffer for the capture template.")
+  "Temporary storage for capture template content.")
 
 ;;;###autoload
 (defun org-sm-setup-capture ()
   "Register the org-sm topic capture template.
-Call once after setting `org-sm-capture-file'."
+Call once after setting `org-sm-capture-file' and `org-sm-capture-olp'."
   (add-to-list 'org-capture-templates
-               `("org-sm-topic" "org-sm topic" entry
-                 (file org-sm-capture-file)
-                 ,(concat "** %(org-sm--truncate-title org-sm--pending-content)\n"
-                          "%a"
-                          "%(identity org-sm--pending-content)")
+               '("org-sm-topic" "org-sm topic" entry
+                 (function org-sm--capture-goto-olp)
+                 "** %(org-sm--truncate-title org-sm--pending-content)\n%a%(identity org-sm--pending-content)"
                  :before-finalize (lambda () (org-sm-item-mark 'topic)))))
+
+(defun org-sm--capture-goto-olp ()
+  "Jump to `org-sm-capture-olp' in `org-sm-capture-file' for org-capture."
+  (let ((m (org-find-olp (cons (expand-file-name org-sm-capture-file) org-sm-capture-olp))))
+    (set-buffer (marker-buffer m))
+    (org-capture-put-target-region-and-position)
+    (widen)
+    (goto-char m)
+    (set-marker m nil)))
 
 ;;;###autoload
 (defun org-sm-capture-topic (&optional ask-file)
-  "Capture clipboard or region as a topic card.
-With prefix arg, prompt to update `org-sm-capture-file' first."
+  "Capture region or clipboard as a topic card.
+Triggers `M-w' first so any buffer type (pdf, nov, etc.) can write its
+selection to the clipboard, then reads from the clipboard.
+With prefix arg, prompt to update `org-sm-capture-file' and `org-sm-capture-olp'."
   (interactive "P")
   (when ask-file
     (setq org-sm-capture-file
-          (read-file-name "Capture to file: " nil nil t nil
-                          (lambda (f) (string-match-p "\\.org$" f)))))
+          (if (eq major-mode 'org-mode)
+              (buffer-file-name)
+            (read-file-name "Capture to file: " nil nil t nil
+                            (lambda (f) (string-match-p "\\.org$" f)))))
+    (org-sm--select-capture-olp))
   (unless org-sm-capture-file
     (user-error "Set `org-sm-capture-file' and call `org-sm-setup-capture' first"))
+  (execute-kbd-macro (kbd "M-w"))
   (setq org-sm--pending-content
-        (if (use-region-p)
-            (prog1 (buffer-substring-no-properties (region-beginning) (region-end))
-              (deactivate-mark))
-          (or (and (fboundp 'gui-get-selection)
-                   (gui-get-selection 'CLIPBOARD 'STRING))
-              (ignore-errors (current-kill 0 t))
-              "")))
+        (or (and (fboundp 'gui-get-selection)
+                 (gui-get-selection 'CLIPBOARD 'STRING))
+            (ignore-errors (current-kill 0 t))
+            ""))
   (org-capture nil "org-sm-topic"))
 
+(defun org-sm--select-capture-olp ()
+  "Prompt to select a heading in `org-sm-capture-file'; set `org-sm-capture-olp'."
+  (with-current-buffer (or (find-buffer-visiting org-sm-capture-file)
+                           (find-file-noselect org-sm-capture-file))
+    (let* ((entries (org-map-entries
+                     (lambda ()
+                       (let ((olp (org-get-outline-path t)))
+                         (cons (org-format-outline-path olp) olp)))
+                     nil 'file))
+           (choice (completing-read "Select heading: " (mapcar #'car entries) nil t)))
+      (setq org-sm-capture-olp (cdr (assoc choice entries)))
+      (message "org-sm capture olp: %s" org-sm-capture-olp))))
 ;;;; ---- Mark / Extract ------------------------------------------------------
 
 ;;;###autoload
@@ -559,18 +588,9 @@ PREV is a string describing the last action, shown in the echo area."
   (when (fboundp 'font-lock-flush) (font-lock-flush)))
 
 ;;;###autoload
-(defun org-sm-capture-inc ()
-  "Copy region with M-w and capture as an org-sm topic.
-Reads text via `buffer-substring-no-properties' to preserve UTF-8."
-  (interactive)
-  (let ((text (buffer-substring-no-properties (region-beginning) (region-end))))
-    (execute-kbd-macro (kbd "M-w"))
-    (setq org-sm--pending-content text)
-    (org-capture nil "org-sm-topic")))
-
 (defvar org-sm-read-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "M-z") #'org-sm-capture-inc)
+    (define-key map (kbd "M-z") #'org-sm-capture-topic)
     map))
 
 (define-minor-mode org-sm-read-mode
