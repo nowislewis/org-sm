@@ -26,8 +26,9 @@ Requires Emacs 29.1+, org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
   :config
   (setq org-sm--files (directory-files-recursively "~/notes/" "\\.org$"))
   (setq org-sm-capture-file "~/notes/inbox.org")
+  (setq org-sm-capture-olp '("org-sm topics"))
   (org-sm-setup-capture)
-  (global-org-sm-read-mode 1))  ; M-z captures region as topic from any buffer
+  (global-org-sm-read-mode 1))  ; M-z captures region/clipboard as topic from any buffer
 #+end_src
 
 Suggested keybindings:
@@ -55,8 +56,7 @@ Suggested keybindings:
 | ~org-sm-review-confirm~ | Confirm topic read / advance cloze state        |
 | ~org-sm-review-abort~   | Abort current review session                    |
 | ~org-sm-review-list~    | Browse all SRS items                            |
-| ~org-sm-capture-topic~  | Capture clipboard or region as a topic          |
-| ~org-sm-capture-inc~    | Copy region with M-w and capture as topic       |
+| ~org-sm-capture-topic~  | Capture region or clipboard as a topic card     |
 
 * Review Flow
 
@@ -68,11 +68,12 @@ Intervals are calculated from the scheduled date, so early/late reviews don't di
 
 * Capture
 
-~org-sm-capture-topic~ captures clipboard or active region via ~org-capture~.
-Call ~org-sm-setup-capture~ once after setting ~org-sm-capture-file~.
+~org-sm-capture-topic~ captures a region or clipboard content as a topic card via ~org-capture~.
+With a region active, triggers ~M-w~ first (works in any buffer: pdf, nov, etc.) then reads
+the clipboard.  Without a region, reads the clipboard directly.
 
-~global-org-sm-read-mode~ binds ~M-z~ globally to ~org-sm-capture-inc~, which
-copies the region with ~M-w~ then immediately captures it as a topic.
+Set ~org-sm-capture-file~ and ~org-sm-capture-olp~, then call ~org-sm-setup-capture~ once.
+~global-org-sm-read-mode~ binds ~M-z~ globally to ~org-sm-capture-topic~.
 
 * Extract
 
