@@ -10,17 +10,17 @@
 ;;
 ;;   (with-eval-after-load 'gptel (require 'org-sm-gptel))
 ;;
-;; explain / feynman / roadmap share the same mechanism:
+;; explain / feynman / knowledge-map share the same mechanism:
 ;;   - Current org file → buffer-local gptel context (refreshed each call).
 ;;   - Current subtree  → quoted in the opening message.
 ;;   - Persistent chat buffer *org-sm-<kind>: <heading>*; reused on re-invoke.
 ;; They differ only in system prompt (AI role) and a one-line intro.
 ;;
 ;; Commands:
-;;   org-sm-gptel-explain  - AI explains TO you (use when stuck).
-;;   org-sm-gptel-feynman  - You explain TO the AI (Feynman technique).
-;;   org-sm-gptel-roadmap  - Concept map + learning-path planner.
-;;   org-sm-gptel-refine   - Refine heading body in-place via gptel-rewrite.
+;;   org-sm-gptel-explain        - AI explains TO you (use when stuck).
+;;   org-sm-gptel-feynman        - You explain TO the AI (Feynman technique).
+;;   org-sm-gptel-knowledge-map  - Knowledge structure + learning-path planner.
+;;   org-sm-gptel-refine         - Refine heading body in-place via gptel-rewrite.
 ;;
 ;; TODO: Interleaving support
 ;;   feynman phase 2 (transfer training) could pull scenarios from other SRS
@@ -94,7 +94,7 @@
   "System prompt for `org-sm-gptel-feynman'."
   :type 'string :group 'org-sm-gptel)
 
-(defcustom org-sm-gptel-system-roadmap
+(defcustom org-sm-gptel-system-knowledge-map
   "你是知识地图与学习路径规划师。每次只做一个阶段，完成后等待用户回复再继续。
 
 【阶段一：知识金字塔分析】（基于用户提供的笔记/卡片）
@@ -141,7 +141,7 @@
 3. 每阶段推荐的资料类型（论文/教程/代码/视频）
 
 约束：路径要和用户起点强相关；参考 context 避免规划已掌握的内容。"
-  "System prompt for `org-sm-gptel-roadmap'."
+  "System prompt for `org-sm-gptel-knowledge-map'."
   :type 'string :group 'org-sm-gptel)
 
 (defcustom org-sm-gptel-system-topic
@@ -181,12 +181,14 @@
            40 nil nil t)))
 
 (defun org-sm-gptel--current-subtree ()
-  "Return the current subtree as a string, starting from its heading."
+  "Return heading line and body text, excluding metadata and child headings."
   (save-excursion
     (org-back-to-heading t)
-    (buffer-substring-no-properties
-     (point)
-     (save-excursion (org-end-of-subtree t t) (point)))))
+    (let ((heading (org-get-heading t t t t))
+          (bounds  (org-sm--body-bounds)))
+      (concat heading "\n"
+              (string-trim (buffer-substring-no-properties
+                            (car bounds) (cdr bounds)))))))
 
 (defun org-sm-gptel--open-chat (kind system intro)
   "Open or reuse a persistent gptel chat buffer for KIND on the current heading.
@@ -208,6 +210,7 @@ Subsequent calls redisplay the existing buffer without sending again."
   (let* ((heading  (save-excursion
                      (org-back-to-heading t)
                      (org-get-heading t t t t)))
+         (subtree  (org-sm-gptel--current-subtree))
          (buf-name (org-sm-gptel--buf-name kind heading))
          (new-p    (not (get-buffer buf-name)))
          (chat-buf (gptel buf-name))
@@ -219,8 +222,8 @@ Subsequent calls redisplay the existing buffer without sending again."
         (gptel-context-add-file src-file))
       (when new-p
         (goto-char (point-max))
-        (insert (format "%s\n\n当前 heading：%s\n\n#+begin_quote\n%s\n#+end_quote"
-                        intro heading (org-sm-gptel--current-subtree)))
+        (insert (format "%s\n\n#+begin_quote\n%s\n#+end_quote"
+                        intro subtree))
         (gptel-send)))
     (display-buffer chat-buf
                     '(display-buffer-in-side-window
@@ -259,18 +262,18 @@ Buffer *org-sm-feynman: <heading>* is reused on re-invoke."
    "我认为自己已经理解了以下内容，请向我提问来检验我的理解。"))
 
 ;;;###autoload
-(defun org-sm-gptel-roadmap ()
-  "Open a persistent concept-map + learning-path chat for the current subtree.
+(defun org-sm-gptel-knowledge-map ()
+  "Open a persistent knowledge-map chat for the current subtree.
 Current org file added to context so the AI sees all existing notes.
-Buffer *org-sm-roadmap: <heading>* is reused on re-invoke.
+Buffer *org-sm-knowledge-map: <heading>* is reused on re-invoke.
 
 Flow (AI manages automatically):
-  Phase 1 — Concept map: connections and confusion points.
+  Phase 1 — Knowledge structure: hierarchy, gaps, confusion points.
   Phase 2 — Prerequisite checklist: you locate yourself.
   Phase 3 — Tailored learning path."
   (interactive)
   (org-sm-gptel--open-chat
-   "roadmap" org-sm-gptel-system-roadmap
+   "knowledge-map" org-sm-gptel-system-knowledge-map
    "请先分析以下笔记/卡片中的知识关联，再帮我规划学习路径。"))
 
 ;;;###autoload
