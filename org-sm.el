@@ -14,7 +14,8 @@
 ;; Commands:
 ;;   org-sm-item-mark      - mark heading as topic or cloze
 ;;   org-sm-item-extract   - extract region as child topic or cloze
-;;   org-sm-item-dismiss   - remove item from SRS
+;;   org-sm-item-dismiss   - dismiss item from SRS (tag :dismissed:, keep data)
+;;   org-sm-item-undismiss - restore a dismissed item
 ;;   org-sm-review-start   - start review session
 ;;   org-sm-review-confirm - confirm topic read / advance cloze state
 ;;   org-sm-review-abort   - abort review session
@@ -397,7 +398,9 @@ The selected region in the parent is replaced with an [[id:...][title]] link.
       (org-set-property "ID" id)
       (org-sm--init-item type)
       (org-end-of-meta-data t)
+      (unless (bolp) (insert "\n"))
       (insert child-body "\n")))
+
   (when (eq org-sm--cloze-state 'revealed)
     (org-sm-cloze-remove-overlays)
     (org-sm-cloze-apply-overlays)))
@@ -410,9 +413,14 @@ The selected region in the parent is replaced with an [[id:...][title]] link.
 (defvar-local org-sm--cloze-state nil
   "Cloze review state for the current buffer: `hidden' or `revealed'.")
 
+(defun org-sm--dismissed-p ()
+  "Return non-nil if current heading carries the :dismissed: tag."
+  (member "dismissed" (org-get-tags nil t)))
+
 (defun org-sm--due-p ()
   "Return non-nil if current heading is a due SRS item."
-  (and (org-entry-get nil "SRS_TYPE")
+  (and (org-sm-type)
+       (not (org-sm--dismissed-p))
        (when-let* ((t_ (org-get-scheduled-time nil)))
          (<= (float-time t_) (float-time)))))
 
@@ -534,12 +542,26 @@ PREV is a string describing the last action, shown in the echo area."
 
 ;;;###autoload
 (defun org-sm-item-dismiss ()
-  "Dismiss current SRS item by removing its SRS_TYPE property."
+  "Dismiss current SRS item.
+Adds the :dismissed: tag and logs the action; all SRS properties and
+scheduling data are preserved so the item can be restored with
+`org-sm-item-undismiss'."
   (interactive)
   (unless (org-sm-type) (user-error "Not on an SRS heading"))
+  (when (org-sm--dismissed-p) (user-error "Already dismissed"))
+  (org-toggle-tag "dismissed" 'on)
   (org-sm--log-review 'dismissed)
-  (org-delete-property "SRS_TYPE")
   (org-sm--advance "dismissed"))
+
+;;;###autoload
+(defun org-sm-item-undismiss ()
+  "Restore a dismissed SRS item by removing the :dismissed: tag."
+  (interactive)
+  (unless (org-sm-type) (user-error "Not on an SRS heading"))
+  (unless (org-sm--dismissed-p) (user-error "Item is not dismissed"))
+  (org-toggle-tag "dismissed" 'off)
+  (message "org-sm: item restored — due %s"
+           (format-time-string "%F" (org-get-scheduled-time nil))))
 
 ;;;###autoload
 (defun org-sm-review-abort ()
@@ -559,26 +581,29 @@ PREV is a string describing the last action, shown in the echo area."
   (message "org-sm: review aborted"))
 
 (defun org-sm--review-list-prefix ()
-  "Return indentation string with │ guide lines for current heading level."
-  (let ((depth (1- (or (org-current-level) 1))))
-    (apply #'concat (make-list depth "│  "))))
+  "Return prefix with due-day delta and │ guide lines for current heading level."
+  (let* ((depth (1- (or (org-current-level) 1)))
+         (indent (apply #'concat (make-list depth "│  ")))
+         (delta  (when-let* ((scheduled (org-get-scheduled-time nil)))
+                   (- (time-to-days scheduled)
+                      (time-to-days (current-time)))))
+         (due    (if delta (format "%+4dd" delta) "    ")))
+    (concat due " " indent)))
 
 ;;;###autoload
 (defun org-sm-review-list ()
   "Browse all SRS items across `org-sm--files' in an agenda-style buffer."
   (interactive)
   (require 'org-agenda)
-  ;; Declare these as special (dynamic) variables so the byte-compiler does not
-  ;; treat the `let' bindings below as lexical locals.  Without this, compiled
-  ;; code silently ignores the bindings and `org-tags-view' sees the global
-  ;; (empty) values instead of ours.
-  (defvar org-agenda-files)
-  (defvar org-agenda-prefix-format)
-  (let ((org-agenda-files org-sm--files)
-        (org-agenda-prefix-format
-         '((tags . "%(org-sm--review-list-prefix)"))))
-    (org-tags-view nil "SRS_TYPE={.+}")))
-
+  (defvar org-agenda-custom-commands)
+  (let ((org-agenda-custom-commands
+         `(("_" "org-sm review list"
+            tags "SRS_TYPE={.+}"
+            ((org-agenda-files org-sm--files)
+             (org-agenda-prefix-format
+              '((tags . "%(org-sm--review-list-prefix)"))))))
+         ))
+    (org-agenda nil "_")))
 ;;;; ---- Minor modes ---------------------------------------------------------
 
 ;;;###autoload
