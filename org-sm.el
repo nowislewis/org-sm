@@ -353,7 +353,8 @@ TYPE is a symbol (`topic' or `cloze'); when nil, prompt interactively."
 (defun org-sm-item-extract ()
   "Extract selected region as a child topic or cloze heading.
 
-The selected region in the parent is replaced with an [[id:...][title]] link.
+The parent body is NOT modified.  A compact back-reference [[id:...]] is
+inserted immediately after the selection so the link stays in context.
 - topic: title is `org-sm-topic-prefix' + first N chars of the selection;
          child body is the selected text verbatim.
 - cloze: title is `org-sm-cloze-prefix' + first N chars of the parent body;
@@ -382,9 +383,9 @@ The selected region in the parent is replaced with an [[id:...][title]] link.
                                         (format "{{%s}}" selected)
                                         (substring body-raw (+ sel-offset
                                                                (length selected)))))))))
-    ;; Replace selection in parent with a readable id link.
-    (delete-region sel-beg sel-end)
-    (insert (format "[[id:%s][%s]]" id (org-sm--truncate-title selected)))
+    ;; Insert a compact back-reference after the selection; original text is untouched.
+    (goto-char sel-end)
+    (insert (format "[[id:%s][%s]]" id (pcase type ('topic "<T>") ('cloze "<C>"))))
     ;; Append child heading at end of current subtree.
     (save-excursion
       (org-end-of-subtree t t)
