@@ -580,15 +580,32 @@ scheduling data are preserved so the item can be restored with
   (when (buffer-narrowed-p) (widen))
   (message "org-sm: review aborted"))
 
+(defun org-sm--review-list-colorize ()
+  "Colorize due-delta and indent guides in the review list buffer."
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (beginning-of-line)
+        ;; delta: e.g. " +1d" or " -3d"
+        (when (looking-at "[[:space:]]*\\([+-][0-9]+d\\)")
+          (put-text-property (match-beginning 1) (match-end 1) 'face
+                             (if (eq (char-after (match-beginning 1)) ?+) 'success 'error)))
+        ;; indent guides ┆
+        (when (re-search-forward "\\(\\(?: ┆ \\)+\\)" (line-end-position) t)
+          (put-text-property (match-beginning 1) (match-end 1) 'face 'shadow))
+        (forward-line 1)))))
+
 (defun org-sm--review-list-prefix ()
-  "Return prefix with due-day delta and │ guide lines for current heading level."
-  (let* ((depth (1- (or (org-current-level) 1)))
-         (indent (apply #'concat (make-list depth "│  ")))
-         (delta  (when-let* ((scheduled (org-get-scheduled-time nil)))
-                   (- (time-to-days scheduled)
+  "Return prefix with due-day delta and ┆ guide lines for current heading level."
+  (let* ((depth  (1- (or (org-current-level) 1)))
+         (indent (apply #'concat (make-list depth " ┆ ")))
+         (sched  (org-get-scheduled-time nil))
+         (delta  (when sched
+                   (- (time-to-days sched)
                       (time-to-days (current-time)))))
-         (due    (if delta (format "%+4dd" delta) "    ")))
-    (concat due " " indent)))
+         (due-str (if delta (format "%+4dd" delta) "    ")))
+    (concat due-str " " indent)))
 
 ;;;###autoload
 (defun org-sm-review-list ()
@@ -596,14 +613,15 @@ scheduling data are preserved so the item can be restored with
   (interactive)
   (require 'org-agenda)
   (defvar org-agenda-custom-commands)
+  (add-hook 'org-agenda-finalize-hook #'org-sm--review-list-colorize)
   (let ((org-agenda-custom-commands
          `(("_" "org-sm review list"
             tags "SRS_TYPE={.+}"
             ((org-agenda-files org-sm--files)
              (org-agenda-prefix-format
-              '((tags . "%(org-sm--review-list-prefix)"))))))
-         ))
+              '((tags . "%(org-sm--review-list-prefix)"))))))))
     (org-agenda nil "_")))
+
 ;;;; ---- Minor modes ---------------------------------------------------------
 
 ;;;###autoload
