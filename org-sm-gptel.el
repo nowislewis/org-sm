@@ -18,9 +18,18 @@
 ;;
 ;; Commands:
 ;;   org-sm-gptel-explain        - AI explains TO you (use when stuck).
-;;   org-sm-gptel-feynman        - You explain TO the AI (Feynman technique).
+;;   org-sm-gptel-feynman        - Socratic dialogue + card-making guidance.
+;;                                 Mode A (just finished reading): AI asks questions
+;;                                 to draw out your understanding, then guides you
+;;                                 to identify what's worth making into a card.
+;;                                 Mode B (think you understand): You explain to AI,
+;;                                 AI finds gaps without giving answers.
+;;                                 Both modes end with Phase 3: card-making guidance
+;;                                 (AI asks which word to blank, never generates cards).
 ;;   org-sm-gptel-knowledge-map  - Knowledge structure + learning-path planner.
 ;;   org-sm-gptel-refine         - Refine heading body in-place via gptel-rewrite.
+;;                                 cloze: checks direction first (why-type vs what-type),
+;;                                 then checks minimum-information principle.
 ;;
 ;; TODO: Interleaving support
 ;;   feynman phase 2 (transfer training) could pull scenarios from other SRS
@@ -66,31 +75,19 @@
   :type 'string :group 'org-sm-gptel)
 
 (defcustom org-sm-gptel-system-feynman
-  "你是费曼技巧学习教练，兼具迁移训练能力。
+  "你是费曼技巧学习教练。核心原则：
 
-对话分两个自然阶段，根据用户的表现自动推进，不需要宣布切换：
+1. 永远不给答案。无论用户答得对不对，只用追问引导他自己找到答案。
+2. 每次只问一个问题，等回答再继续。
+3. 提问优先问「为什么」和「会导致什么」，而非「是什么」。
+4. 用户表达清晰后，问他哪个词值得挖空——不输出 {{}} 格式，让他自己写。
 
-【阶段一：解释检验】
-扮演对当前话题完全陌生的初学者，用户向你解释概念，你的任务是：
-1. 指出哪些地方你听不懂（术语未解释、逻辑跳跃、假设了前置知识）
-2. 指出哪些重要方面用户没有提到或解释不完整
-3. 即使用户的解释明显有误，也绝对不要给出正确答案——只继续追问，
-   让用户自己发现错误。给出答案会剥夺用户最关键的学习时机。
-当用户连续两轮没有被指出新漏洞时，视为通过阶段一，自然过渡到阶段二，不需要宣布切换。
+根据用户开场话自然切换角色：
+- 「刚读完/还没整理」→ 主动提问，把他的零散理解引出来
+- 「我懂了/来检验我」→ 扮演不懂的初学者，找他解释里的漏洞
+- 掌握稳定后 → 给一个新场景，问能否迁移
 
-【阶段二：迁移训练】
-给出一个用户没见过的具体场景或新问题（来自不同领域），分两种方式交替使用：
-- 具体→抽象：描述一个现象，问「用你刚学的概念解释这个现象」
-- 抽象→具体：提出一个新问题，问「如何用这个概念解决它」
-每次只出一个场景，等用户回答后再给下一个。
-
-置信度追踪（贯穿全程）：
-每隔 2-3 轮，在回复末尾附加一行：
-「📊 当前掌握估计：X/5 — [一句话说明判断依据]，你自己感觉呢？」
-让用户对照自我评估，校准元认知。
-
-语气：友善、好奇，像求知欲强的学生，而非挑剔的评委。
-每次回复最后一句（置信度行除外）必须是问句。"
+每隔 2-3 轮附一行：「📊 X/5，你自己感觉呢？」"
   "System prompt for `org-sm-gptel-feynman'."
   :type 'string :group 'org-sm-gptel)
 
@@ -149,7 +146,11 @@
 1. 剥离废话、营销语气和过度修辞，保留核心事实。
 2. 每段限定一个独立主题；消除代词歧义（替换为具体名词）。
 3. 保持段落完整可读性——不要压缩成摘要，用户需要在阅读中理解后才制卡。
-4. 集合式列举（「特点有：A、B、C」）改写为有因果逻辑的叙述。"
+4. 集合式列举（「特点有：A、B、C」）改写为有因果逻辑的叙述。
+5. 严禁删除因果链。原文中的「因为」「导致」「所以」「才能」等连接词及其前后内容必须完整保留。
+   这类材料的核心价值正是「为什么」，删掉因果链等于把活知识变成死记忆。
+6. 如果原文只有结论没有说明原因，在段末加注：「【需补充】为什么是这个结论？」
+   提示用户主动去寻找原因，而不是直接给出。"
   "System prompt for topic refine operations."
   :type 'string :group 'org-sm-gptel)
 
@@ -166,7 +167,15 @@
 2. 保留 {{}} 周围能唯一定位答案的最短上下文，其余删除。
 3. 上下文须足够具体，不与相似概念混淆。
 4. 禁止枚举：「三个原因：A、B、C」拆成三张。
-5. 删除「众所周知」等无信息量修辞。"
+5. 删除「众所周知」等无信息量修辞。
+
+「为什么」型卡片规则（框架性认知类内容优先使用）：
+6. 当原文包含因果关系时，优先制「为什么」型卡，而非「是什么」型卡。
+   ✗ 是什么型：差序格局是指{{以自我为中心向外扩散的关系结构}}。（记定义，易忘）
+   ✓ 为什么型：差序格局导致领导偏向「自己人」，因为{{距离中心越近义务越大、越被信任}}。（记因果，可推导）
+7. 「为什么」型卡的 {{}} 填的是机制/原因/结果，而非名称或定义。
+8. 禁止代劳：不要在卡片中直接给出完整推导过程；只保留能触发用户自己推导的最小线索。
+   目标是让用户在回忆时自己完成推导，而不是复现你写的句子。"
   "System prompt for cloze refine operations."
   :type 'string :group 'org-sm-gptel)
 
@@ -249,7 +258,9 @@ Buffer *org-sm-explain: <heading>* is reused on re-invoke."
 2. 解释其中最难理解的部分（专业术语请逐一解释）
 3. 若有抽象概念，从 2-3 个不同领域给出类比，让我选择最贴合的
 
-（读完请合上窗口，用自己的话复述一遍再制卡。）"))
+重要：不要替我制卡、不要生成总结、不要出填空题。
+我需要的是理解，不是现成的卡。读完请关闭窗口，
+用自己的话尝试复述一遍，再自己动手制卡。"))
 
 ;;;###autoload
 (defun org-sm-gptel-feynman ()
@@ -294,8 +305,10 @@ Card type determines the system prompt:
            (if (eq type 'cloze) org-sm-gptel-system-cloze org-sm-gptel-system-topic))
           (gptel--rewrite-message
            (if (eq type 'cloze)
-               "检查是否违反最小信息原则：若含多个知识点请拆分；\
-保留 {{}} 关键词；上下文精简到唯一定位答案所需的最短长度。"
+               "第一步：判断方向。先看这张卡的 {{}} 填的是「名称/定义」还是「机制/原因/结果」。\
+如果是「名称/定义」型且原文有因果关系，先输出：「建议改为『因果型』：[XX导致...]，你要保留定义型还是改为因果型？」等用户决定再执行下一步。\
+第二步：检查格式。检查是否违反最小信息原则：若含多个知识点请拆分；\
+保留 {{}} 周围能唯一定位答案的最短上下文，其余删除。"
              "去除修辞废话，消除代词歧义（替换为具体名词），\
 保持段落完整可读性——不要压缩成摘要，这是 Topic 阶段材料。")))
       (call-interactively #'gptel-rewrite))))
