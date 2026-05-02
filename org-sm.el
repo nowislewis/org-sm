@@ -277,7 +277,7 @@ Call once after setting `org-sm-capture-file' and `org-sm-capture-olp'."
   (add-to-list 'org-capture-templates
                '("org-sm-topic" "org-sm topic" entry
                  (function org-sm--capture-goto-olp)
-                 "** %(org-sm--truncate-title org-sm--pending-content)\n%a%(identity org-sm--pending-content)"
+                 "** %(org-sm--truncate-title org-sm--pending-content)\n%(identity org-sm--pending-content)\n\n- source: %a"
                  :before-finalize (lambda () (org-sm-item-mark 'topic)))))
 
 (defun org-sm--capture-goto-olp ()
