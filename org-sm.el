@@ -93,7 +93,7 @@ that `org-schedule' (called internally) would climb to the wrong heading."
                                :learning-steps    '((1 :minute) (10 :minute))
                                :enable-fuzzing-p  t))))
 
-(defun org-sm--read-card ()
+(defun org-sm--cloze-read ()
   "Build an `fsrs-card' from the current heading's properties."
   (fsrs-make-card
    :state       (or (when-let* ((s (org-entry-get nil "SRS_STATE"))) (read s)) :learning)
@@ -109,7 +109,7 @@ that `org-schedule' (called internally) would climb to the wrong heading."
   "Set PROP to VALUE, or delete it when VALUE is nil."
   (if value (org-entry-put nil prop value) (org-delete-property prop)))
 
-(defun org-sm--write-card (card)
+(defun org-sm--cloze-write (card)
   "Persist CARD to current heading's properties and SCHEDULED."
   ;; Schedule first — org-entry-put moves point into PROPERTIES drawer.
   (org-sm--schedule (parse-iso8601-time-string (fsrs-card-due card)))
@@ -140,28 +140,27 @@ that `org-schedule' (called internally) would climb to the wrong heading."
 
 (defun org-sm--topic-afactor ()
   "Return A-Factor for current heading derived from org priority.
-  [#A] → 1.2 (slow growth, review frequently)
-  [#B] → 1.5
-  [#C] or none → 1.8 (fast growth, review less)"
+[#A] → 1.2 (slow growth, review frequently)
+[#B] → 1.5
+[#C] or none → 1.8 (fast growth, review less)"
   (pcase (org-entry-get nil "PRIORITY")
-    ("A" 1.2)
-    ("B" 1.5)
-    (_   1.8)))
+    ("A" 1.2) ("B" 1.5) (_ 1.8)))
 
-(defun org-sm--topic-review (a)
-  "Reschedule current topic with A-Factor A; return new interval in days.
-Uses scheduled time as interval reference to avoid early/late review distortion."
+(defun org-sm--topic-read (a)
+  "Calculate the automatic next interval in days for current topic using A-Factor A.
+Pure function: reads org properties but writes nothing.
+Uses SCHEDULED time as reference to avoid early/late review distortion."
   (let* ((last (org-entry-get nil "SRS_LAST"))
-         (ref  (or (org-get-scheduled-time nil) (current-time)))
-         (ivl  (max 1 (round (* a (if last
-                                      (max 1 (/ (float-time (time-subtract ref (parse-iso8601-time-string last)))
-                                                86400.0))
-                                    1))))))
-    ;; Schedule first — org-entry-put moves point into PROPERTIES drawer.
-    (org-sm--schedule (time-add (current-time) (days-to-time ivl)))
-    (org-entry-put nil "SRS_LAST" (format-time-string "%FT%TZ" (current-time) "UTC0"))
-    (org-sm--log-review 'topic nil (format "a=%.1f" a))
-    ivl))
+         (ref  (or (org-get-scheduled-time nil) (current-time))))
+    (max 1 (round (* a (if last
+                           (max 1 (/ (float-time (time-subtract ref (parse-iso8601-time-string last)))
+                                     86400.0))
+                         1))))))
+
+(defun org-sm--topic-write (ivl)
+  "Apply IVL (days) to current topic: update SCHEDULED and SRS_LAST."
+  (org-sm--schedule (time-add (current-time) (days-to-time ivl)))
+  (org-entry-put nil "SRS_LAST" (format-time-string "%FT%TZ" (current-time) "UTC0")))
 
 ;;;; ---- Cloze overlays ------------------------------------------------------
 
@@ -503,9 +502,23 @@ PREV is a string describing the last action, shown in the echo area."
     (user-error "No active review session — call org-sm-review-start"))
   (pcase (or (org-sm-type) (user-error "Not on an SRS heading"))
     ('topic
-     (let* ((a   (org-sm--topic-afactor))
-            (ivl (org-sm--topic-review a)))
-       (org-sm--advance (format "topic [a=%.1f] → %d days" a ivl))))
+     (let* ((a        (org-sm--topic-afactor))
+            (auto-ivl (org-sm--topic-read a))
+            (choices  `((?r ,(format "rsch(%dd)" auto-ivl))
+                        (?t "tmrw(1d)")
+                        (?w "week(7d)")
+                        (?m "mnth(30d)"))))
+       (org-sm--prompt-choice "Topic interval: " choices
+         (lambda (key)
+           (let* ((ivl   (pcase key (?r auto-ivl) (?t 1) (?w 7) (?m 30)))
+                  (extra (if (eq key ?r)
+                             (format "a=%.1f  %2dd" a ivl)
+                           (format "manual  %2dd" ivl))))
+             (org-sm--topic-write ivl)
+             (org-sm--log-review 'topic nil extra)
+             (org-sm--advance (format "topic → %d days" ivl)))))))
+
+
     ('cloze
      (pcase org-sm--cloze-state
        ('hidden
@@ -514,32 +527,46 @@ PREV is a string describing the last action, shown in the echo area."
         (message "org-sm: cloze revealed — edit if needed, M-x review-confirm to rate"))
        ('revealed
         (org-sm-cloze-remove-overlays)
-        (let* ((card      (org-sm--read-card))
-               (now       (fsrs-now))
-               (previews  (mapcar
-                           (lambda (r)
-                             (let* ((rating  (caddr r))
-                                    (c       (cl-nth-value 0 (fsrs-scheduler-review-card
-                                                              org-sm--scheduler card rating)))
-                                    (secs    (fsrs-timestamp-difference (fsrs-card-due c) now))
-                                    (days    (fsrs-seconds-days secs))
-                                    (label   (if (< days 1)
-                                                 (format "%s(%dm)" (cadr r) (round (/ secs 60)))
-                                               (format "%s(%dd)" (cadr r) days))))
-                               (list (car r) label rating c)))
-                           '((?a "again" :again) (?h "hard" :hard)
-                             (?g "good"  :good)  (?e "easy" :easy))))
-               (choice    (read-multiple-choice
-                           "Rate: " (mapcar (lambda (p) (list (car p) (cadr p))) previews)))
-               (matched   (assq (car choice) previews))
-               (rating    (caddr matched))
-               (new-card  (cadddr matched))
-               (next-due  (format-time-string "%F %H:%M"
-                                              (parse-iso8601-time-string
-                                               (fsrs-card-due new-card)))))
-          (org-sm--write-card new-card)
-          (org-sm--log-review 'cloze rating)
-          (org-sm--advance (format "cloze %s → %s" rating next-due))))))))
+        (let* ((card        (org-sm--cloze-read))
+               (now         (fsrs-now))
+               ;; Business layer: key → (rating new-card secs)
+               (ratings     '((?a :again) (?h :hard) (?g :good) (?e :easy)))
+               (results     (mapcar
+                              (lambda (r)
+                                (let* ((rating (cadr r))
+                                       (c      (cl-nth-value 0 (fsrs-scheduler-review-card
+                                                                 org-sm--scheduler card rating)))
+                                       (secs   (fsrs-timestamp-difference (fsrs-card-due c) now)))
+                                  (list (car r) rating c secs)))
+                              ratings))
+               ;; UI layer: key → (key label) for read-multiple-choice
+               (choices     (mapcar
+                              (lambda (r)
+                                (let* ((key   (car r))
+                                       (secs  (nth 3 r))
+                                       (days  (fsrs-seconds-days secs))
+                                       (label (if (< days 1)
+                                                  (format "%s(%dm)" (nth 1 r) (round (/ secs 60)))
+                                                (format "%s(%dd)" (nth 1 r) days))))
+                                  (list key label)))
+                              results)))
+          (org-sm--prompt-choice "Rate: " choices
+            (lambda (key)
+              (let* ((r        (assq key results))
+                     (rating   (nth 1 r))
+                     (new-card (nth 2 r))
+                     (secs     (nth 3 r))
+                     (days     (fsrs-seconds-days secs))
+                     (next-due (format-time-string "%F %H:%M"
+                                                   (parse-iso8601-time-string
+                                                    (fsrs-card-due new-card))))
+                     (extra    (if (< days 1)
+                                  (format "%s  %2dm" rating (round (/ secs 60)))
+                                (format "%s  %2dd" rating (round days)))))
+                (org-sm--cloze-write new-card)
+                (org-sm--log-review 'cloze nil extra)
+                (org-sm--advance (format "cloze %s → %s" rating next-due)))))))))))
+
 
 ;;;###autoload
 (defun org-sm-item-dismiss ()
@@ -552,7 +579,21 @@ scheduling data are preserved so the item can be restored with
   (when (org-sm--dismissed-p) (user-error "Already dismissed"))
   (org-toggle-tag "dismissed" 'on)
   (org-sm--log-review 'dismissed)
-  (org-sm--advance "dismissed"))
+  ;; Only advance the review queue if a session is active.
+  (if org-sm--queue
+      (org-sm--advance "dismissed")
+    (message "org-sm: item dismissed")))
+
+(defun org-sm--prompt-choice (prompt choices action-fn)
+  "Prompt user with CHOICES, automatically appending a dismiss option.
+If the user chooses dismiss, call `org-sm-item-dismiss'.
+Otherwise, call ACTION-FN with the chosen key."
+  (let* ((all-choices (append choices '((?d "dismiss"))))
+         (choice (read-multiple-choice prompt all-choices))
+         (key (car choice)))
+    (if (eq key ?d)
+        (org-sm-item-dismiss)
+      (funcall action-fn key))))
 
 ;;;###autoload
 (defun org-sm-item-undismiss ()
