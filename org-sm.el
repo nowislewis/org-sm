@@ -20,7 +20,8 @@
 ;;   org-sm-review-confirm - confirm topic read / advance cloze state
 ;;   org-sm-review-abort   - abort review session
 ;;   org-sm-review-list    - browse all SRS items
-;;   org-sm-capture-topic  - capture region (with M-w) or clipboard as topic (bound to M-z)
+;;   org-sm-capture-topic           - capture region/clipboard as topic.
+;;   org-sm-capture-topic-from-input - interactive capture; prompts for heading/body.
 ;;
 ;; Two minor modes are provided:
 ;;   org-sm-mode             - buffer-local; {{cloze}} font-lock (use via :hook)
@@ -287,12 +288,20 @@ Example: \\='(\"Topics\" \"Physics\")"
 
 ;;;###autoload
 (defun org-sm-setup-capture ()
-  "Register the org-sm topic capture template.
-Call once after setting `org-sm-capture-file' and `org-sm-capture-olp'."
+  "Register org-sm capture templates.
+Call once after setting `org-sm-capture-file' and `org-sm-capture-olp'.
+
+  org-sm-topic            - capture clipboard/region as topic (original).
+  org-sm-topic-from-input - interactive capture; prompts for heading and body."
   (add-to-list 'org-capture-templates
                '("org-sm-topic" "org-sm topic" entry
                  (function org-sm--capture-goto-olp)
                  "** %(org-sm--truncate-title org-sm--pending-content)\n%(identity org-sm--pending-content)\n\n- source: %a"
+                 :before-finalize (lambda () (org-sm-item-mark 'topic))))
+  (add-to-list 'org-capture-templates
+               '("org-sm-topic-from-input" "org-sm topic from input" entry
+                 (function org-sm--capture-goto-olp)
+                 "** %?\n:PROPERTIES:\n:PSA_FEELING: 记下这张卡片的感受\n:END:\n"
                  :before-finalize (lambda () (org-sm-item-mark 'topic)))))
 
 (defun org-sm--capture-goto-olp ()
@@ -328,6 +337,14 @@ With prefix arg, prompt to update `org-sm-capture-file' and `org-sm-capture-olp'
             (ignore-errors (current-kill 0 t))
             ""))
   (org-capture nil "org-sm-topic"))
+
+;;;###autoload
+(defun org-sm-capture-topic-from-input ()
+  "Capture a new topic card by interactively entering heading and body."
+  (interactive)
+  (unless org-sm-capture-file
+    (user-error "Set `org-sm-capture-file' and call `org-sm-setup-capture' first"))
+  (org-capture nil "org-sm-topic-from-input"))
 
 (defun org-sm--select-capture-olp ()
   "Prompt to select a heading in `org-sm-capture-file'; set `org-sm-capture-olp'."
