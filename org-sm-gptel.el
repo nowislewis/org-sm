@@ -61,16 +61,20 @@
 (defcustom org-sm-gptel-system-explain
   "你是专注于帮助深度理解概念的学习导师。
 
-你的角色：解释者。用户遇到了不理解的内容，你负责用通俗语言讲清楚。
+你的角色：解释者。用户在渐进阅读复习中遇到了看不懂的内容，你负责帮他建立理解。
 
 约束：
 - 只解释，不制卡。不要主动生成任何填空题或卡片格式。
 - 回答精炼，直击本质，避免冗长铺垫。
-- 解释抽象概念时，主动从 2-3 个不同领域生成类比（如日常生活、工程、自然现象），
+- 解释抽象概念时，从 2-3 个不同领域生成类比（如日常生活、工程、自然现象），
   让用户选择最贴合自己经验的一个，而不是只给一个类比。
 - 当概念之间存在层次、流程或对比关系时，用 ASCII 图或 org 表格可视化结构，
-  而不只是文字叙述——视觉编码和语言编码同时激活，记忆更牢固。
-- 当用户表示已经理解时，提示一次：可用 feynman 命令来真正检验掌握程度。"
+  而不只是文字叙述。
+- 解释完之后，必须问用户一个问题：
+  「现在你觉得这段里哪个词或概念，去掉了这句话就不成立？」
+  等用户自己回答，不要替他回答，不要给提示。
+- 用户回答后，只做一件事：确认或指出他的回答是否抓住了核心，一句话。
+  不要继续展开，把制卡的动作留给用户自己。"
   "System prompt for `org-sm-gptel-explain'."
   :type 'string :group 'org-sm-gptel)
 
@@ -225,9 +229,10 @@ Subsequent calls redisplay the existing buffer without sending again."
          (chat-buf (gptel buf-name))
          (src-file (buffer-file-name)))
     (with-current-buffer chat-buf
-      (setq-local gptel--system-prompt system)
+      (setq-local gptel--system-message system)
       (when (and src-file (file-readable-p src-file))
         (require 'gptel-context)
+        (setq-local gptel-context nil)
         (gptel-context-add-file src-file))
       (when new-p
         (goto-char (point-max))
@@ -253,14 +258,12 @@ Buffer *org-sm-explain: <heading>* is reused on re-invoke."
   (interactive)
   (org-sm-gptel--open-chat
    "explain" org-sm-gptel-system-explain
-   "我在阅读以下内容时遇到了困难，请帮我：
-1. 快速评估这段材料的价值（值得深读/浅读/跳过，理由一句话）
-2. 解释其中最难理解的部分（专业术语请逐一解释）
-3. 若有抽象概念，从 2-3 个不同领域给出类比，让我选择最贴合的
+   "我在复习以下内容时看不懂，请：
+1. 用一句话说清楚这段的核心是什么
+2. 解释我可能卡住的地方（术语 / 因果链 / 前置知识缺失）
+3. 给一个类比帮我建立直觉
 
-重要：不要替我制卡、不要生成总结、不要出填空题。
-我需要的是理解，不是现成的卡。读完请关闭窗口，
-用自己的话尝试复述一遍，再自己动手制卡。"))
+不要替我制卡，不要生成总结。"))
 
 ;;;###autoload
 (defun org-sm-gptel-feynman ()

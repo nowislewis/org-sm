@@ -158,9 +158,25 @@ Uses SCHEDULED time as reference to avoid early/late review distortion."
                          1))))))
 
 (defun org-sm--topic-write (ivl)
-  "Apply IVL (days) to current topic: update SCHEDULED and SRS_LAST."
+  "Apply IVL (days) to current topic: update SCHEDULED and SRS_LAST.
+ This is a real repetition: SRS_LAST is set to now, SCHEDULED to now+IVL."
   (org-sm--schedule (time-add (current-time) (days-to-time ivl)))
   (org-entry-put nil "SRS_LAST" (format-time-string "%FT%TZ" (current-time) "UTC0")))
+
+(defun org-sm--topic-postpone (days)
+  "Postpone current topic by DAYS without counting as a repetition.
+Both SRS_LAST and SCHEDULED are shifted forward by DAYS, preserving
+the interval between them so A-Factor calculation is unaffected."
+  (let* ((last-str  (org-entry-get nil "SRS_LAST"))
+         (sched     (or (org-get-scheduled-time nil) (current-time)))
+         (shift     (days-to-time days))
+         (new-sched (time-add sched shift))
+         (new-last  (if last-str
+                        (time-add (parse-iso8601-time-string last-str) shift)
+                      (time-subtract new-sched (days-to-time 1)))))
+    (org-sm--schedule new-sched)
+    (org-entry-put nil "SRS_LAST"
+                   (format-time-string "%FT%TZ" new-last "UTC0"))))
 
 ;;;; ---- Cloze overlays ------------------------------------------------------
 
@@ -505,19 +521,23 @@ PREV is a string describing the last action, shown in the echo area."
      (let* ((a        (org-sm--topic-afactor))
             (auto-ivl (org-sm--topic-read a))
             (choices  `((?r ,(format "rsch(%dd)" auto-ivl))
-                        (?t "tmrw(1d)")
-                        (?w "week(7d)")
-                        (?m "mnth(30d)"))))
-       (org-sm--prompt-choice "Topic interval: " choices
+                        (?p "postpone")
+                        (?e "explain"))))
+       (org-sm--prompt-choice "Topic: " choices
          (lambda (key)
-           (let* ((ivl   (pcase key (?r auto-ivl) (?t 1) (?w 7) (?m 30)))
-                  (extra (if (eq key ?r)
-                             (format "a=%.1f  %2dd" a ivl)
-                           (format "manual  %2dd" ivl))))
-             (org-sm--topic-write ivl)
-             (org-sm--log-review 'topic nil extra)
-             (org-sm--advance (format "topic → %d days" ivl)))))))
-
+           (pcase key
+             (?r
+              (org-sm--topic-write auto-ivl)
+              (org-sm--log-review 'topic nil (format "a=%.1f  %2dd" a auto-ivl))
+              (org-sm--advance (format "topic → %d days" auto-ivl)))
+             (?p
+              (let* ((days (read-number "Postpone days: " 7)))
+                (org-sm--topic-postpone days)
+                (org-sm--log-review 'topic nil (format "postpone  %2dd" days))
+                (org-sm--advance (format "topic postpone → %d days" days))))
+             (?e
+              (org-sm--log-review 'topic nil "explain")
+              (org-sm-gptel-explain)))))))
 
     ('cloze
      (pcase org-sm--cloze-state
