@@ -567,7 +567,8 @@ PREV is a string describing the last action, shown in the echo area."
         (let* ((card        (org-sm--cloze-read))
                (now         (fsrs-now))
                ;; Business layer: key → (rating new-card secs)
-               (ratings     '((?a :again) (?h :hard) (?g :good) (?e :easy)))
+               ;; So cloze review becomes: r = reveal, r = good.
+               (ratings     '((?a :again) (?h :hard) (?r :good) (?e :easy)))
                (results     (mapcar
                               (lambda (r)
                                 (let* ((rating (cadr r))
