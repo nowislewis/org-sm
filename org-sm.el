@@ -332,10 +332,8 @@ With prefix arg, prompt to update `org-sm-capture-file' and `org-sm-capture-olp'
   (when (or (use-region-p) (derived-mode-p 'reader-mode))
     (execute-kbd-macro (kbd "M-w")))
   (setq org-sm--pending-content
-        (or (and (fboundp 'gui-get-selection)
-                 (gui-get-selection 'CLIPBOARD 'STRING))
-            (ignore-errors (current-kill 0 t))
-            ""))
+        (substring-no-properties
+         (or (ignore-errors (current-kill 0 t)) "")))
   (org-capture nil "org-sm-topic"))
 
 ;;;###autoload
