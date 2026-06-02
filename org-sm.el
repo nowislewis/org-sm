@@ -46,6 +46,10 @@
 (require 'org-macs)
 (require 'fsrs)
 
+(declare-function org-sm-gptel-explain "org-sm-gptel")
+(declare-function org-capture-put-target-region-and-position "org-capture")
+(defvar org-capture-templates)
+
 ;;;; ---- Customization -------------------------------------------------------
 
 (defgroup org-sm nil
@@ -80,6 +84,19 @@ Must be called before any `org-entry-put' / `org-set-property' on the same
 heading, because those functions move point into the PROPERTIES drawer; after
 that `org-schedule' (called internally) would climb to the wrong heading."
   (org-schedule nil (format-time-string "%F %a %H:%M" time)))
+
+;;;; ---- Review session state ------------------------------------------------
+;; Declared early so `org-sm-item-extract' (defined above the review section)
+;; can reference `org-sm--cloze-state' without a free-variable warning.
+
+(defvar org-sm--queue nil
+  "Active review queue: list of markers consumed by `org-sm--advance'.")
+
+(defvar-local org-sm--cloze-state nil
+  "Cloze review state for the current buffer: `hidden' or `revealed'.")
+
+(defvar org-sm--current-buffer nil
+  "Buffer holding the card currently being reviewed, for state cleanup.")
 
 ;;;; ---- FSRS ----------------------------------------------------------------
 
@@ -438,12 +455,6 @@ inserted immediately after the selection so the link stays in context.
 
 ;;;; ---- Review session ------------------------------------------------------
 
-(defvar org-sm--queue nil
-  "Active review queue: list of markers consumed by `org-sm--advance'.")
-
-(defvar-local org-sm--cloze-state nil
-  "Cloze review state for the current buffer: `hidden' or `revealed'.")
-
 (defun org-sm--dismissed-p ()
   "Return non-nil if current heading carries the :dismissed: tag."
   (member "dismissed" (org-get-tags nil t)))
@@ -469,11 +480,22 @@ inserted immediately after the selection so the link stays in context.
             (sort (delq nil results)
                   (lambda (a b) (> (car a) (car b)))))))
 
+(defun org-sm--cleanup-buffer ()
+  "Clear cloze overlays and state in the previously reviewed buffer."
+  (when (buffer-live-p org-sm--current-buffer)
+    (with-current-buffer org-sm--current-buffer
+      (when org-sm--cloze-state
+        (org-sm-cloze-remove-overlays)
+        (setq org-sm--cloze-state nil))))
+  (setq org-sm--current-buffer nil))
+
 (defun org-sm--goto-marker (marker)
   "Switch to MARKER's buffer, narrow to its subtree, set up cloze state."
   (unless (marker-buffer marker)
     (error "org-sm: stale marker — restart the review session"))
+  (org-sm--cleanup-buffer)            ; clear leftover state from the last card
   (switch-to-buffer (marker-buffer marker))
+  (setq org-sm--current-buffer (current-buffer))
   (widen)
   (goto-char marker)
   (org-back-to-heading t)
@@ -510,7 +532,7 @@ PREV is a string describing the last action, shown in the echo area."
           (message "org-sm: skipping stale marker"))))
     (if found
         (org-sm--show-prompt prev)
-      (setq org-sm--cloze-state nil)
+      (org-sm--cleanup-buffer)
       (message "org-sm: done 󱁖 %s" (if prev (format "  (last: %s)" prev) "")))))
 
 ;;;###autoload
@@ -551,8 +573,10 @@ PREV is a string describing the last action, shown in the echo area."
                 (org-sm--log-review 'topic nil (format "postpone  %2dd" days))
                 (org-sm--advance (format "topic postpone → %d days" days))))
              (?e
-              (org-sm--log-review 'topic nil "explain")
-              (org-sm-gptel-explain)))))))
+              (if (fboundp 'org-sm-gptel-explain)
+                  (progn (org-sm--log-review 'topic nil "explain")
+                         (org-sm-gptel-explain))
+                (user-error "org-sm-gptel not loaded"))))))))
 
     ('cloze
      (pcase org-sm--cloze-state
@@ -638,23 +662,18 @@ Otherwise, call ACTION-FN with the chosen key."
   (unless (org-sm-type) (user-error "Not on an SRS heading"))
   (unless (org-sm--dismissed-p) (user-error "Item is not dismissed"))
   (org-toggle-tag "dismissed" 'off)
-  (message "org-sm: item restored — due %s"
-           (format-time-string "%F" (org-get-scheduled-time nil))))
+  (if-let* ((s (org-get-scheduled-time nil)))
+      (message "org-sm: item restored — due %s" (format-time-string "%F" s))
+    (message "org-sm: item restored (no schedule)")))
 
 ;;;###autoload
 (defun org-sm-review-abort ()
   "Abort the current review session, cleaning up state and overlays."
   (interactive)
-  (unless (or org-sm--queue
-              (cl-some (lambda (b) (buffer-local-value 'org-sm--cloze-state b))
-                       (buffer-list)))
+  (unless (or org-sm--queue (buffer-live-p org-sm--current-buffer))
     (user-error "No active review session"))
   (setq org-sm--queue nil)
-  (dolist (b (buffer-list))
-    (with-current-buffer b
-      (when org-sm--cloze-state
-        (org-sm-cloze-remove-overlays)
-        (setq org-sm--cloze-state nil))))
+  (org-sm--cleanup-buffer)
   (when (buffer-narrowed-p) (widen))
   (message "org-sm: review aborted"))
 
