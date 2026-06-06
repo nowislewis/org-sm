@@ -499,11 +499,13 @@ inserted immediately after the selection so the link stays in context.
   (widen)
   (goto-char marker)
   (org-back-to-heading t)
-  ;; Fold subtree first so any previously-open children are hidden, then
-  ;; re-open only the current entry's body (not its children).
-  (org-fold-hide-subtree)
-  (org-fold-show-entry)
   (org-narrow-to-subtree)
+  (org-fold-hide-subtree)
+  ;; Topics: show entry body + child heading lines (bodies stay folded).
+  ;; Clozes: show only entry body, hide child headings (avoid leaks).
+  (org-fold-show-entry)
+  (when (eq (org-sm-type) 'topic)
+    (org-fold-show-branches))
   (goto-char (point-min))
   (recenter 0)
   (when (eq (org-sm-type) 'cloze)
