@@ -466,6 +466,15 @@ inserted immediately after the selection so the link stays in context.
        (when-let* ((t_ (org-get-scheduled-time nil)))
          (<= (float-time t_) (float-time)))))
 
+(defun org-sm--scan-files ()
+  "Subset of `org-sm--files' that actually contain SRS items.
+Greps for the SRS_TYPE property so scanning only opens the few relevant
+files instead of every file in `org-sm--files'."
+  (when org-sm--files
+    (with-temp-buffer
+      (apply #'call-process "grep" nil t nil "-lZ" ":SRS_TYPE:" org-sm--files)
+      (split-string (buffer-string) "\0" t))))
+
 (defun org-sm--collect-due-markers ()
   "Return markers for all due SRS items across `org-sm--files', sorted by priority."
   (let ((results
@@ -475,7 +484,7 @@ inserted immediately after the selection so the link stays in context.
               (cons (org-get-priority (org-get-heading t t t t))
                     (point-marker))))
           nil
-          org-sm--files)))
+          (org-sm--scan-files))))
     (mapcar #'cdr
             (sort (delq nil results)
                   (lambda (a b) (> (car a) (car b)))))))
@@ -716,7 +725,7 @@ Otherwise, call ACTION-FN with the chosen key."
   (let ((org-agenda-custom-commands
          `(("_" "org-sm review list"
             tags "SRS_TYPE={.+}"
-            ((org-agenda-files org-sm--files)
+            ((org-agenda-files ',(org-sm--scan-files))
              (org-agenda-prefix-format
               '((tags . "%(org-sm--review-list-prefix)"))))))))
     (org-agenda nil "_")))
