@@ -105,18 +105,20 @@ Optional extension powered by [[https://github.com/karthink/gptel][gptel]].
 (with-eval-after-load 'gptel
   (require 'org-sm-gptel)
   (define-key org-mode-map (kbd "C-c s ?") #'org-sm-gptel-explain)
-  (define-key org-mode-map (kbd "C-c s i") #'org-sm-gptel-refine)
-  (define-key org-mode-map (kbd "C-c s M") #'org-sm-gptel-generate-concept))
+  (define-key org-mode-map (kbd "C-c s i") #'org-sm-gptel-refine))
 #+end_src
 
 ** Commands
 
 *** ~org-sm-gptel-explain~ (=C-c s ?=)
 
-Streams an AI explanation into a side window without interrupting the review.
-For cloze: explains the concept behind ~{{}}~ and flags interference risks.
-For topic: highlights the most card-worthy facts and explains jargon.
-Press ~q~ to abort and close.
+Opens a persistent side-window chat where the AI explains the current heading
+*to you* — use when you're stuck during review.  Follows a *why-before-what*
+order: it first explains the design motive / causal chain (why the thing exists
+and why it's built this way), and only then states what it is.  Closes with a
+single question asking which word the sentence can't live without, leaving the
+card-making to you.  The chat buffer ~*org-sm-explain: <heading>*~ is reused on
+re-invoke.
 
 *** ~org-sm-gptel-refine~ (=C-c s i=)
 
@@ -125,10 +127,14 @@ Works on any org heading — including org-capture buffers before ~C-c C-c~.
 
 The system prompt is chosen automatically by card type:
 
-- *cloze* → enforces minimum-information principle: one ~{{}}~ per card,
-  answer ≤ 5 words, split multi-fact content into separate cards.
+- *cloze* → first checks *direction* (why-type vs what-type): if the ~{{}}~ is a
+  name/definition but the source has a causal relation, it proposes converting
+  to a why-type cloze and waits for your decision; then enforces the
+  minimum-information principle (one ~{{}}~ per card, answer ≤ 5 words, split
+  multi-fact content).
 - *topic / unset* → cleans prose for incremental reading: strips filler,
-  resolves pronoun ambiguity, preserves paragraph structure (not a summary).
+  resolves pronoun ambiguity, preserves paragraph structure (not a summary),
+  and never deletes causal links (flags ~【需补充】~ when a conclusion lacks its why).
 
 The instruction is pre-filled in the minibuffer; press ~RET~ to confirm or
 edit it first.  gptel-rewrite overlay keys:
@@ -146,13 +152,4 @@ Typical workflow after ~org-sm-capture-topic~ or ~org-sm-item-extract~:
 2. ~C-c s i~ to refine raw content.
 3. ~C-c C-a~ to accept, then continue.
 
-*** ~org-sm-gptel-generate-concept~ (=C-c s M=)
 
-Synthesizes the current subtree (or active region) into a concept-map Topic.
-Inserts a new =[#A]= heading immediately after the subtree, scheduled for SRS.
-
-Output structure:
-1. *Core logic thread* — causal / chronological chain linking the items.
-2. *Confusion analysis* — side-by-side "decisive feature" comparison of easily
-   mixed concepts (table format when applicable).
-3. *Knowledge gaps* — prerequisite concepts missing for full understanding.
