@@ -716,15 +716,17 @@ properties and scheduling data are preserved for `org-sm-item-undismiss'."
     (message "org-sm: item dismissed")))
 
 (defun org-sm--prompt-choice (prompt choices action-fn)
-  "Prompt user with CHOICES, automatically appending a dismiss option.
-If the user chooses dismiss, call `org-sm-item-dismiss'.
-Otherwise, call ACTION-FN with the chosen key."
-  (let* ((all-choices (append choices '((?d "dismiss"))))
+  "Prompt user with CHOICES, appending built-in skip and dismiss options.
+skip advances to the next card without any change (it stays due and
+reappears next session); dismiss calls `org-sm-item-dismiss'.  For any
+other key, call ACTION-FN with it."
+  (let* ((all-choices (append choices '((?s "skip") (?d "dismiss"))))
          (choice (read-multiple-choice prompt all-choices))
          (key (car choice)))
-    (if (eq key ?d)
-        (org-sm-item-dismiss)
-      (funcall action-fn key))))
+    (pcase key
+      (?s (org-sm--advance "skipped"))
+      (?d (org-sm-item-dismiss))
+      (_  (funcall action-fn key)))))
 
 ;;;###autoload
 (defun org-sm-item-undismiss ()

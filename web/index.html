@@ -30,6 +30,7 @@
   main { flex: 1; overflow-y: auto; padding: 16px; }
   .title { font-size: 15px; color: var(--dim); margin-bottom: 12px;
     display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .title-actions { display: flex; gap: 16px; flex: none; }
   .title .edit-link { color: var(--accent); font-size: 14px; cursor: pointer; }
   .body {
     background: var(--card); border-radius: 12px; padding: 18px;
@@ -139,14 +140,21 @@ function render() {
   hideSelMenu();
   const m = $('main');
   m.innerHTML = '';
-  // title row with edit toggle
+  // title row: heading label + right-aligned Edit / Skip links
   const t = document.createElement('div');
   t.className = 'title';
   const label = document.createElement('span'); label.textContent = card.title;
+  const actions = document.createElement('span'); actions.className = 'title-actions';
   const edit = document.createElement('span'); edit.className = 'edit-link';
   edit.textContent = editing ? 'Cancel' : 'Edit';
   edit.onclick = () => { editing = !editing; render(); };
-  t.append(label, edit);
+  actions.append(edit);
+  if (!editing) {                       // Skip only outside edit mode
+    const sk = document.createElement('span'); sk.className = 'edit-link';
+    sk.textContent = 'Skip'; sk.onclick = skip;
+    actions.append(sk);
+  }
+  t.append(label, actions);
 
   let bodyEl;
   if (editing) {
@@ -181,21 +189,17 @@ function renderFooter() {
   if (card.type === 'cloze' && !revealed) {
     f.append(row(mkBtn('Show', 'r-good', () => { revealed = true; render(); })));
   } else if (card.type === 'cloze') {
-    const row = document.createElement('div'); row.className = 'btn-row';
     const iv = card.intervals || {};
-    row.append(
+    f.append(row(
       mkBtn2('Again', iv.again, 'r-again', () => review({rating:'again'})),
       mkBtn2('Hard',  iv.hard,  'r-hard',  () => review({rating:'hard'})),
       mkBtn2('Good',  iv.good,  'r-good',  () => review({rating:'good'})),
-      mkBtn2('Easy',  iv.easy,  'r-easy',  () => review({rating:'easy'})));
-    f.append(row);
+      mkBtn2('Easy',  iv.easy,  'r-easy',  () => review({rating:'easy'}))));
   } else {
-    const row = document.createElement('div'); row.className = 'btn-row';
-    row.append(
+    f.append(row(
       mkBtn2('Reschedule', (card.intervals || {}).reschedule, 'r-good', () => review({action:'reschedule'})),
       mkBtn('Postpone', 'r-hard',  postpone),
-      mkBtn('Dismiss', 'wide',    () => review({action:'dismiss'})));
-    f.append(row);
+      mkBtn('Dismiss', 'wide',    () => review({action:'dismiss'}))));
   }
 }
 
@@ -229,6 +233,15 @@ async function postpone() {
   const days = parseInt(input, 10);
   if (!Number.isFinite(days) || days < 1) { toast('Invalid number of days'); return; }
   await review({ action: 'postpone', days });
+}
+
+// Skip the current card: drop it from this session and advance.  No server
+// call, no scheduling change -- it stays due and reappears next session
+// (mirrors `org-sm-review-skip').
+function skip() {
+  queue.shift();                    // remove current card from this session
+  $('count').textContent = queue.length;
+  if (queue.length) showCard(queue[0].id); else done();
 }
 
 async function review(params) {

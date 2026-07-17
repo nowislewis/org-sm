@@ -64,6 +64,9 @@ Suggested keybindings:
 
 *Cloze:* ~review-start~ (answers hidden) → ~review-confirm~ (reveals) → ~review-confirm~ (rate).
 
+Every review prompt also offers *skip* and *dismiss*.  *skip* advances to the
+next card with no change — the card stays due and reappears next session.
+
 Intervals are calculated from the scheduled date, so early/late reviews don't distort spacing.
 
 * Capture
