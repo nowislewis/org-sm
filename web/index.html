@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>org-sm review</title>
+<style>
+  :root {
+    --bg: #1e1e2e; --fg: #cdd6f4; --dim: #6c7086;
+    --card: #313244; --accent: #89b4fa;
+    --again: #f38ba8; --hard: #fab387; --good: #a6e3a1; --easy: #94e2d5;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 17px/1.6 -apple-system, system-ui, sans-serif;
+    display: flex; flex-direction: column;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  header {
+    padding: 12px 16px; font-size: 14px; color: var(--dim);
+    display: flex; justify-content: space-between; align-items: center;
+    border-bottom: 1px solid var(--card);
+  }
+  header .count { color: var(--accent); font-weight: 600; }
+  main { flex: 1; overflow-y: auto; padding: 16px; }
+  .title { font-size: 15px; color: var(--dim); margin-bottom: 12px;
+    display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .title .edit-link { color: var(--accent); font-size: 14px; cursor: pointer; }
+  .body {
+    background: var(--card); border-radius: 12px; padding: 18px;
+    white-space: pre-wrap; word-break: break-word; font-size: 18px;
+    -webkit-user-select: text; user-select: text;
+  }
+  textarea.body {
+    width: 100%; min-height: 40vh; color: var(--fg);
+    border: 1px solid var(--accent); font: inherit; resize: vertical;
+  }
+  .cloze-hidden { background: var(--accent); color: var(--bg);
+    border-radius: 5px; padding: 0 8px; font-weight: 600; }
+  .cloze-shown { color: var(--good); font-weight: 600; }
+  .empty { text-align: center; color: var(--dim); margin-top: 40vh; }
+  footer { padding: 12px 16px calc(12px + env(safe-area-inset-bottom)); }
+  .btn-row { display: flex; gap: 10px; }
+  button {
+    flex: 1; border: none; border-radius: 12px; padding: 16px 0;
+    font-size: 17px; font-weight: 600; color: var(--bg);
+    background: var(--accent); cursor: pointer; touch-action: manipulation;
+  }
+  button:active { filter: brightness(0.85); }
+  button.wide { background: var(--card); color: var(--fg); }
+  button .sub { font-size: 12px; font-weight: 500; opacity: .75; margin-top: 2px; }
+  .r-again { background: var(--again); } .r-hard { background: var(--hard); }
+  .r-good  { background: var(--good);  } .r-easy { background: var(--easy); }
+  /* floating extract menu shown on text selection */
+  #sel-menu {
+    position: fixed; z-index: 50; display: none; gap: 6px;
+    background: #45475a; border-radius: 10px; padding: 6px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.4); transform: translateX(-50%);
+  }
+  #sel-menu button {
+    flex: none; padding: 8px 14px; font-size: 14px; border-radius: 7px;
+    color: var(--bg);
+  }
+  #sel-menu .m-topic { background: var(--accent); }
+  #sel-menu .m-cloze { background: var(--good); }
+  .toast {
+    position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%);
+    background: #45475a; color: var(--fg); padding: 10px 18px;
+    border-radius: 20px; font-size: 14px; opacity: 0; transition: opacity .2s;
+    pointer-events: none; z-index: 60;
+  }
+  .toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+<header>
+  <span>org-sm</span>
+  <span><span class="count" id="count">–</span> due</span>
+</header>
+<main id="main">
+  <div class="empty" id="empty">Loading…</div>
+</main>
+<footer id="footer"></footer>
+
+<div id="sel-menu">
+  <button class="m-topic" data-type="topic">Extract Topic</button>
+  <button class="m-cloze" data-type="cloze">Extract Cloze</button>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let queue = [], card = null, revealed = false, editing = false;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const text = await r.text();
+  try { return JSON.parse(text); }
+  catch (e) { throw new Error('bad response (' + r.status + '): ' + text.slice(0, 80)); }
+}
+function post(path, params) {
+  return api(path, { method:'POST',
+    headers:{'Content-Type':'application/x-www-form-urlencoded'},
+    body: new URLSearchParams(params).toString() });
+}
+function toast(msg) {
+  const t = $('toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove('show'), 1600);
+}
+
+async function loadQueue() {
+  queue = await api('/api/queue');
+  $('count').textContent = queue.length;
+  if (!queue.length) { done(); return; }
+  await showCard(queue[0].id);
+}
+function done() {
+  card = null;
+  $('main').innerHTML = '<div class="empty">🎉 Done — nothing due</div>';
+  $('footer').innerHTML = '';
+}
+async function showCard(id) {
+  card = await api('/api/card/' + encodeURIComponent(id));
+  revealed = false; editing = false;
+  render();
+}
+// Reload the CURRENT card from the server (body may have changed after extract/edit)
+async function reloadCard() {
+  if (card) { const id = card.id; card = await api('/api/card/' + encodeURIComponent(id)); }
+  revealed = false; editing = false; render();
+}
+
+function render() {
+  hideSelMenu();
+  const m = $('main');
+  m.innerHTML = '';
+  // title row with edit toggle
+  const t = document.createElement('div');
+  t.className = 'title';
+  const label = document.createElement('span'); label.textContent = card.title;
+  const edit = document.createElement('span'); edit.className = 'edit-link';
+  edit.textContent = editing ? 'Cancel' : 'Edit';
+  edit.onclick = () => { editing = !editing; render(); };
+  t.append(label, edit);
+
+  let bodyEl;
+  if (editing) {
+    bodyEl = document.createElement('textarea');
+    bodyEl.className = 'body'; bodyEl.value = card.body; bodyEl.id = 'editor';
+  } else {
+    bodyEl = document.createElement('div');
+    bodyEl.className = 'body'; bodyEl.id = 'bodyview';
+    if (card.type === 'cloze') bodyEl.append(...renderCloze(card.clozes));
+    else bodyEl.textContent = card.body;
+  }
+  m.append(t, bodyEl);
+  renderFooter();
+}
+
+function renderCloze(tokens) {
+  return tokens.map(tok => {
+    if ('text' in tok) return document.createTextNode(tok.text);
+    const s = document.createElement('span');
+    if (revealed) { s.className = 'cloze-shown'; s.textContent = '[' + tok.cloze + ']'; }
+    else { s.className = 'cloze-hidden'; s.textContent = '[___]'; }
+    return s;
+  });
+}
+
+function renderFooter() {
+  const f = $('footer'); f.innerHTML = '';
+  if (editing) {
+    f.append(row(mkBtn('Save', 'r-good', saveBody)));
+    return;
+  }
+  if (card.type === 'cloze' && !revealed) {
+    f.append(row(mkBtn('Show', 'r-good', () => { revealed = true; render(); })));
+  } else if (card.type === 'cloze') {
+    const row = document.createElement('div'); row.className = 'btn-row';
+    const iv = card.intervals || {};
+    row.append(
+      mkBtn2('Again', iv.again, 'r-again', () => review({rating:'again'})),
+      mkBtn2('Hard',  iv.hard,  'r-hard',  () => review({rating:'hard'})),
+      mkBtn2('Good',  iv.good,  'r-good',  () => review({rating:'good'})),
+      mkBtn2('Easy',  iv.easy,  'r-easy',  () => review({rating:'easy'})));
+    f.append(row);
+  } else {
+    const row = document.createElement('div'); row.className = 'btn-row';
+    row.append(
+      mkBtn2('Reschedule', (card.intervals || {}).reschedule, 'r-good', () => review({action:'reschedule'})),
+      mkBtn('Postpone', 'r-hard',  postpone),
+      mkBtn('Dismiss', 'wide',    () => review({action:'dismiss'})));
+    f.append(row);
+  }
+}
+
+// Wrap one or more buttons in a flex row so their flex:1 fills the width.
+function row(...btns) {
+  const r = document.createElement('div'); r.className = 'btn-row';
+  r.append(...btns); return r;
+}
+
+// A button with a main label and an optional small interval sub-label.
+// Both always wrap the label in a <div> so single- and two-line buttons
+// share the same height.
+function mkBtn2(label, interval, cls, fn) {
+  const b = document.createElement('button');
+  if (cls) b.className = cls; b.onclick = fn;
+  const top = document.createElement('div'); top.textContent = label;
+  b.appendChild(top);
+  const sub = document.createElement('div');
+  sub.className = 'sub'; sub.textContent = interval || '\u00a0';  // nbsp keeps height
+  b.appendChild(sub);
+  return b;
+}
+
+// Single-label button (no interval); same height as interval buttons.
+function mkBtn(label, cls, fn) { return mkBtn2(label, null, cls, fn); }
+
+// Ask the user how many days to postpone (default 7), then review.
+async function postpone() {
+  const input = prompt('Postpone days:', '7');
+  if (input === null) return;               // cancelled
+  const days = parseInt(input, 10);
+  if (!Number.isFinite(days) || days < 1) { toast('Invalid number of days'); return; }
+  await review({ action: 'postpone', days });
+}
+
+async function review(params) {
+  await post('/api/review/' + encodeURIComponent(card.id), params);
+  queue.shift();
+  $('count').textContent = queue.length;
+  if (queue.length) await showCard(queue[0].id); else done();
+}
+
+async function saveBody() {
+  const ed = $('editor');
+  if (!ed) { editing = false; render(); return; }   // no editor: just leave edit mode
+  const value = ed.value;
+  try {
+    const res = await post('/api/body/' + encodeURIComponent(card.id), { body: value });
+    if (res && res.error) throw new Error(res.error);
+    toast('Saved');
+  } catch (e) {
+    toast('Save failed: ' + (e.message || e));
+  }
+  // Always leave edit mode and return to the review view, even on error.
+  editing = false;
+  await reloadCard();
+}
+
+// ---- selection -> floating extract menu ----------------------------------
+// Only meaningful on the plain-text body view (topic cards, or cloze underlying
+// text).  We compute the selection's character offset within card.body.
+function currentSelectionInBody() {
+  const view = $('bodyview');
+  if (!view || editing) return null;
+  const sel = window.getSelection();
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
+  const range = sel.getRangeAt(0);
+  if (!view.contains(range.commonAncestorContainer)) return null;
+  const text = sel.toString();
+  if (!text.trim()) return null;
+  // offset = length of text in `view` before the selection start
+  const pre = range.cloneRange();
+  pre.selectNodeContents(view);
+  pre.setEnd(range.startContainer, range.startOffset);
+  const start = pre.toString().length;
+  return { text, start, end: start + text.length, rect: range.getBoundingClientRect() };
+}
+
+function showSelMenu() {
+  const s = currentSelectionInBody();
+  const menu = $('sel-menu');
+  if (!s) { menu.style.display = 'none'; return; }
+  // cloze extract needs offsets in the RAW body (with {{}}), which the token
+  // view doesn't preserve; so on cloze cards we only offer Topic extract.
+  const clozeBtn = menu.querySelector('.m-cloze');
+  clozeBtn.style.display = (card.type === 'cloze') ? 'none' : '';
+  menu._sel = s;
+  menu.style.display = 'flex';
+  const top = Math.max(8, s.rect.top - 52);
+  menu.style.left = (s.rect.left + s.rect.width / 2) + 'px';
+  menu.style.top = top + 'px';
+}
+function hideSelMenu() { $('sel-menu').style.display = 'none'; }
+
+document.addEventListener('selectionchange', () => {
+  // debounce a touch so iOS finishes updating the selection
+  clearTimeout(showSelMenu._t);
+  showSelMenu._t = setTimeout(showSelMenu, 120);
+});
+
+$('sel-menu').addEventListener('click', async (e) => {
+  const btn = e.target.closest('button'); if (!btn) return;
+  const s = $('sel-menu')._sel; if (!s) return;
+  const type = btn.dataset.type;
+  hideSelMenu();
+  window.getSelection().removeAllRanges();
+  await post('/api/extract/' + encodeURIComponent(card.id),
+             { type, selected: s.text, start: s.start, end: s.end });
+  toast(type === 'topic' ? 'Extracted as Topic' : 'Extracted as Cloze');
+  await reloadCard();   // refresh body (now contains the back-reference link)
+});
+
+loadQueue().catch(e => { $('empty').textContent = 'Error: ' + e; });
+</script>
+</body>
+</html>

@@ -153,3 +153,74 @@ Typical workflow after ~org-sm-capture-topic~ or ~org-sm-item-extract~:
 3. ~C-c C-a~ to accept, then continue.
 
 
+* Web front-end (org-sm-web)
+
+Optional HTTP/JSON front-end for reviewing cards from a phone browser.  A thin
+layer: all scheduling is delegated to org-sm's pure functions
+(~org-sm--{topic,cloze}-grade~, ~org-sm--dismiss~, ~org-sm--extract~), so it and
+the Emacs commands share one source of truth.  Requires
+[[https://github.com/skeeto/emacs-web-server][simple-httpd]].
+
+** Usage
+
+#+begin_src elisp
+(require 'org-sm-web)          ; or rely on the autoloaded command
+(org-sm-web-start)            ; M-x org-sm-web-start   (autoloaded)
+;; open the printed URL on any device on the same LAN
+#+end_src
+
+~org-sm-web-start~ prints the localhost and LAN URLs.  Add the page to the iOS
+home screen for a full-screen PWA.
+
+** Configuration
+
+| Variable            | Default     | Meaning                                        |
+|---------------------+-------------+------------------------------------------------|
+| ~org-sm-web-port~   | ~8842~      | Listen port (must be ≥ 1024 unless root).      |
+| ~org-sm-web-bind~   | ~"0.0.0.0"~ | Bind address.  ~"0.0.0.0"~ = LAN; ~"127.0.0.1"~ = local only. |
+| ~org-sm-web-root~   | ~web/~      | Static UI directory (served ~index.html~).     |
+
+The queue is read from ~org-sm--files~, the same list the Emacs commands scan.
+
+** Endpoints
+
+| Method + path        | Params                              | Action                          |
+|----------------------+-------------------------------------+---------------------------------|
+| ~GET  /api/queue~     | —                                   | Due cards ~[{id,type,priority,title}]~ |
+| ~GET  /api/card/:id~  | —                                   | One card ~{id,type,title,body,clozes}~ |
+| ~POST /api/review/:id~ | ~rating=~ / ~action=~ [~&days=~]     | Grade / reschedule / postpone / dismiss |
+| ~POST /api/body/:id~   | ~body=~                             | Replace the card body (refine)  |
+| ~POST /api/extract/:id~ | ~type= selected= start= end=~      | Create a child card via ~org-sm--extract~ |
+
+Note: ~:id~ must be the trailing path component — simple-httpd only supports
+trailing template parameters, hence ~/api/body/:id~ rather than ~/api/card/:id/body~.
+
+** UI
+
+Button labels mirror the Emacs wording:
+
+- *cloze*: ~Show~ to reveal, then ~Again~ / ~Hard~ / ~Good~ / ~Easy~.
+- *topic*: ~Reschedule~ / ~Postpone~ (prompts for days, default 7) / ~Dismiss~.
+- *edit*: ~Edit~ turns the body into a textarea; ~Save~ writes it back.
+- *extract* (incremental reading): select text → a floating menu offers
+  ~Extract Topic~ / ~Extract Cloze~; the selection becomes a scheduled child
+  card with a back-reference link.  Cloze extraction is topic-cards-only, since
+  cloze cards render ~{{}}~ as hidden tokens (no raw-body offsets available).
+
+** Security
+
+No authentication.  Binding ~"0.0.0.0"~ exposes it to the whole LAN — keep that
+to trusted networks.  For remote access use a private overlay (e.g. Tailscale),
+or set ~org-sm-web-bind~ to ~"127.0.0.1"~ and tunnel.  Never expose it to the
+public internet.
+
+** Maintenance
+
+After changing any ~;;;###autoload~ signature/docstring, regenerate the
+autoloads:
+
+#+begin_src sh
+emacs --batch --eval '(progn (require (quote loaddefs-gen)) \
+  (loaddefs-generate default-directory \
+    (expand-file-name "org-sm-autoloads.el" default-directory)))'
+#+end_src

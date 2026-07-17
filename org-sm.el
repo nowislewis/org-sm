@@ -196,6 +196,26 @@ the interval between them so A-Factor calculation is unaffected."
     (org-entry-put nil "SRS_LAST"
                    (format-time-string "%FT%TZ" new-last "UTC0"))))
 
+;;;; ---- Grading (pure business layer, no UI) --------------------------------
+;; Single source of truth for "what a review does": update scheduling, log it,
+;; return a result plist.  Shared by the interactive command and other front-ends.
+
+(defun org-sm--topic-grade ()
+  "Reschedule current topic by its A-Factor and log the repetition.
+Return plist (:interval-days N :afactor A)."
+  (let* ((a   (org-sm--topic-afactor))
+         (ivl (org-sm--topic-read a)))
+    (org-sm--topic-write ivl)
+    (org-sm--log-review 'topic nil (format "a=%.1f  %2dd" a ivl))
+    (list :interval-days ivl :afactor a)))
+
+(defun org-sm--topic-postpone-grade (days)
+  "Postpone current topic by DAYS (not a repetition) and log it.
+Return plist (:interval-days DAYS)."
+  (org-sm--topic-postpone days)
+  (org-sm--log-review 'topic nil (format "postpone  %2dd" days))
+  (list :interval-days days))
+
 ;;;; ---- Cloze overlays ------------------------------------------------------
 
 (defvar org-sm--cloze-regexp "{{\\([^}\n]+\\)}}"
@@ -239,6 +259,44 @@ the interval between them so A-Factor calculation is unaffected."
 (defun org-sm-cloze-remove-overlays ()
   "Remove all cloze overlays from current heading."
   (mapc #'delete-overlay (org-sm--cloze-overlays)))
+
+;;;; ---- Cloze grading (pure, no UI) -----------------------------------------
+
+(defconst org-sm-cloze-ratings '(:again :hard :good :easy)
+  "Ordered list of FSRS ratings offered for cloze review.")
+
+(defun org-sm--cloze-preview ()
+  "Preview every rating for the current cloze without modifying anything.
+Return an alist mapping each rating symbol to a plist
+(:card CARD :interval-secs SECS), where CARD is the hypothetical FSRS card
+and SECS the resulting interval.  Pure: reads properties, writes nothing."
+  (org-sm--ensure-scheduler)
+  (let ((card (org-sm--cloze-read))
+        (now  (fsrs-now)))
+    (mapcar
+     (lambda (rating)
+       (let* ((c    (cl-nth-value 0 (fsrs-scheduler-review-card
+                                     org-sm--scheduler card rating)))
+              (secs (fsrs-timestamp-difference (fsrs-card-due c) now)))
+         (cons rating (list :card c :interval-secs secs))))
+     org-sm-cloze-ratings)))
+
+(defun org-sm--cloze-grade (rating &optional preview)
+  "Apply RATING (a symbol in `org-sm-cloze-ratings') to the current cloze.
+Write the new FSRS card, log the review, and return a plist
+(:rating R :interval-secs SECS :due ISO).  PREVIEW, if given, is the
+alist from `org-sm--cloze-preview', reused to avoid recomputing."
+  (let* ((entry (or (cdr (assq rating (or preview (org-sm--cloze-preview))))
+                    (error "Unknown cloze rating: %S" rating)))
+         (card  (plist-get entry :card))
+         (secs  (plist-get entry :interval-secs))
+         (days  (fsrs-seconds-days secs))
+         (extra (if (< days 1)
+                    (format "%s  %2dm" rating (round (/ secs 60)))
+                  (format "%s  %2dd" rating (round days)))))
+    (org-sm--cloze-write card)
+    (org-sm--log-review 'cloze nil extra)
+    (list :rating rating :interval-secs secs :due (fsrs-card-due card))))
 
 ;;;; ---- Heading helpers -----------------------------------------------------
 
@@ -396,42 +454,36 @@ TYPE is a symbol (`topic' or `cloze'); when nil, prompt interactively."
              (if (and (eq type 'cloze) (not (org-sm--cloze-markers-p)))
                  " (⚠ no {{cloze}} markers found)" ""))))
 
-;;;###autoload
-(defun org-sm-item-extract ()
-  "Extract selected region as a child topic or cloze heading.
+(defun org-sm--extract (type selected sel-start sel-end)
+  "Create a child SRS card of TYPE from the parent at point.
+Point must be on the parent heading.  SELECTED is the extracted text.
+SEL-START and SEL-END are its character offsets within the parent body
+\(as returned by `org-sm--body-bounds').  Insert a back-reference at the
+selection, append a scheduled + inited child heading, and return the new
+child's id.  Pure buffer logic: no region, no prompt, no overlay/UI.
 
-The parent body is NOT modified.  A compact back-reference [[id:...]] is
-inserted immediately after the selection so the link stays in context.
-- topic: title is `org-sm-topic-prefix' + first N chars of the selection;
-         child body is the selected text verbatim.
-- cloze: title is `org-sm-cloze-prefix' + first N chars of the parent body;
-         child body is the full parent body with the selection wrapped as {{answer}}."
-  (interactive)
-  (unless (region-active-p) (user-error "Select text to extract first"))
-  ;; Capture all buffer state before any minibuffer interaction moves point.
-  (let* ((sel-beg    (region-beginning))
-         (sel-end    (region-end))
-         (selected   (buffer-substring-no-properties sel-beg sel-end))
-         (level      (org-current-level))
-         (bounds     (org-sm--body-bounds))
-         (body-raw   (buffer-substring-no-properties (car bounds) (cdr bounds)))
-         (sel-offset (- sel-beg (car bounds)))
-         (type       (intern (completing-read "Extract as: " '("topic" "cloze") nil t)))
-         (id         (org-id-new))
-         (title      (pcase type
-                       ('topic (concat org-sm-topic-prefix
-                                       (org-sm--truncate-title selected)))
-                       ('cloze (concat org-sm-cloze-prefix
-                                       (org-sm--truncate-title body-raw)))))
+- topic: child body is SELECTED verbatim; title is the topic prefix +
+         first N chars of SELECTED.
+- cloze: child body is the full parent body with SELECTED wrapped as
+         {{answer}} at SEL-START; title is the cloze prefix + first N
+         chars of the parent body."
+  (let* ((level    (org-current-level))
+         (bounds   (org-sm--body-bounds))
+         (body-raw (buffer-substring-no-properties (car bounds) (cdr bounds)))
+         (id       (org-id-new))
+         (title    (pcase type
+                     ('topic (concat org-sm-topic-prefix
+                                     (org-sm--truncate-title selected)))
+                     ('cloze (concat org-sm-cloze-prefix
+                                     (org-sm--truncate-title body-raw)))))
          (child-body (pcase type
                        ('topic selected)
                        ('cloze (org-sm--body-clean
-                                (concat (substring body-raw 0 sel-offset)
+                                (concat (substring body-raw 0 sel-start)
                                         (format "{{%s}}" selected)
-                                        (substring body-raw (+ sel-offset
-                                                               (length selected)))))))))
-    ;; Insert a compact back-reference after the selection; original text is untouched.
-    (goto-char sel-end)
+                                        (substring body-raw sel-end)))))))
+    ;; Insert a back-reference after the selection; parent text stays intact.
+    (goto-char (+ (car bounds) sel-end))
     (insert (format "[[id:%s][%s]]" id (pcase type ('topic "<T>") ('cloze "<C>"))))
     ;; Append child heading at end of current subtree.
     (save-excursion
@@ -447,8 +499,24 @@ inserted immediately after the selection so the link stays in context.
       (org-sm--init-item type)
       (org-end-of-meta-data t)
       (unless (bolp) (insert "\n"))
-      (insert child-body "\n")))
+      (insert child-body "\n"))
+    id))
 
+;;;###autoload
+(defun org-sm-item-extract ()
+  "Extract the active region as a child topic or cloze heading.
+Prompts for the card type, then delegates to `org-sm--extract'.  The
+parent body is not modified; a back-reference link is inserted at the
+selection."
+  (interactive)
+  (unless (region-active-p) (user-error "Select text to extract first"))
+  (let* ((bounds   (org-sm--body-bounds))
+         (sel-start (- (region-beginning) (car bounds)))
+         (sel-end   (- (region-end) (car bounds)))
+         (selected  (buffer-substring-no-properties
+                     (region-beginning) (region-end)))
+         (type      (intern (completing-read "Extract as: " '("topic" "cloze") nil t))))
+    (org-sm--extract type selected sel-start sel-end))
   (when (eq org-sm--cloze-state 'revealed)
     (org-sm-cloze-remove-overlays)
     (org-sm-cloze-apply-overlays)))
@@ -475,19 +543,24 @@ files instead of every file in `org-sm--files'."
       (apply #'call-process "grep" nil t nil "-lZ" ":SRS_TYPE:" org-sm--files)
       (split-string (buffer-string) "\0" t))))
 
+(defun org-sm--map-due (fn)
+  "Map FN over every due SRS item across `org-sm--files'.
+FN is called with point on each due heading; non-nil results are collected.
+This is the shared iteration primitive for both the Emacs review queue and
+any other front-end (e.g. a web UI that needs a list of due card IDs)."
+  (delq nil (org-map-entries
+             (lambda () (when (org-sm--due-p) (funcall fn)))
+             nil
+             (org-sm--scan-files))))
+
 (defun org-sm--collect-due-markers ()
   "Return markers for all due SRS items across `org-sm--files', sorted by priority."
-  (let ((results
-         (org-map-entries
-          (lambda ()
-            (when (org-sm--due-p)
-              (cons (org-get-priority (org-get-heading t t t t))
-                    (point-marker))))
-          nil
-          (org-sm--scan-files))))
-    (mapcar #'cdr
-            (sort (delq nil results)
-                  (lambda (a b) (> (car a) (car b)))))))
+  (mapcar #'cdr
+          (sort (org-sm--map-due
+                 (lambda ()
+                   (cons (org-get-priority (org-get-heading t t t t))
+                         (point-marker))))
+                (lambda (a b) (> (car a) (car b))))))
 
 (defun org-sm--cleanup-buffer ()
   "Clear cloze overlays and state in the previously reviewed buffer."
@@ -557,6 +630,60 @@ PREV is a string describing the last action, shown in the echo area."
       (setq org-sm--queue markers)
       (org-sm--advance))))
 
+(defun org-sm--review-confirm-topic ()
+  "Interactive topic review: reschedule, postpone, explain, or dismiss.
+Computation is delegated to the pure grading functions; this only
+collects the user's choice and advances the queue."
+  (let* ((auto-ivl (org-sm--topic-read (org-sm--topic-afactor)))
+         (choices  `((?r ,(format "rsch(%dd)" auto-ivl))
+                     (?p "postpone")
+                     (?e "explain"))))
+    (org-sm--prompt-choice "Topic: " choices
+      (lambda (key)
+        (pcase key
+          (?r (let ((r (org-sm--topic-grade)))
+                (org-sm--advance (format "topic → %d days" (plist-get r :interval-days)))))
+          (?p (let ((r (org-sm--topic-postpone-grade (read-number "Postpone days: " 7))))
+                (org-sm--advance (format "topic postpone → %d days" (plist-get r :interval-days)))))
+          (?e (if (fboundp 'org-sm-gptel-explain)
+                  (progn (org-sm--log-review 'topic nil "explain")
+                         (org-sm-gptel-explain))
+                (user-error "org-sm-gptel not loaded"))))))))
+
+(defun org-sm--cloze-rating-label (rating secs)
+  "Format a menu LABEL for RATING with interval SECS."
+  (let ((days (fsrs-seconds-days secs)))
+    (if (< days 1)
+        (format "%s(%dm)" rating (round (/ secs 60)))
+      (format "%s(%dd)" rating days))))
+
+(defun org-sm--review-confirm-cloze ()
+  "Interactive cloze review: reveal, then rate (or dismiss).
+Rating computation is delegated to `org-sm--cloze-preview' and
+`org-sm--cloze-grade'; this only handles overlays and the queue."
+  (pcase org-sm--cloze-state
+    ('hidden
+     (org-sm-cloze-reveal-overlays)
+     (setq org-sm--cloze-state 'revealed)
+     (message "org-sm: cloze revealed — edit if needed, M-x review-confirm to rate"))
+    ('revealed
+     (org-sm-cloze-remove-overlays)
+     (let* ((preview (org-sm--cloze-preview))
+            ;; Map menu key → rating symbol; keys stay stable (r = reveal, r = good).
+            (keymap  '((?a . :again) (?h . :hard) (?r . :good) (?e . :easy)))
+            (choices (mapcar
+                      (lambda (kr)
+                        (let ((secs (plist-get (cdr (assq (cdr kr) preview)) :interval-secs)))
+                          (list (car kr) (org-sm--cloze-rating-label (cdr kr) secs))))
+                      keymap)))
+       (org-sm--prompt-choice "Rate: " choices
+         (lambda (key)
+           (let* ((rating (cdr (assq key keymap)))
+                  (r      (org-sm--cloze-grade rating preview))
+                  (due    (format-time-string
+                           "%F %H:%M" (parse-iso8601-time-string (plist-get r :due)))))
+             (org-sm--advance (format "cloze %s → %s" rating due)))))))))
+
 ;;;###autoload
 (defun org-sm-review-confirm ()
   "Confirm topic read or advance cloze state, then move to next item."
@@ -565,91 +692,24 @@ PREV is a string describing the last action, shown in the echo area."
   (unless (or org-sm--queue org-sm--cloze-state)
     (user-error "No active review session — call org-sm-review-start"))
   (pcase (or (org-sm-type) (user-error "Not on an SRS heading"))
-    ('topic
-     (let* ((a        (org-sm--topic-afactor))
-            (auto-ivl (org-sm--topic-read a))
-            (choices  `((?r ,(format "rsch(%dd)" auto-ivl))
-                        (?p "postpone")
-                        (?e "explain"))))
-       (org-sm--prompt-choice "Topic: " choices
-         (lambda (key)
-           (pcase key
-             (?r
-              (org-sm--topic-write auto-ivl)
-              (org-sm--log-review 'topic nil (format "a=%.1f  %2dd" a auto-ivl))
-              (org-sm--advance (format "topic → %d days" auto-ivl)))
-             (?p
-              (let* ((days (read-number "Postpone days: " 7)))
-                (org-sm--topic-postpone days)
-                (org-sm--log-review 'topic nil (format "postpone  %2dd" days))
-                (org-sm--advance (format "topic postpone → %d days" days))))
-             (?e
-              (if (fboundp 'org-sm-gptel-explain)
-                  (progn (org-sm--log-review 'topic nil "explain")
-                         (org-sm-gptel-explain))
-                (user-error "org-sm-gptel not loaded"))))))))
-
-    ('cloze
-     (pcase org-sm--cloze-state
-       ('hidden
-        (org-sm-cloze-reveal-overlays)
-        (setq org-sm--cloze-state 'revealed)
-        (message "org-sm: cloze revealed — edit if needed, M-x review-confirm to rate"))
-       ('revealed
-        (org-sm-cloze-remove-overlays)
-        (let* ((card        (org-sm--cloze-read))
-               (now         (fsrs-now))
-               ;; Business layer: key → (rating new-card secs)
-               ;; So cloze review becomes: r = reveal, r = good.
-               (ratings     '((?a :again) (?h :hard) (?r :good) (?e :easy)))
-               (results     (mapcar
-                              (lambda (r)
-                                (let* ((rating (cadr r))
-                                       (c      (cl-nth-value 0 (fsrs-scheduler-review-card
-                                                                 org-sm--scheduler card rating)))
-                                       (secs   (fsrs-timestamp-difference (fsrs-card-due c) now)))
-                                  (list (car r) rating c secs)))
-                              ratings))
-               ;; UI layer: key → (key label) for read-multiple-choice
-               (choices     (mapcar
-                              (lambda (r)
-                                (let* ((key   (car r))
-                                       (secs  (nth 3 r))
-                                       (days  (fsrs-seconds-days secs))
-                                       (label (if (< days 1)
-                                                  (format "%s(%dm)" (nth 1 r) (round (/ secs 60)))
-                                                (format "%s(%dd)" (nth 1 r) days))))
-                                  (list key label)))
-                              results)))
-          (org-sm--prompt-choice "Rate: " choices
-            (lambda (key)
-              (let* ((r        (assq key results))
-                     (rating   (nth 1 r))
-                     (new-card (nth 2 r))
-                     (secs     (nth 3 r))
-                     (days     (fsrs-seconds-days secs))
-                     (next-due (format-time-string "%F %H:%M"
-                                                   (parse-iso8601-time-string
-                                                    (fsrs-card-due new-card))))
-                     (extra    (if (< days 1)
-                                  (format "%s  %2dm" rating (round (/ secs 60)))
-                                (format "%s  %2dd" rating (round days)))))
-                (org-sm--cloze-write new-card)
-                (org-sm--log-review 'cloze nil extra)
-                (org-sm--advance (format "cloze %s → %s" rating next-due)))))))))))
+    ('topic (org-sm--review-confirm-topic))
+    ('cloze (org-sm--review-confirm-cloze))))
 
 
-;;;###autoload
-(defun org-sm-item-dismiss ()
-  "Dismiss current SRS item.
-Adds the :dismissed: tag and logs the action; all SRS properties and
-scheduling data are preserved so the item can be restored with
-`org-sm-item-undismiss'."
-  (interactive)
+(defun org-sm--dismiss ()
+  "Tag the current item :dismissed: and log it.  Pure data operation, no UI.
+Signals an error if not on an SRS heading or already dismissed.  All SRS
+properties and scheduling data are preserved for `org-sm-item-undismiss'."
   (unless (org-sm-type) (user-error "Not on an SRS heading"))
   (when (org-sm--dismissed-p) (user-error "Already dismissed"))
   (org-toggle-tag "dismissed" 'on)
-  (org-sm--log-review 'dismissed)
+  (org-sm--log-review 'dismissed))
+
+;;;###autoload
+(defun org-sm-item-dismiss ()
+  "Dismiss current SRS item, advancing the queue if a session is active."
+  (interactive)
+  (org-sm--dismiss)
   ;; Only advance the review queue if a session is active.
   (if org-sm--queue
       (org-sm--advance "dismissed")
