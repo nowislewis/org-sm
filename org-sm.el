@@ -27,13 +27,13 @@
 ;;   org-sm-mode             - buffer-local; {{cloze}} font-lock (use via :hook)
 ;;   global-org-sm-read-mode - global; binds M-z to `org-sm-capture-topic'
 ;;
-;; Set `org-sm--files' to the list of org files you want org-sm to scan:
+;; Point `org-sm-directory' at the tree containing your SRS items:
 ;;
 ;;   (use-package org-sm
 ;;     :commands (org-sm-review-start org-sm-item-mark org-sm-item-extract org-sm-review-list)
 ;;     :hook (org-mode . org-sm-mode)
 ;;     :config
-;;     (setq org-sm--files (directory-files-recursively "~/org" "\\.org$"))
+;;     (setq org-sm-directory "~/org/incremental/")
 ;;     (setq org-sm-capture-file "~/org/inbox.org")
 ;;     (setq org-sm-capture-olp '("org-sm topics"))
 ;;     (org-sm-setup-capture)
@@ -69,12 +69,22 @@
   "Prefix string prepended to auto-generated cloze heading titles."
   :type 'string)
 
-;;;; ---- File list -----------------------------------------------------------
+;;;; ---- File discovery ------------------------------------------------------
 
-(defvar org-sm--files nil
-  "List of org files for org-sm to scan for SRS items.
-Set this variable directly in your configuration, e.g.:
-  (setq org-sm--files (directory-files-recursively \"~/org\" \"\\\\.org$\"))")
+(defcustom org-sm-directory nil
+  "Root directory scanned by `org-sm-files' for SRS items."
+  :type '(choice (const :tag "Unset" nil) directory))
+
+(defun org-sm-files ()
+  "Return org files under `org-sm-directory' that contain SRS items.
+Rescanned live on each call, so the result never goes stale."
+  (when org-sm-directory
+    (let ((rg  (or (executable-find "rg")
+                   (user-error "org-sm: ripgrep (rg) not found on PATH")))
+          (dir (expand-file-name org-sm-directory)))
+      (with-temp-buffer
+        (call-process rg nil t nil "-l0" "--glob" "*.org" ":SRS_TYPE:" dir)
+        (split-string (buffer-string) "\0" t)))))
 
 ;;;; ---- Schedule helper -----------------------------------------------------
 
@@ -534,27 +544,15 @@ selection."
        (when-let* ((t_ (org-get-scheduled-time nil)))
          (<= (float-time t_) (float-time)))))
 
-(defun org-sm--scan-files ()
-  "Subset of `org-sm--files' that actually contain SRS items.
-Greps for the SRS_TYPE property so scanning only opens the few relevant
-files instead of every file in `org-sm--files'."
-  (when org-sm--files
-    (with-temp-buffer
-      (apply #'call-process "grep" nil t nil "-lZ" ":SRS_TYPE:" org-sm--files)
-      (split-string (buffer-string) "\0" t))))
-
 (defun org-sm--map-due (fn)
-  "Map FN over every due SRS item across `org-sm--files'.
-FN is called with point on each due heading; non-nil results are collected.
-This is the shared iteration primitive for both the Emacs review queue and
-any other front-end (e.g. a web UI that needs a list of due card IDs)."
+  "Map FN over due SRS headings; collect its non-nil results."
   (delq nil (org-map-entries
              (lambda () (when (org-sm--due-p) (funcall fn)))
              nil
-             (org-sm--scan-files))))
+             (org-sm-files))))
 
 (defun org-sm--collect-due-markers ()
-  "Return markers for all due SRS items across `org-sm--files', sorted by priority."
+  "Return markers for all due SRS items under `org-sm-directory', by priority."
   (mapcar #'cdr
           (sort (org-sm--map-due
                  (lambda ()
@@ -779,7 +777,7 @@ other key, call ACTION-FN with it."
 
 ;;;###autoload
 (defun org-sm-review-list ()
-  "Browse all SRS items across `org-sm--files' in an agenda-style buffer."
+  "Browse all SRS items under `org-sm-directory' in an agenda-style buffer."
   (interactive)
   (require 'org-agenda)
   (defvar org-agenda-custom-commands)
@@ -787,7 +785,7 @@ other key, call ACTION-FN with it."
   (let ((org-agenda-custom-commands
          `(("_" "org-sm review list"
             tags "SRS_TYPE={.+}"
-            ((org-agenda-files ',(org-sm--scan-files))
+            ((org-agenda-files ',(org-sm-files))
              (org-agenda-prefix-format
               '((tags . "%(org-sm--review-list-prefix)"))))))))
     (org-agenda nil "_")))

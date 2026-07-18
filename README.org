@@ -24,7 +24,7 @@ Requires Emacs 29.1+, org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
 (use-package org-sm
   :hook (org-mode . org-sm-mode)
   :config
-  (setq org-sm--files (directory-files-recursively "~/notes/" "\\.org$"))
+  (setq org-sm-directory "~/notes/")
   (setq org-sm-capture-file "~/notes/inbox.org")
   (setq org-sm-capture-olp '("org-sm topics"))
   (org-sm-setup-capture)
@@ -183,7 +183,8 @@ home screen for a full-screen PWA.
 | ~org-sm-web-bind~   | ~"0.0.0.0"~ | Bind address.  ~"0.0.0.0"~ = LAN; ~"127.0.0.1"~ = local only. |
 | ~org-sm-web-root~   | ~web/~      | Static UI directory (served ~index.html~).     |
 
-The queue is read from ~org-sm--files~, the same list the Emacs commands scan.
+The queue is read from ~(org-sm-files)~, the same live scan of ~org-sm-directory~
+the Emacs commands use.
 
 ** Endpoints
 
