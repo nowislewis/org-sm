@@ -194,7 +194,13 @@ the Emacs commands use.
 | ~GET  /api/card/:id~  | —                                   | One card ~{id,type,title,body,clozes}~ |
 | ~POST /api/review/:id~ | ~rating=~ / ~action=~ [~&days=~]     | Grade / reschedule / postpone / dismiss |
 | ~POST /api/body/:id~   | ~body=~                             | Replace the card body (refine)  |
+| ~POST /api/capture~    | ~type= body= [title=]~              | Create a new card via ~org-sm--capture~ |
 | ~POST /api/extract/:id~ | ~type= selected= start= end=~      | Create a child card via ~org-sm--extract~ |
+
+~/api/capture~ writes into ~org-sm-capture-file~ / ~org-sm-capture-olp~ (the same
+target the Emacs ~org-sm-capture-topic~ command uses), schedules the card for
+tomorrow, and returns its new ~id~.  Cloze bodies must contain at least one
+~{{answer}}~ marker.
 
 Note: ~:id~ must be the trailing path component — simple-httpd only supports
 trailing template parameters, hence ~/api/body/:id~ rather than ~/api/card/:id/body~.
@@ -210,6 +216,11 @@ Button labels mirror the Emacs wording:
   ~Extract Topic~ / ~Extract Cloze~; the selection becomes a scheduled child
   card with a back-reference link.  Cloze extraction is topic-cards-only, since
   cloze cards render ~{{}}~ as hidden tokens (no raw-body offsets available).
+- *capture* (new card): the ~＋~ button in the header opens a sheet with a
+  Topic/Cloze toggle, an optional title, and a body box (pre-filled from the
+  clipboard when the browser grants permission).  ~Save card~ posts to
+  ~/api/capture~ and the due count refreshes.  Handy for turning copied text on
+  your phone straight into a card.
 
 ** Security
 

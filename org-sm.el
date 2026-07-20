@@ -464,6 +464,27 @@ TYPE is a symbol (`topic' or `cloze'); when nil, prompt interactively."
              (if (and (eq type 'cloze) (not (org-sm--cloze-markers-p)))
                  " (⚠ no {{cloze}} markers found)" ""))))
 
+(defun org-sm--insert-child (level type title body id)
+  "Append a scheduled + inited SRS heading after point's subtree; return ID.
+Insert a heading at LEVEL+1 at the end of the current subtree, titled TITLE,
+typed TYPE, tagged with ID, scheduled for tomorrow, and filled with BODY.
+Point-relative and excursion-agnostic: the caller owns buffer/point state
+(`save-excursion', `org-with-wide-buffer', etc.) and computes LEVEL."
+  (org-end-of-subtree t t)
+  (unless (bolp) (insert "\n"))
+  (org-insert-heading nil t (1+ level))
+  (insert title)
+  ;; Schedule before org-set-property / org-sm--init-item: those move point
+  ;; into the PROPERTIES drawer, after which org-schedule would climb up to
+  ;; the previous sibling heading (see `org-sm--schedule').
+  (org-sm--schedule (time-add (current-time) (days-to-time 1)))
+  (org-set-property "ID" id)
+  (org-sm--init-item type)
+  (org-end-of-meta-data t)
+  (unless (bolp) (insert "\n"))
+  (insert body "\n")
+  id)
+
 (defun org-sm--extract (type selected sel-start sel-end)
   "Create a child SRS card of TYPE from the parent at point.
 Point must be on the parent heading.  SELECTED is the extracted text.
@@ -497,20 +518,33 @@ child's id.  Pure buffer logic: no region, no prompt, no overlay/UI.
     (insert (format "[[id:%s][%s]]" id (pcase type ('topic "<T>") ('cloze "<C>"))))
     ;; Append child heading at end of current subtree.
     (save-excursion
-      (org-end-of-subtree t t)
-      (unless (bolp) (insert "\n"))
-      (org-insert-heading nil t (1+ level))
-      (insert title)
-      ;; Schedule before org-set-property / org-entry-put: those functions move
-      ;; point into the PROPERTIES drawer, after which org-schedule would climb
-      ;; up to the previous sibling heading.
-      (org-sm--schedule (time-add (current-time) (days-to-time 1)))
-      (org-set-property "ID" id)
-      (org-sm--init-item type)
-      (org-end-of-meta-data t)
-      (unless (bolp) (insert "\n"))
-      (insert child-body "\n"))
-    id))
+      (org-sm--insert-child level type title child-body id))))
+
+(defun org-sm--capture (type body &optional file olp title)
+  "Create a new SRS card of TYPE with BODY under FILE / OLP; return its id.
+Insert a scheduled + inited heading as the last child of the deepest heading
+in OLP and fill it with BODY (via `org-sm--insert-child').  Like
+`org-sm--extract' but with no parent and no back-reference; saves nothing.
+FILE/OLP default to `org-sm-capture-file'/`org-sm-capture-olp'; TITLE, when
+blank, is derived from BODY."
+  (let* ((body   (org-sm--body-clean (or body "")))
+         (id     (org-id-new))
+         (prefix (pcase type
+                   ('topic org-sm-topic-prefix)
+                   ('cloze org-sm-cloze-prefix)
+                   (_ (error "Unknown capture type: %S" type))))
+         (title  (concat prefix
+                         (if (and title (org-string-nw-p title))
+                             (string-trim title)
+                           (org-sm--truncate-title body))))
+         (target (org-find-olp (cons (expand-file-name (or file org-sm-capture-file))
+                                     (or olp org-sm-capture-olp)))))
+    (unless target (user-error "Capture target not found"))
+    (set-buffer (marker-buffer target))
+    (org-with-wide-buffer
+     (goto-char target)
+     (set-marker target nil)
+     (org-sm--insert-child (org-current-level) type title body id))))
 
 ;;;###autoload
 (defun org-sm-item-extract ()

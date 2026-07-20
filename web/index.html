@@ -76,11 +76,43 @@
     pointer-events: none; z-index: 60;
   }
   .toast.show { opacity: 1; }
+  /* header "+" capture button */
+  header .add {
+    color: var(--accent); font-size: 22px; font-weight: 600; cursor: pointer;
+    line-height: 1; padding: 0 6px; user-select: none;
+  }
+  header .left { display: flex; align-items: center; gap: 10px; }
+  /* capture overlay */
+  #capture {
+    position: fixed; inset: 0; z-index: 70; display: none;
+    background: rgba(0,0,0,.55); flex-direction: column; justify-content: flex-end;
+  }
+  #capture.show { display: flex; }
+  .cap-sheet {
+    background: var(--bg); border-top-left-radius: 16px; border-top-right-radius: 16px;
+    padding: 16px 16px calc(16px + env(safe-area-inset-bottom));
+    display: flex; flex-direction: column; gap: 12px; max-height: 90%;
+  }
+  .cap-head { display: flex; justify-content: space-between; align-items: center; }
+  .cap-head .close { color: var(--dim); cursor: pointer; font-size: 15px; }
+  .cap-types { display: flex; gap: 8px; }
+  .cap-types button {
+    flex: 1; padding: 10px 0; border-radius: 10px; font-size: 15px;
+    background: var(--card); color: var(--fg);
+  }
+  .cap-types button.active { background: var(--accent); color: var(--bg); }
+  #cap-title, #cap-body {
+    width: 100%; background: var(--card); color: var(--fg);
+    border: 1px solid #45475a; border-radius: 10px; padding: 12px;
+    font: inherit; resize: vertical;
+  }
+  #cap-body { min-height: 30vh; }
+  .cap-hint { color: var(--dim); font-size: 13px; margin: -4px 2px 0; }
 </style>
 </head>
 <body>
 <header>
-  <span>org-sm</span>
+  <span class="left"><span>org-sm</span><span class="add" id="add" title="New card">＋</span></span>
   <span><span class="count" id="count">–</span> due</span>
 </header>
 <main id="main">
@@ -93,6 +125,23 @@
   <button class="m-cloze" data-type="cloze">Extract Cloze</button>
 </div>
 <div class="toast" id="toast"></div>
+
+<div id="capture">
+  <div class="cap-sheet">
+    <div class="cap-head">
+      <strong>New card</strong>
+      <span class="close" id="cap-close">Cancel</span>
+    </div>
+    <div class="cap-types">
+      <button data-type="topic" class="active">Topic</button>
+      <button data-type="cloze">Cloze</button>
+    </div>
+    <input id="cap-title" placeholder="Title (optional — derived from body)" />
+    <textarea id="cap-body" placeholder="Paste or type content…"></textarea>
+    <div class="cap-hint" id="cap-hint"></div>
+    <div class="btn-row"><button class="r-good" id="cap-save">Save card</button></div>
+  </div>
+</div>
 
 <script>
 const $ = id => document.getElementById(id);
@@ -320,6 +369,48 @@ $('sel-menu').addEventListener('click', async (e) => {
   toast(type === 'topic' ? 'Extracted as Topic' : 'Extracted as Cloze');
   await reloadCard();   // refresh body (now contains the back-reference link)
 });
+
+// ---- capture: create a brand-new card ------------------------------------
+let capType = 'topic';
+
+function syncCapTypes() {
+  document.querySelectorAll('.cap-types button').forEach(b =>
+    b.classList.toggle('active', b.dataset.type === capType));
+  $('cap-hint').textContent =
+    capType === 'cloze' ? 'Wrap the answer in {{ }} — e.g. is {{Paris}}.' : '';
+}
+function closeCapture() { $('capture').classList.remove('show'); }
+function openCapture() {
+  capType = 'topic';
+  $('cap-title').value = $('cap-body').value = '';
+  syncCapTypes();
+  $('capture').classList.add('show');
+  // best-effort prefill from clipboard (needs gesture + permission)
+  navigator.clipboard?.readText?.()
+    .then(t => { if (t) $('cap-body').value = t; }).catch(() => {});
+  setTimeout(() => $('cap-body').focus(), 50);
+}
+
+async function saveCapture() {
+  const body = $('cap-body').value.trim(), title = $('cap-title').value.trim();
+  if (!body) return toast('Body is empty');
+  if (capType === 'cloze' && !/\{\{[^}\n]+\}\}/.test(body))
+    return toast('Cloze needs {{answer}} markers');
+  try {
+    const res = await post('/api/capture', { type: capType, body, title });
+    if (res && res.error) throw new Error(res.error);
+    closeCapture(); toast('Card created');
+    await loadQueue();          // new card is due tomorrow; refresh count
+  } catch (e) { toast('Save failed: ' + (e.message || e)); }
+}
+
+$('add').onclick = openCapture;
+$('cap-close').onclick = closeCapture;
+$('cap-save').onclick = saveCapture;
+$('capture').onclick = e => { if (e.target === $('capture')) closeCapture(); };
+document.querySelector('.cap-types').onclick = e => {
+  const b = e.target.closest('button'); if (b) { capType = b.dataset.type; syncCapTypes(); }
+};
 
 loadQueue().catch(e => { $('empty').textContent = 'Error: ' + e; });
 </script>

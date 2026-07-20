@@ -20,6 +20,7 @@
 ;;   GET  /api/queue          -> [{id,type,priority,title}, ...]  (due cards)
 ;;   GET  /api/card/:id       -> {id,type,title,body,clozes}      (one card)
 ;;   POST /api/body/:id       -> {ok}     (body=<new body text>)
+;;   POST /api/capture        -> {ok,id}   (type,body[,title])   (new card)
 ;;   POST /api/extract/:id    -> {ok,child} (type,selected,start,end)
 ;;   POST /api/review/:id      -> {ok,...}   (rating=<again|hard|good|easy>
 ;;                                            or action=<reschedule|postpone|dismiss>)
@@ -261,6 +262,21 @@ preserved; only the body region from `org-sm--body-bounds' is replaced."
     (org-sm-web--set-body body)
     (org-sm-web--save))
   (list :ok t :id id))
+
+;; Create a brand-new card under `org-sm-capture-file' / `org-sm-capture-olp'.
+;; Unlike the other write endpoints this has no id to locate; it delegates to
+;; the pure `org-sm--capture', which leaves the target buffer current so we can
+;; save it here.  cloze bodies must contain at least one {{answer}} marker.
+(org-sm-web--json-servlet api/capture (type body title)
+  (unless (member type '("topic" "cloze"))
+    (user-error "type must be topic or cloze"))
+  (unless (org-string-nw-p body)
+    (user-error "Missing 'body' text"))
+  (when (and (equal type "cloze") (not (string-match-p org-sm--cloze-regexp body)))
+    (user-error "cloze body needs a {{answer}} marker"))
+  (save-current-buffer
+    (prog1 (list :ok t :id (org-sm--capture (intern type) body nil nil title))
+      (org-sm-web--save))))
 
 ;; start/end are character offsets of the selection within the card body.
 (org-sm-web--json-servlet api/extract/:id (type selected start end)
