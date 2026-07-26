@@ -19,7 +19,9 @@
 ;;   org-sm-review-start   - start review session
 ;;   org-sm-review-confirm - confirm topic read / advance cloze state
 ;;   org-sm-review-abort   - abort review session
-;;   org-sm-review-list    - browse all SRS items
+;;   org-sm-tree           - foldable aggregated tree of all cards; filter + review in place
+;;   org-sm-set-readpoint  - drop an inline read-point anchor at point; review jumps here
+;;   org-sm-goto-source    - grep the vault for this card's source (extraction point)
 ;;   org-sm-capture-topic           - capture region/clipboard as topic.
 ;;   org-sm-capture-topic-from-input - interactive capture; prompts for heading/body.
 ;;
@@ -30,7 +32,7 @@
 ;; Point `org-sm-directory' at the tree containing your SRS items:
 ;;
 ;;   (use-package org-sm
-;;     :commands (org-sm-review-start org-sm-item-mark org-sm-item-extract org-sm-review-list)
+;;     :commands (org-sm-review-start org-sm-item-mark org-sm-item-extract org-sm-tree)
 ;;     :hook (org-mode . org-sm-mode)
 ;;     :config
 ;;     (setq org-sm-directory "~/org/incremental/")
@@ -314,6 +316,22 @@ alist from `org-sm--cloze-preview', reused to avoid recomputing."
   "Return SRS_TYPE of current heading as a symbol, or nil."
   (when-let* ((v (org-entry-get nil "SRS_TYPE"))) (intern v)))
 
+(defun org-sm--card-p ()
+  "Return non-nil if the current heading is an SRS card."
+  (org-entry-get nil "SRS_TYPE"))
+
+(defun org-sm--goto-enclosing-card ()
+  "Move point to the nearest enclosing card heading (current or ancestor).
+Return its start position, or nil if no ancestor is a card."
+  (save-match-data
+    (unless (org-at-heading-p) (org-back-to-heading t))
+    (let (pos)
+      (while (and (not pos) (org-at-heading-p))
+        (if (org-sm--card-p)
+            (setq pos (point))
+          (unless (org-up-heading-safe) (goto-char (point-min)))))
+      pos)))
+
 (defun org-sm--body-bounds ()
   "Return (start . end) of current heading's body (excluding meta-data)."
   (save-excursion
@@ -571,28 +589,43 @@ selection."
   "Return non-nil if current heading carries the :dismissed: tag."
   (member "dismissed" (org-get-tags nil t)))
 
+(defun org-sm--sched-day-delta ()
+  "Return whole-day offset from today to the current heading's SCHEDULED time.
+Negative means overdue, 0 means today, positive means upcoming; nil when the
+heading has no SCHEDULED time."
+  (when-let* ((s (org-get-scheduled-time nil)))
+    (- (time-to-days s) (time-to-days (current-time)))))
+
 (defun org-sm--due-p ()
-  "Return non-nil if current heading is a due SRS item."
+  "Return non-nil if current heading is a due (scheduled today or earlier) card."
   (and (org-sm-type)
        (not (org-sm--dismissed-p))
-       (when-let* ((t_ (org-get-scheduled-time nil)))
-         (<= (float-time t_) (float-time)))))
+       (when-let* ((d (org-sm--sched-day-delta))) (<= d 0))))
 
-(defun org-sm--map-due (fn)
-  "Map FN over due SRS headings; collect its non-nil results."
+(defun org-sm--map-items (fn &optional pred)
+  "Map FN over SRS headings (skipping dismissed ones); collect non-nil results.
+When PRED is non-nil, only entries for which it returns non-nil are visited."
   (delq nil (org-map-entries
-             (lambda () (when (org-sm--due-p) (funcall fn)))
+             (lambda ()
+               (when (and (org-sm-type)
+                          (not (org-sm--dismissed-p))
+                          (or (null pred) (funcall pred)))
+                 (funcall fn)))
              nil
              (org-sm-files))))
 
-(defun org-sm--collect-due-markers ()
-  "Return markers for all due SRS items under `org-sm-directory', by priority."
+(defun org-sm--collect-markers (&optional pred)
+  "Return priority-sorted markers for SRS cards satisfying PRED (all if nil)."
   (mapcar #'cdr
-          (sort (org-sm--map-due
-                 (lambda ()
-                   (cons (org-get-priority (org-get-heading t t t t))
-                         (point-marker))))
+          (sort (org-sm--map-items
+                 (lambda () (cons (org-get-priority (org-get-heading t t t t))
+                                  (point-marker)))
+                 pred)
                 (lambda (a b) (> (car a) (car b))))))
+
+(defun org-sm--collect-due-markers ()
+  "Return priority-sorted markers for all due SRS cards."
+  (org-sm--collect-markers #'org-sm--due-p))
 
 (defun org-sm--cleanup-buffer ()
   "Clear cloze overlays and state in the previously reviewed buffer."
@@ -615,8 +648,11 @@ selection."
   (org-back-to-heading t)
   (org-narrow-to-subtree)
   (org-fold-hide-subtree)
-  ;; Topics: show entry body + child heading lines (bodies stay folded).
-  ;; Clozes: show only entry body, hide child headings (avoid leaks).
+  ;; Topics are structured reading material: show the entry body plus child
+  ;; heading lines (bodies stay folded) so the outline is visible.
+  ;; Clozes are atomic leaf cards: show only the entry body.  We never extract
+  ;; sub-headings under a cloze, so hiding branches avoids both leaks and
+  ;; visual noise on the rare occasion one exists.
   (org-fold-show-entry)
   (when (eq (org-sm-type) 'topic)
     (org-fold-show-branches))
@@ -624,7 +660,15 @@ selection."
   (recenter 0)
   (when (eq (org-sm-type) 'cloze)
     (org-sm-cloze-apply-overlays)
-    (setq org-sm--cloze-state 'hidden)))
+    (setq org-sm--cloze-state 'hidden))
+  ;; Optional read point: jump to the inline anchor marking where you last read.
+  (when-let* ((rp (save-excursion
+                    (goto-char (point-min))
+                    (org-back-to-heading t)
+                    (org-sm--readpoint-target))))
+    (goto-char rp)
+    (org-fold-show-context 'org-goto)
+    (recenter)))
 
 (defun org-sm--show-prompt (&optional prev)
   "Show review hint in the echo area, optionally prefixed with PREV result."
@@ -651,16 +695,19 @@ PREV is a string describing the last action, shown in the echo area."
       (org-sm--cleanup-buffer)
       (message "org-sm: done 󱁖 %s" (if prev (format "  (last: %s)" prev) "")))))
 
+(defun org-sm--review-markers (markers &optional what)
+  "Start a review session over MARKERS (a list).  WHAT names them in messages."
+  (org-sm--ensure-scheduler)
+  (if (null markers)
+      (message "org-sm: nothing to review%s 󱁖" (if what (format " (%s)" what) ""))
+    (setq org-sm--queue markers)
+    (org-sm--advance)))
+
 ;;;###autoload
 (defun org-sm-review-start ()
   "Collect all due SRS items and start a review session."
   (interactive)
-  (org-sm--ensure-scheduler)
-  (let ((markers (org-sm--collect-due-markers)))
-    (if (null markers)
-        (message "org-sm: nothing due 󱁖")
-      (setq org-sm--queue markers)
-      (org-sm--advance))))
+  (org-sm--review-markers (org-sm--collect-due-markers) "due"))
 
 (defun org-sm--review-confirm-topic ()
   "Interactive topic review: reschedule, postpone, explain, or dismiss.
@@ -771,6 +818,60 @@ other key, call ACTION-FN with it."
       (message "org-sm: item restored — due %s" (format-time-string "%F" s))
     (message "org-sm: item restored (no schedule)")))
 
+;;;; ---- Read point ----------------------------------------------------------
+;; Marks where you last read inside a card via an inline "[[rp:CARDID][📖]]"
+;; anchor at point: line-precise, edit-tolerant, unique per card, and distinct
+;; from `id:' links.  One per card; setting again moves it; delete to clear.
+
+(defun org-sm--readpoint-anchor (id)
+  "Return the inline read-point anchor text for card ID."
+  (format "[[rp:%s][📖]]" id))
+
+(defun org-sm--readpoint-remove (id)
+  "Remove any read-point anchor for card ID within the current subtree."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((end (save-excursion (org-end-of-subtree t t) (point))))
+      (while (re-search-forward (regexp-quote (org-sm--readpoint-anchor id)) end t)
+        (replace-match "")))))
+
+;;;###autoload
+(defun org-sm-set-readpoint ()
+  "Set the read point of the nearest enclosing SRS card at point.
+Drops a unique inline anchor; the next review of that card jumps here, moving
+any previous read point.  Clear it by deleting its 📖 anchor."
+  (interactive)
+  (let ((id (save-excursion
+              (unless (org-sm--goto-enclosing-card)
+                (user-error "org-sm: no enclosing SRS card found"))
+              (org-id-get-create))))
+    (org-sm--readpoint-remove id)
+    (insert (org-sm--readpoint-anchor id))
+    (message "org-sm: read point set")))
+
+(defun org-sm--readpoint-target ()
+  "Return the position of the current card's read-point anchor, or nil.
+Point must be on the card heading."
+  (when-let* ((id (org-id-get)))
+    (save-excursion
+      (let ((end (save-excursion (org-end-of-subtree t t) (point))))
+        (when (search-forward (org-sm--readpoint-anchor id) end t)
+          (match-beginning 0))))))
+
+
+;;;; ---- Source navigation ---------------------------------------------------
+;; A card's source is wherever its own ID is linked — `org-sm--extract' leaves an
+;; [[id:CHILD]] link at the extraction point — so we just grep the vault for it.
+
+;;;###autoload
+(defun org-sm-goto-source ()
+  "Grep the vault for links to this card's ID and jump to its source."
+  (interactive)
+  (let ((id (or (org-id-get) (user-error "org-sm: current heading has no ID"))))
+    (grep (format "rg -n --glob '*.org' 'id:%s' %s"
+                  id (shell-quote-argument
+                      (expand-file-name (or org-sm-directory default-directory)))))))
+
 ;;;###autoload
 (defun org-sm-review-abort ()
   "Abort the current review session, cleaning up state and overlays."
@@ -782,47 +883,110 @@ other key, call ACTION-FN with it."
   (when (buffer-narrowed-p) (widen))
   (message "org-sm: review aborted"))
 
-(defun org-sm--review-list-colorize ()
-  "Colorize due-delta and indent guides in the review list buffer."
-  (let ((inhibit-read-only t))
-    (save-excursion
-      (goto-char (point-min))
-      (while (not (eobp))
-        (beginning-of-line)
-        ;; delta: e.g. " +1d" or " -3d"
-        (when (looking-at "[[:space:]]*\\([+-][0-9]+d\\)")
-          (put-text-property (match-beginning 1) (match-end 1) 'face
-                             (if (eq (char-after (match-beginning 1)) ?+) 'success 'error)))
-        ;; indent guides ┆
-        (when (re-search-forward "\\(\\(?: ┆ \\)+\\)" (line-end-position) t)
-          (put-text-property (match-beginning 1) (match-end 1) 'face 'shadow))
-        (forward-line 1)))))
+;;;; ---- Tree view -----------------------------------------------------------
+;; A read-only `org-mode' buffer aggregating cards (optionally filtered by due
+;; days, type, and title keyword), preserving each file's outline so the whole
+;; structure is visible and foldable — an antidote to one-card-at-a-time
+;; fragmentation.  Edit in the real files (RET); review the subtree at point (r)
+;; or all shown (C-u r).  Markers live in an `org-sm-marker' text property;
+;; collection/review reuse the queue.
 
-(defun org-sm--review-list-prefix ()
-  "Return prefix with due-day delta and ┆ guide lines for current heading level."
-  (let* ((depth  (1- (or (org-current-level) 1)))
-         (indent (apply #'concat (make-list depth " ┆ ")))
-         (sched  (org-get-scheduled-time nil))
-         (delta  (when sched
-                   (- (time-to-days sched)
-                      (time-to-days (current-time)))))
-         (due-str (if delta (format "%+4dd" delta) "    ")))
-    (concat due-str " " indent)))
+(defun org-sm-tree-goto ()
+  "Jump to the real file location of the card at point."
+  (interactive)
+  (when-let* ((m (get-text-property (line-beginning-position) 'org-sm-marker)))
+    (switch-to-buffer (marker-buffer m))
+    (widen) (goto-char m) (org-fold-show-context 'org-goto) (recenter)))
+
+(defun org-sm--tree-markers (beg end)
+  "Return copied card markers on lines between BEG and END."
+  (save-excursion
+    (goto-char beg)
+    (let (ms)
+      (while (< (point) end)
+        (when-let* ((m (get-text-property (line-beginning-position) 'org-sm-marker)))
+          (push (copy-marker m) ms))
+        (forward-line 1))
+      (nreverse ms))))
+
+(defun org-sm-tree-review (all)
+  "Review the subtree at point, or with prefix ALL, every card in the tree."
+  (interactive "P")
+  (let ((beg (if all (point-min) (line-beginning-position)))
+        (end (if all (point-max) (save-excursion (org-end-of-subtree t t) (point)))))
+    (org-sm--review-markers (org-sm--tree-markers beg end) "tree")))
+
+(defvar org-sm-tree-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'org-sm-tree-goto)
+    (define-key map "r" #'org-sm-tree-review)
+    (define-key map "g" #'org-sm-tree-revert)
+    map)
+  "Keymap for `org-sm-tree-mode' (native org folding keys still apply).")
+
+(define-derived-mode org-sm-tree-mode org-mode "org-sm-tree"
+  "Read-only aggregated tree of all SRS cards; RET jumps, r/C-u r review."
+  (setq buffer-read-only t))
+
+(defvar-local org-sm--tree-pred nil "Filter predicate for the current tree, or nil for all.")
+
+(defun org-sm-tree-revert ()
+  "Rebuild the tree from disk, keeping the current filter."
+  (interactive)
+  (org-sm--tree-render org-sm--tree-pred))
+
+(defun org-sm--tree-render (pred)
+  "Render the tree buffer, showing only cards satisfying PRED (all if nil)."
+  (let ((buf (get-buffer-create "*org-sm tree*"))
+        (rows (org-sm--map-items
+               (lambda ()
+                 (list (make-string (org-outline-level) ?*)
+                       (org-get-heading t t t t)
+                       (org-sm--sched-day-delta)
+                       (org-entry-get nil "PRIORITY")
+                       (point-marker)))
+               pred)))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'org-sm-tree-mode) (org-sm-tree-mode))
+      (setq org-sm--tree-pred pred)
+      (let ((inhibit-read-only t) (file nil))
+        (erase-buffer)
+        (pcase-dolist (`(,stars ,title ,delta ,prio ,m) rows)
+          (let ((f (buffer-file-name (marker-buffer m))))
+            (unless (equal f file)
+              (setq file f)
+              (insert (format "* %s\n" (file-name-nondirectory f)))))
+          (insert (propertize
+                   (format "*%s %s%s%s\n" stars title
+                           (if prio (format " [#%s]" prio) "")
+                           (pcase delta (`nil "") (0 " [today]") (_ (format " [%+dd]" delta))))
+                   'org-sm-marker m)))
+        (goto-char (point-min))
+        (org-fold-show-all)))
+    (pop-to-buffer buf)))
+
+(defun org-sm--tree-filter (days keyword)
+  "Return a card predicate combining DAYS and KEYWORD (each optional).
+DAYS keeps cards due within that many days (overdue always included);
+KEYWORD is a regexp matched against the title."
+  (lambda ()
+    (and (or (not days)
+             (when-let* ((d (org-sm--sched-day-delta))) (<= d days)))
+         (or (not keyword)
+             (string-match-p keyword (org-get-heading t t t t))))))
 
 ;;;###autoload
-(defun org-sm-review-list ()
-  "Browse all SRS items under `org-sm-directory' in an agenda-style buffer."
-  (interactive)
-  (require 'org-agenda)
-  (defvar org-agenda-custom-commands)
-  (add-hook 'org-agenda-finalize-hook #'org-sm--review-list-colorize)
-  (let ((org-agenda-custom-commands
-         `(("_" "org-sm review list"
-            tags "SRS_TYPE={.+}"
-            ((org-agenda-files ',(org-sm-files))
-             (org-agenda-prefix-format
-              '((tags . "%(org-sm--review-list-prefix)"))))))))
-    (org-agenda nil "_")))
+(defun org-sm-tree (days keyword)
+  "Show cards as a foldable tree grouped by file, with optional filters.
+Prompts for DAYS (blank = all; N = due within N days, overdue included) and
+KEYWORD (blank = any; a regexp on the title)."
+  (interactive
+   (list (let ((s (read-string "Due within N days (blank = all): ")))
+           (unless (string-empty-p s) (string-to-number s)))
+         (let ((s (read-string "Title keyword regexp (blank = any): ")))
+           (unless (string-empty-p s) s))))
+  (org-sm--tree-render
+   (when (or days keyword) (org-sm--tree-filter days keyword))))
 
 ;;;; ---- Minor modes ---------------------------------------------------------
 

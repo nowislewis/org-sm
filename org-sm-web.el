@@ -147,12 +147,13 @@ Assumes point is on an org-sm heading."
 (defun org-sm-web--due-list ()
   "Return a vector of due cards (summary plists) for the queue endpoint."
   (apply #'vector
-         (org-sm--map-due
+         (org-sm--map-items
           (lambda ()
             (list :id       (org-id-get-create)
                   :type     (symbol-name (org-sm-type))
                   :priority (or (org-entry-get nil "PRIORITY") "C")
-                  :title    (org-get-heading t t t t))))))
+                  :title    (org-get-heading t t t t)))
+          #'org-sm--due-p)))
 
 ;;;; ---- Servlets ------------------------------------------------------------
 
