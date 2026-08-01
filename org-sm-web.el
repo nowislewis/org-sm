@@ -21,6 +21,9 @@
 ;;   GET  /api/card/:id       -> {id,type,title,body,clozes}      (one card)
 ;;   POST /api/body/:id       -> {ok}     (body=<new body text>)
 ;;   POST /api/capture        -> {ok,id}   (type,body[,title])   (new card)
+;;   POST /api/split          -> {ok,cards} (text[,extra])   (AI split, no write)
+;;   POST /api/refine/:id     -> {ok,body}   (AI-rewrite the card body in place)
+;;   POST /api/extract-split/:id -> {ok,children} (AI-split card into children)
 ;;   POST /api/extract/:id    -> {ok,child} (type,selected,start,end)
 ;;   POST /api/review/:id      -> {ok,...}   (rating=<again|hard|good|easy>
 ;;                                            or action=<reschedule|postpone|dismiss>)
@@ -37,6 +40,9 @@
 (require 'json)
 (require 'simple-httpd)
 (require 'org-sm)
+
+(declare-function org-sm-gptel-split-text "org-sm-gptel")
+(declare-function org-sm-gptel-rewrite-text "org-sm-gptel")
 
 (defgroup org-sm-web nil
   "Web front-end for org-sm."
@@ -101,15 +107,6 @@ Each token is a plist (:text STR) for literal text or
       (push (list :text (substring body pos)) tokens))
     (apply #'vector (nreverse tokens))))
 
-(defun org-sm-web--fmt-secs (secs)
-  "Format SECS as a short human label like \"10m\", \"3d\", or \"5mo\"."
-  (let ((days (fsrs-seconds-days secs)))
-    (cond ((< days (/ 1.0 24))     (format "%dm" (max 1 (round (/ secs 60)))))
-          ((< days 1)              (format "%dh" (round (* days 24))))
-          ((< days 30)             (format "%dd" (round days)))
-          ((< days 365)            (format "%dmo" (round (/ days 30.0))))
-          (t                       (format "%.1fy" (/ days 365.0))))))
-
 (defun org-sm-web--intervals ()
   "Return preview intervals for the card at point, for the UI to show.
 For cloze: a plist mapping each rating to its short interval label, e.g.
@@ -121,7 +118,7 @@ For topic: (:reschedule \"8d\").  Reads only; writes nothing."
        (dolist (entry (org-sm--cloze-preview) (nreverse out))
          ;; keyword key (:good) is required for json-encode to emit an object
          (push (car entry) out)
-         (push (org-sm-web--fmt-secs (plist-get (cdr entry) :interval-secs)) out))))
+         (push (org-sm--secs-label (plist-get (cdr entry) :interval-secs)) out))))
     ('topic
      (list :reschedule
            (format "%dd" (org-sm--topic-read (org-sm--topic-afactor)))))
@@ -244,18 +241,7 @@ functions; this dispatcher performs no computation of its own."
 
 ;;;; ---- Editing & extraction (write) ---------------------------------------
 
-(defun org-sm-web--set-body (new-body)
-  "Replace the current heading's body text with NEW-BODY.
-Point must be on the heading.  Metadata (planning line, drawer) is
-preserved; only the body region from `org-sm--body-bounds' is replaced."
-  (let* ((bounds (org-sm--body-bounds))
-         (start  (car bounds))
-         (end    (cdr bounds)))
-    (goto-char start)
-    (delete-region start end)
-    (insert (org-sm--body-clean new-body))
-    ;; keep a trailing newline so the subtree stays well-formed
-    (unless (bolp) (insert "\n"))))
+(defalias 'org-sm-web--set-body 'org-sm--set-body)
 
 (org-sm-web--json-servlet api/body/:id (body)
   (unless body (user-error "Missing 'body' parameter"))
@@ -279,6 +265,21 @@ preserved; only the body region from `org-sm--body-bounds' is replaced."
     (prog1 (list :ok t :id (org-sm--capture (intern type) body nil nil title))
       (org-sm-web--save))))
 
+;; AI split (optional; needs `org-sm-gptel').  Pure transform: takes raw text,
+;; returns the AI's proposed cards WITHOUT writing anything.  The front-end
+;; shows them for review, then creates each via the existing /api/capture, so
+;; there is still one write path.  Synchronous via `org-sm-gptel-split-text'.
+(org-sm-web--json-servlet api/split (text extra)
+  (unless (fboundp 'org-sm-gptel-split-text)
+    (user-error "AI split unavailable: load org-sm-gptel"))
+  (unless (org-string-nw-p text)
+    (user-error "Missing 'text'"))
+  (list :ok t
+        :cards (apply #'vector
+                      (mapcar (lambda (c)
+                                (list :title (or (car c) "") :body (cdr c)))
+                              (org-sm-gptel-split-text text extra)))))
+
 ;; start/end are character offsets of the selection within the card body.
 (org-sm-web--json-servlet api/extract/:id (type selected start end)
   (unless (member type '("topic" "cloze"))
@@ -291,6 +292,37 @@ preserved; only the body region from `org-sm--body-bounds' is replaced."
                                   (string-to-number (or start "0"))
                                   (string-to-number (or end (number-to-string (length selected))))))
       (org-sm-web--save))))
+
+;; AI refine (optional; needs `org-sm-gptel').  Pure transform, like
+;; /api/split: returns the rewritten body WITHOUT writing anything, so the
+;; single write path stays the existing Edit textarea + Save
+;; (/api/body/:id).  Mirrors the Emacs `org-sm-gptel-refine', which also
+;; only edits the buffer and does not save until the buffer itself is saved.
+(org-sm-web--json-servlet api/refine/:id ()
+  (unless (fboundp 'org-sm-gptel-rewrite-text)
+    (user-error "AI refine unavailable: load org-sm-gptel"))
+  (let* ((info (org-sm-web--with-card id
+                 (let ((bounds (org-sm--body-bounds)))
+                   (cons (org-sm-type)
+                         (string-trim (buffer-substring-no-properties
+                                      (car bounds) (cdr bounds)))))))
+         (type (car info)) (body (cdr info)))
+    (list :ok t :body (org-sm-gptel-rewrite-text body type))))
+
+;; AI split (optional; needs `org-sm-gptel').  Split the card at :id into
+;; child topic cards via `org-sm-gptel-split-text' + `org-sm--extract-cards',
+;; appending back-references to this card; the card itself is kept.
+(org-sm-web--json-servlet api/extract-split/:id ()
+  (unless (fboundp 'org-sm-gptel-split-text)
+    (user-error "AI split unavailable: load org-sm-gptel"))
+  (org-sm-web--with-card id
+    (let* ((bounds (org-sm--body-bounds))
+           (body   (string-trim (buffer-substring-no-properties
+                                 (car bounds) (cdr bounds))))
+           (cards  (org-sm-gptel-split-text body)))
+      (org-back-to-heading t)
+      (prog1 (list :ok t :children (length (org-sm--extract-cards cards)))
+        (org-sm-web--save)))))
 
 ;;;###autoload
 (defun org-sm-web-start ()

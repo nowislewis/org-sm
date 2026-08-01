@@ -108,6 +108,7 @@
   }
   #cap-body { min-height: 30vh; }
   .cap-hint { color: var(--dim); font-size: 13px; margin: -4px 2px 0; }
+  .r-ai { background: var(--dim); }
 </style>
 </head>
 <body>
@@ -139,7 +140,10 @@
     <input id="cap-title" placeholder="Title (optional — derived from body)" />
     <textarea id="cap-body" placeholder="Paste or type content…"></textarea>
     <div class="cap-hint" id="cap-hint"></div>
-    <div class="btn-row"><button class="r-good" id="cap-save">Save card</button></div>
+    <div class="btn-row">
+      <button class="r-ai" id="cap-ai">AI Split</button>
+      <button class="r-good" id="cap-save">Save card</button>
+    </div>
   </div>
 </div>
 
@@ -232,7 +236,8 @@ function renderCloze(tokens) {
 function renderFooter() {
   const f = $('footer'); f.innerHTML = '';
   if (editing) {
-    f.append(row(mkBtn('Save', 'r-good', saveBody)));
+    const refineBtn = mkBtn('AI Refine', 'r-ai', () => aiRefineBody(refineBtn));
+    f.append(row(refineBtn, mkBtn('Save', 'r-good', saveBody)));
     return;
   }
   if (card.type === 'cloze' && !revealed) {
@@ -249,6 +254,9 @@ function renderFooter() {
       mkBtn2('Reschedule', (card.intervals || {}).reschedule, 'r-good', () => review({action:'reschedule'})),
       mkBtn('Postpone', 'r-hard',  postpone),
       mkBtn('Dismiss', 'wide',    () => review({action:'dismiss'}))));
+    // AI split (topic only): breaks this card into several child topics.
+    const splitBtn = mkBtn('AI Split card', 'r-ai', () => aiSplitCard(splitBtn));
+    f.append(row(splitBtn));
   }
 }
 
@@ -316,6 +324,44 @@ async function saveBody() {
   await reloadCard();
 }
 
+// AI refine (edit mode): pure transform, does not save.  Refills the
+// textarea so the user can review/adjust before the existing Save commits
+// it -- mirrors the Emacs org-sm-gptel-refine's "replace, undo if unhappy"
+// model, except here "undo" is simply not clicking Save.
+async function aiRefineBody(btn) {
+  const ed = $('editor');
+  if (!ed) return;
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Refining…';
+  try {
+    const res = await post('/api/refine/' + encodeURIComponent(card.id), {});
+    if (res && res.error) throw new Error(res.error);
+    ed.value = res.body;
+    toast('Refined — edit if needed, then Save');
+  } catch (e) {
+    toast('AI refine failed: ' + (e.message || e));
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
+}
+
+// AI split (review, topic cards): splits the current card into several
+// child topics (server saves immediately, mirroring org-sm-gptel-extract-split).
+async function aiSplitCard(btn) {
+  const label = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Splitting…';
+  try {
+    const res = await post('/api/extract-split/' + encodeURIComponent(card.id), {});
+    if (res && res.error) throw new Error(res.error);
+    toast('Split into ' + res.children + ' card' + (res.children === 1 ? '' : 's'));
+    await reloadCard();   // refresh body: now has back-reference links
+  } catch (e) {
+    toast('AI split failed: ' + (e.message || e));
+  } finally {
+    btn.disabled = false; btn.textContent = label;
+  }
+}
+
 // ---- selection -> floating extract menu ----------------------------------
 // Only meaningful on the plain-text body view (topic cards, or cloze underlying
 // text).  We compute the selection's character offset within card.body.
@@ -378,6 +424,8 @@ function syncCapTypes() {
     b.classList.toggle('active', b.dataset.type === capType));
   $('cap-hint').textContent =
     capType === 'cloze' ? 'Wrap the answer in {{ }} — e.g. is {{Paris}}.' : '';
+  // AI split only makes sense for topic material.
+  $('cap-ai').style.display = capType === 'topic' ? '' : 'none';
 }
 function closeCapture() { $('capture').classList.remove('show'); }
 function openCapture() {
@@ -391,13 +439,57 @@ function openCapture() {
   setTimeout(() => $('cap-body').focus(), 50);
 }
 
+// AI split: send the body to the server, refill the textarea with the
+// proposed cards as "# TITLE\nBODY" blocks for the user to edit before saving.
+async function aiSplit() {
+  const text = $('cap-body').value.trim();
+  if (!text) return toast('Body is empty');
+  const btn = $('cap-ai'), label = btn.textContent;
+  btn.disabled = true; btn.textContent = 'Splitting…';
+  try {
+    const res = await post('/api/split', { text });
+    if (res && res.error) throw new Error(res.error);
+    const cards = res.cards || [];
+    if (!cards.length) return toast('No cards produced');
+    $('cap-body').value = cards.map(c =>
+      '# ' + (c.title || '').trim() + '\n' + (c.body || '').trim()).join('\n\n');
+    $('cap-title').value = '';
+    $('cap-hint').textContent =
+      cards.length + ' card(s) — edit, then Save (each "# " line is one card).';
+  } catch (e) { toast('AI split failed: ' + (e.message || e)); }
+  finally { btn.disabled = false; btn.textContent = label; }
+}
+
+// Split the textarea into cards on "# " heading lines; [] means single card.
+function parseCapCards(text) {
+  if (!/^# /m.test(text)) return null;
+  return text.split(/^# /m).map(s => s.trim()).filter(Boolean).map(block => {
+    const nl = block.indexOf('\n');
+    return nl < 0
+      ? { title: block.trim(), body: '' }
+      : { title: block.slice(0, nl).trim(), body: block.slice(nl + 1).trim() };
+  }).filter(c => c.body);
+}
+
 async function saveCapture() {
-  const body = $('cap-body').value.trim(), title = $('cap-title').value.trim();
-  if (!body) return toast('Body is empty');
-  if (capType === 'cloze' && !/\{\{[^}\n]+\}\}/.test(body))
+  const raw = $('cap-body').value.trim(), title = $('cap-title').value.trim();
+  if (!raw) return toast('Body is empty');
+  const multi = capType === 'topic' && parseCapCards(raw);
+  if (multi && multi.length) {
+    try {
+      for (const c of multi) {
+        const res = await post('/api/capture', { type: 'topic', body: c.body, title: c.title });
+        if (res && res.error) throw new Error(res.error);
+      }
+      closeCapture(); toast(multi.length + ' cards created');
+      await loadQueue();
+    } catch (e) { toast('Save failed: ' + (e.message || e)); }
+    return;
+  }
+  if (capType === 'cloze' && !/\{\{[^}\n]+\}\}/.test(raw))
     return toast('Cloze needs {{answer}} markers');
   try {
-    const res = await post('/api/capture', { type: capType, body, title });
+    const res = await post('/api/capture', { type: capType, body: raw, title });
     if (res && res.error) throw new Error(res.error);
     closeCapture(); toast('Card created');
     await loadQueue();          // new card is due tomorrow; refresh count
@@ -406,6 +498,7 @@ async function saveCapture() {
 
 $('add').onclick = openCapture;
 $('cap-close').onclick = closeCapture;
+$('cap-ai').onclick = aiSplit;
 $('cap-save').onclick = saveCapture;
 $('capture').onclick = e => { if (e.target === $('capture')) closeCapture(); };
 document.querySelector('.cap-types').onclick = e => {

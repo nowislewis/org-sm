@@ -25,10 +25,10 @@ Requires Emacs 29.1+, org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
   :hook (org-mode . org-sm-mode)
   :config
   (setq org-sm-directory "~/notes/")
-  (setq org-sm-capture-file "~/notes/inbox.org")
-  (setq org-sm-capture-olp '("org-sm topics"))
-  (org-sm-setup-capture)
-  (global-org-sm-read-mode 1))  ; M-z captures region/clipboard as topic from any buffer
+  ;; Cards go to an "sm-cards" heading in sm-cards.org under
+  ;; org-sm-directory by default (created on demand).  Override with
+  ;; org-sm-capture-file / org-sm-capture-olp if you want a different inbox.
+  (global-org-sm-read-mode 1))  ; M-z captures region/clipboard from any buffer
 #+end_src
 
 Suggested keybindings:
@@ -41,8 +41,8 @@ Suggested keybindings:
   (define-key org-mode-map (kbd "C-c s SPC") #'org-sm-review-confirm)
   (define-key org-mode-map (kbd "C-c s d")   #'org-sm-item-dismiss)
   (define-key org-mode-map (kbd "C-c s q")   #'org-sm-review-abort)
-  (define-key org-mode-map (kbd "C-c s l")   #'org-sm-review-list)
-  (define-key global-map   (kbd "C-c s c")   #'org-sm-capture-topic))
+  (define-key org-mode-map (kbd "C-c s t")   #'org-sm-tree)
+  (define-key global-map   (kbd "C-c s c")   #'org-sm-capture))
 #+end_src
 
 * Commands
@@ -52,11 +52,14 @@ Suggested keybindings:
 | ~org-sm-item-mark~      | Mark current heading as topic or cloze          |
 | ~org-sm-item-extract~   | Extract selected region as child topic or cloze |
 | ~org-sm-item-dismiss~   | Remove current item from SRS                    |
+| ~org-sm-item-undismiss~ | Restore a dismissed item                        |
 | ~org-sm-review-start~   | Start review session                            |
 | ~org-sm-review-confirm~ | Confirm topic read / advance cloze state        |
 | ~org-sm-review-abort~   | Abort current review session                    |
-| ~org-sm-review-list~    | Browse all SRS items                            |
-| ~org-sm-capture-topic~  | Capture region or clipboard as a topic card     |
+| ~org-sm-tree~           | Foldable aggregated tree of all cards           |
+| ~org-sm-set-readpoint~  | Drop a read-point anchor; review jumps here     |
+| ~org-sm-goto-source~    | Grep the vault for this card's source           |
+| ~org-sm-capture~        | Capture region/clipboard into an editable buffer |
 
 * Review Flow
 
@@ -71,12 +74,31 @@ Intervals are calculated from the scheduled date, so early/late reviews don't di
 
 * Capture
 
-~org-sm-capture-topic~ captures a region or clipboard content as a topic card via ~org-capture~.
-With a region active, triggers ~M-w~ first (works in any buffer: pdf, nov, etc.) then reads
-the clipboard.  Without a region, reads the clipboard directly.
+~org-sm-capture~ grabs a region or clipboard content into a lightweight
+editable side buffer (~org-sm-capture-mode~) so you can see and adjust it
+before writing.  With a region active or in ~reader-mode~, it triggers ~M-w~
+first (works in any buffer: pdf, nov, etc.), otherwise reads the clipboard.
 
-Set ~org-sm-capture-file~ and ~org-sm-capture-olp~, then call ~org-sm-setup-capture~ once.
-~global-org-sm-read-mode~ binds ~M-z~ globally to ~org-sm-capture-topic~.
+Inside the capture buffer:
+
+| Key       | Action                                                    |
+|-----------+-----------------------------------------------------------|
+| ~C-c C-c~ | Write the card(s) and close                               |
+| ~C-c C-k~ | Discard                                                   |
+| ~C-c C-a~ | (with ~org-sm-gptel~) AI-split the content into cards     |
+| ~C-c C-i~ | (with ~org-sm-gptel~) refine the card at point            |
+
+The buffer holds either plain text (one card) or ~**~ headings (one card
+each — e.g. after an AI split); ~C-c C-c~ writes them all as topics via the
+pure ~org-sm--capture~.  Add cards by typing a ~**~ heading; delete by
+editing.
+
+~org-sm-capture~ writes to a single inbox with no prompt: an ~sm-cards~
+heading in ~sm-cards.org~ under ~org-sm-directory~ (both created on demand).
+Just ~M-z~ -> edit -> ~C-c C-c~.  Sort cards into per-topic files yourself
+afterwards (plain org refile).  Change the inbox with ~org-sm-capture-file~ /
+~org-sm-capture-olp~.  ~global-org-sm-read-mode~ binds ~M-z~ globally to
+~org-sm-capture~.
 
 * Extract
 
@@ -108,8 +130,13 @@ Optional extension powered by [[https://github.com/karthink/gptel][gptel]].
 (with-eval-after-load 'gptel
   (require 'org-sm-gptel)
   (define-key org-mode-map (kbd "C-c s ?") #'org-sm-gptel-explain)
-  (define-key org-mode-map (kbd "C-c s i") #'org-sm-gptel-refine))
+  (define-key org-mode-map (kbd "C-c s i") #'org-sm-gptel-refine)
+  (define-key org-mode-map (kbd "C-c s A") #'org-sm-gptel-extract-split))
 #+end_src
+
+Loading ~org-sm-gptel~ also adds two keys inside every ~org-sm-capture-mode~
+buffer: ~C-c C-a~ (AI-split the content) and ~C-c C-i~ (refine the card at
+point).
 
 ** Commands
 
@@ -125,35 +152,64 @@ re-invoke.
 
 *** ~org-sm-gptel-refine~ (=C-c s i=)
 
-Refines the current heading body in-place using ~gptel-rewrite~.
-Works on any org heading — including org-capture buffers before ~C-c C-c~.
+Refines the current heading body in-place with a single async AI request,
+then replaces the body in place — no ~gptel-rewrite~ dependency, no diff /
+accept step.  Don't like the result?  Just ~undo~.  Works on any org
+heading, including an ~org-sm-capture-mode~ buffer.
 
 The system prompt is chosen automatically by card type:
 
-- *cloze* → first checks *direction* (why-type vs what-type): if the ~{{}}~ is a
-  name/definition but the source has a causal relation, it proposes converting
-  to a why-type cloze and waits for your decision; then enforces the
-  minimum-information principle (one ~{{}}~ per card, answer ≤ 5 words, split
-  multi-fact content).
+- *cloze* → enforces the minimum-information principle (one ~{{}}~ per
+  card, answer ≤ 5 words, split multi-fact content), preferring a
+  why-type cloze (mechanism/cause/result) over a what-type one when the
+  source has a causal relation.
 - *topic / unset* → cleans prose for incremental reading: strips filler,
   resolves pronoun ambiguity, preserves paragraph structure (not a summary),
   and never deletes causal links (flags ~【需补充】~ when a conclusion lacks its why).
 
-The instruction is pre-filled in the minibuffer; press ~RET~ to confirm or
-edit it first.  gptel-rewrite overlay keys:
+This mirrors the web front-end's plain refill-and-edit flow (see
+~org-sm-gptel-rewrite-text~, its synchronous counterpart) — both share one
+request core, ~org-sm-gptel--rewrite-request~.
 
-| Key       | Action          |
-|-----------+-----------------|
-| ~C-c C-a~ | Accept rewrite  |
-| ~C-c C-k~ | Reject rewrite  |
-| ~C-c C-d~ | Diff view       |
-| ~C-c C-e~ | Ediff view      |
-| ~C-c C-r~ | Iterate / retry |
-
-Typical workflow after ~org-sm-capture-topic~ or ~org-sm-item-extract~:
+Typical workflow after ~org-sm-capture~ or ~org-sm-item-extract~:
 1. Land on the new child heading.
-2. ~C-c s i~ to refine raw content.
-3. ~C-c C-a~ to accept, then continue.
+2. ~C-c s i~ to refine raw content in place.
+3. ~undo~ if you don't like it, otherwise continue.
+
+*** AI capture (=C-c C-a= inside a capture buffer)
+
+~org-sm-gptel-capture-ai~ is bound to ~C-c C-a~ in every ~org-sm-capture-mode~
+buffer.  It sends the buffer's current content to the AI, which *cleans and
+splits* it into one or more Topic cards (per ~org-sm-gptel-system-capture~:
+strip filler, keep causal chains, make implicit logic explicit, no new
+facts), then replaces the buffer with the resulting ~**~ headings for you to
+edit and commit with ~C-c C-c~.  Asynchronous.  Press ~C-c C-a~ again to
+re-split; ~C-u C-c C-a~ adds a one-off instruction (e.g. split finer / merge).
+
+This keeps one flow for both plain and AI capture: ~C-c s c~ -> look -> either
+~C-c C-c~ (as-is) or ~C-c C-a~ then edit then ~C-c C-c~.
+
+*** ~org-sm-gptel-extract-split~ (=C-c s A=)
+
+Split the card you are *reading* into child cards.  Run it with point on an
+SRS card (e.g. during review): it sends the card's body to the AI (per
+~org-sm-gptel-system-split~), which proposes several atomic child topics --
+*preferring reusable concept / claim cards* (high memory-reuse value), but
+following the content's own structure when narrative/procedural/list content
+fits better.  Each becomes a scheduled child topic and a back-reference is
+appended to the parent body; the parent card is kept.  With prefix arg,
+prompt for a one-off extra instruction.
+
+Both AI capture and extract-split share one core
+(~org-sm-gptel-split-text~ / ~org-sm-gptel--split-request~), which the web
+~/api/split~ endpoint also calls -- one source of truth for “text -> cards”.
+
+Relevant options:
+
+| Variable                      | Meaning                                          |
+|-------------------------------+--------------------------------------------------|
+| ~org-sm-gptel-system-capture~ | System prompt for AI capture (clean + split)     |
+| ~org-sm-gptel-system-split~   | System prompt for extract-split (concept-biased) |
 
 
 * Web front-end (org-sm-web)
@@ -195,12 +251,32 @@ the Emacs commands use.
 | ~POST /api/review/:id~ | ~rating=~ / ~action=~ [~&days=~]     | Grade / reschedule / postpone / dismiss |
 | ~POST /api/body/:id~   | ~body=~                             | Replace the card body (refine)  |
 | ~POST /api/capture~    | ~type= body= [title=]~              | Create a new card via ~org-sm--capture~ |
+| ~POST /api/split~      | ~text= [extra=]~                    | AI-split text into cards (no write; needs ~org-sm-gptel~) |
+| ~POST /api/refine/:id~  | —                                  | AI-rewrite the card body in place (needs ~org-sm-gptel~) |
+| ~POST /api/extract-split/:id~ | —                            | AI-split the card into children (needs ~org-sm-gptel~) |
 | ~POST /api/extract/:id~ | ~type= selected= start= end=~      | Create a child card via ~org-sm--extract~ |
 
 ~/api/capture~ writes into ~org-sm-capture-file~ / ~org-sm-capture-olp~ (the same
-target the Emacs ~org-sm-capture-topic~ command uses), schedules the card for
+target the Emacs ~org-sm-capture~ command uses), schedules the card for
 tomorrow, and returns its new ~id~.  Cloze bodies must contain at least one
 ~{{answer}}~ marker.
+
+~/api/split~ is a pure transform: it returns the AI's proposed
+~{cards:[{title,body}]}~ *without writing anything*.  The UI shows them for
+editing, then creates each via ~/api/capture~ — so there is still one write
+path.  It shares its core with the Emacs AI capture / extract-split.
+
+~/api/refine~ and ~/api/extract-split~ mirror the Emacs ~org-sm-gptel-refine~ /
+~org-sm-gptel-extract-split~ commands, sharing the same AI cores
+(~org-sm-gptel-rewrite-text~ / ~org-sm-gptel-split-text~):
+- ~/api/refine~ is a *pure transform* like ~/api/split~ — it returns the
+  rewritten body *without writing anything*; the existing Edit textarea +
+  ~Save~ (~/api/body/:id~) remains the one write path.  This matches Emacs
+  ~org-sm-gptel-refine~, which also only edits the buffer (no auto-save).
+- ~/api/extract-split~ *does* write — it creates the child cards and
+  appends back-references to the parent, then saves, matching Emacs
+  ~org-sm-gptel-extract-split~ (which also auto-saves, since it's a
+  structural change spanning multiple new headings).
 
 Note: ~:id~ must be the trailing path component — simple-httpd only supports
 trailing template parameters, hence ~/api/body/:id~ rather than ~/api/card/:id/body~.
@@ -219,8 +295,20 @@ Button labels mirror the Emacs wording:
 - *capture* (new card): the ~＋~ button in the header opens a sheet with a
   Topic/Cloze toggle, an optional title, and a body box (pre-filled from the
   clipboard when the browser grants permission).  ~Save card~ posts to
-  ~/api/capture~ and the due count refreshes.  Handy for turning copied text on
-  your phone straight into a card.
+  ~/api/capture~ and the due count refreshes.
+- *AI Split* (topic only, needs ~org-sm-gptel~): in the capture sheet, ~AI
+  Split~ sends the body to ~/api/split~ and refills the box with the proposed
+  cards as ~# TITLE~ blocks.  Edit them, then ~Save card~ writes each one —
+  mirroring the Emacs ~C-c C-a~ flow.
+- *AI Refine* (needs ~org-sm-gptel~): while reviewing, ~Edit~ then ~AI
+  Refine~ sends the current body to ~/api/refine/:id~ and refills the
+  textarea with the result; edit further if you like, then ~Save~.  No
+  diff — mirrors the Emacs ~org-sm-gptel-refine~ (undo-to-revert) flow.
+- *AI Split card* (needs ~org-sm-gptel~): while reviewing, ~AI Split card~
+  posts to ~/api/extract-split/:id~, which splits the card into several
+  child topics (preferring reusable concept/claim cards) and appends
+  back-references; the current card is reloaded to show the links.
+  Mirrors the Emacs ~org-sm-gptel-extract-split~.
 
 ** Security
 

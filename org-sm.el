@@ -22,12 +22,12 @@
 ;;   org-sm-tree           - foldable aggregated tree of all cards; filter + review in place
 ;;   org-sm-set-readpoint  - drop an inline read-point anchor at point; review jumps here
 ;;   org-sm-goto-source    - grep the vault for this card's source (extraction point)
-;;   org-sm-capture-topic           - capture region/clipboard as topic.
-;;   org-sm-capture-topic-from-input - interactive capture; prompts for heading/body.
+;;   org-sm-capture         - capture region/clipboard into an editable buffer,
+;;                            commit as one or more topic cards.
 ;;
 ;; Two minor modes are provided:
 ;;   org-sm-mode             - buffer-local; {{cloze}} font-lock (use via :hook)
-;;   global-org-sm-read-mode - global; binds M-z to `org-sm-capture-topic'
+;;   global-org-sm-read-mode - global; binds M-z to `org-sm-capture'
 ;;
 ;; Point `org-sm-directory' at the tree containing your SRS items:
 ;;
@@ -38,19 +38,18 @@
 ;;     (setq org-sm-directory "~/org/incremental/")
 ;;     (setq org-sm-capture-file "~/org/inbox.org")
 ;;     (setq org-sm-capture-olp '("org-sm topics"))
-;;     (org-sm-setup-capture)
 ;;     (global-org-sm-read-mode 1))
 ;;; Code:
 
 (require 'cl-lib)
+(require 'seq)
 (require 'org)
 (require 'org-id)
 (require 'org-macs)
 (require 'fsrs)
 
 (declare-function org-sm-gptel-explain "org-sm-gptel")
-(declare-function org-capture-put-target-region-and-position "org-capture")
-(defvar org-capture-templates)
+(declare-function org-sm-gptel-capture-ai "org-sm-gptel")
 
 ;;;; ---- Customization -------------------------------------------------------
 
@@ -274,6 +273,16 @@ Return plist (:interval-days DAYS)."
 
 ;;;; ---- Cloze grading (pure, no UI) -----------------------------------------
 
+(defun org-sm--secs-label (secs)
+  "Format SECS as a short human interval label like \"10m\", \"2h\", \"3d\", \"5mo\".
+Single source of truth for interval labels across review menus and the web UI."
+  (let ((days (/ secs 86400.0)))
+    (cond ((< days (/ 1.0 24)) (format "%dm" (max 1 (round (/ secs 60)))))
+          ((< days 1)          (format "%dh" (round (* days 24))))
+          ((< days 30)         (format "%dd" (round days)))
+          ((< days 365)        (format "%dmo" (round (/ days 30.0))))
+          (t                   (format "%.1fy" (/ days 365.0))))))
+
 (defconst org-sm-cloze-ratings '(:again :hard :good :easy)
   "Ordered list of FSRS ratings offered for cloze review.")
 
@@ -302,10 +311,7 @@ alist from `org-sm--cloze-preview', reused to avoid recomputing."
                     (error "Unknown cloze rating: %S" rating)))
          (card  (plist-get entry :card))
          (secs  (plist-get entry :interval-secs))
-         (days  (fsrs-seconds-days secs))
-         (extra (if (< days 1)
-                    (format "%s  %2dm" rating (round (/ secs 60)))
-                  (format "%s  %2dd" rating (round days)))))
+         (extra (format "%s  %s" rating (org-sm--secs-label secs))))
     (org-sm--cloze-write card)
     (org-sm--log-review 'cloze nil extra)
     (list :rating rating :interval-secs secs :due (fsrs-card-due card))))
@@ -343,6 +349,20 @@ Return its start position, or nil if no ancestor is a card."
   "Trim surrounding whitespace from RAW."
   (string-trim raw))
 
+(defun org-sm--set-body (new-body)
+  "Replace the current heading's body text with NEW-BODY.
+Point must be on the heading.  Metadata (planning line, drawer) is
+preserved; only the body region from `org-sm--body-bounds' is replaced.
+Shared by the web front-end (edit) and `org-sm-gptel-refine' (AI refine)."
+  (let* ((bounds (org-sm--body-bounds))
+         (start  (car bounds))
+         (end    (cdr bounds)))
+    (goto-char start)
+    (delete-region start end)
+    (insert (org-sm--body-clean new-body))
+    ;; keep a trailing newline so the subtree stays well-formed
+    (unless (bolp) (insert "\n"))))
+
 (defun org-sm--cloze-markers-p ()
   "Return non-nil if current heading body contains {{cloze}} markers."
   (let ((bounds (org-sm--body-bounds)))
@@ -375,90 +395,134 @@ moves point into the PROPERTIES drawer."
 ;;;; ---- Capture ---------------------------------------------
 
 (defcustom org-sm-capture-file nil
-  "Target org file for `org-sm-capture-topic'."
+  "Target org file for `org-sm-capture'.
+When nil, cards go to \"sm-cards.org\" under `org-sm-directory' (created on
+demand).  Cards land in one inbox; sort them into per-topic files yourself."
   :type '(choice (const nil) file)
   :group 'org-sm)
 
-(defcustom org-sm-capture-olp '("org-sm topics")
+(defcustom org-sm-capture-olp '("sm-cards")
   "Outline path for the capture target (list of heading strings).
-The card is inserted as a child of the deepest heading in the path.
-Example: \\='(\"Topics\" \"Physics\")"
+The card is inserted as a child of the deepest heading in the path, which
+is created if missing.  Example: \\='(\"Topics\" \"Physics\")"
   :type '(repeat string)
   :group 'org-sm)
 
-(defvar org-sm--pending-content ""
-  "Temporary storage for capture template content.")
+(defun org-sm--capture-target-file ()
+  "Return the capture file, defaulting to sm-cards.org under `org-sm-directory'."
+  (expand-file-name
+   (or org-sm-capture-file
+       (expand-file-name "sm-cards.org" (or org-sm-directory default-directory)))))
 
-;;;###autoload
-(defun org-sm-setup-capture ()
-  "Register org-sm capture templates.
-Call once after setting `org-sm-capture-file' and `org-sm-capture-olp'.
-
-  org-sm-topic            - capture clipboard/region as topic (original).
-  org-sm-topic-from-input - interactive capture; prompts for heading and body."
-  (add-to-list 'org-capture-templates
-               '("org-sm-topic" "org-sm topic" entry
-                 (function org-sm--capture-goto-olp)
-                 "** %(org-sm--truncate-title org-sm--pending-content)\n%(identity org-sm--pending-content)\n\n- source: %a"
-                 :before-finalize (lambda () (org-sm-item-mark 'topic))))
-  (add-to-list 'org-capture-templates
-               '("org-sm-topic-from-input" "org-sm topic from input" entry
-                 (function org-sm--capture-goto-olp)
-                 "** %?\n:PROPERTIES:\n:PSA_FEELING: 记下这张卡片的感受\n:END:\n"
-                 :before-finalize (lambda () (org-sm-item-mark 'topic)))))
-
-(defun org-sm--capture-goto-olp ()
-  "Jump to `org-sm-capture-olp' in `org-sm-capture-file' for org-capture."
-  (let ((m (org-find-olp (cons (expand-file-name org-sm-capture-file) org-sm-capture-olp))))
-    (set-buffer (marker-buffer m))
-    (org-capture-put-target-region-and-position)
-    (widen)
-    (goto-char m)
-    (set-marker m nil)))
-
-;;;###autoload
-(defun org-sm-capture-topic (&optional ask-file)
-  "Capture region or clipboard as a topic card.
-Triggers `M-w' when a region is active or in `reader-mode' (where selection
-is not tracked by Emacs region).  Otherwise reads the clipboard directly.
-With prefix arg, prompt to update `org-sm-capture-file' and `org-sm-capture-olp'."
-  (interactive "P")
-  (when ask-file
-    (setq org-sm-capture-file
-          (if (eq major-mode 'org-mode)
-              (buffer-file-name)
-            (read-file-name "Capture to file: " nil nil t nil
-                            (lambda (f) (string-match-p "\\.org$" f)))))
-    (org-sm--select-capture-olp))
-  (unless org-sm-capture-file
-    (user-error "Set `org-sm-capture-file' and call `org-sm-setup-capture' first"))
+(defun org-sm--grab-content ()
+  "Return the region or clipboard text to capture, as a plain string.
+When a region is active or the buffer is in `reader-mode' (where the
+selection is not tracked by the Emacs region), copy it first via `M-w',
+then read the clipboard.  Otherwise read the clipboard directly."
   (when (or (use-region-p) (derived-mode-p 'reader-mode))
     (execute-kbd-macro (kbd "M-w")))
-  (setq org-sm--pending-content
-        (substring-no-properties
-         (or (ignore-errors (current-kill 0 t)) "")))
-  (org-capture nil "org-sm-topic"))
+  (substring-no-properties
+   (or (ignore-errors (current-kill 0 t)) "")))
+
+(defun org-sm--capture-render-cards (cards)
+  "Insert CARDS (list of (TITLE . BODY)) as ** headings at point.
+Inverse of `org-sm--capture-cards-in-buffer'; they share the heading format."
+  (let ((n 0))
+    (dolist (card cards)
+      (setq n (1+ n))
+      (insert (format "** %s\n%s\n\n"
+                      (or (org-string-nw-p (car card)) (format "Card %d" n))
+                      (cdr card))))))
+
+(defun org-sm--capture-cards-in-buffer ()
+  "Collect cards from the current capture buffer as (TITLE . BODY) cons cells.
+If the buffer has ** headings, each becomes one card (TITLE from the heading).
+Otherwise the whole buffer body is one card with an auto-derived title."
+  (org-with-wide-buffer
+   (goto-char (point-min))
+   (if (re-search-forward "^\\*\\* " nil t)
+       (let (cards)
+         (goto-char (point-min))
+         (while (re-search-forward "^\\*\\* " nil t)
+           (let* ((title  (org-get-heading t t t t))
+                  (bounds (org-sm--body-bounds))
+                  (body   (string-trim (buffer-substring-no-properties
+                                        (car bounds) (cdr bounds)))))
+             (when (org-string-nw-p body)
+               (push (cons (and (org-string-nw-p title) (string-trim title)) body)
+                     cards))))
+         (nreverse cards))
+     (let ((body (string-trim (buffer-substring-no-properties
+                               (point-min) (point-max)))))
+       (and (org-string-nw-p body) (list (cons nil body)))))))
+
+(defun org-sm-capture-fill-cards (cards)
+  "Replace the current capture buffer with CARDS rendered as ** headings."
+  (erase-buffer)
+  (org-sm--capture-render-cards cards)
+  (goto-char (point-min))
+  (org-fold-show-all))
+
+(defun org-sm-capture-commit ()
+  "Write every card in the capture buffer as a topic, then close it."
+  (interactive)
+  (let ((cards (org-sm--capture-cards-in-buffer)))
+    (unless cards (user-error "Nothing to capture"))
+    (dolist (c cards) (org-sm--capture 'topic (cdr c) nil nil (car c)))
+    (quit-window t)
+    (message "org-sm: wrote %d topic card%s"
+             (length cards) (if (= (length cards) 1) "" "s"))))
+
+(defun org-sm-capture-abort ()
+  "Discard the capture buffer without writing anything."
+  (interactive)
+  (quit-window t)
+  (message "org-sm capture: aborted"))
+
+(defvar org-sm-capture-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'org-sm-capture-commit)
+    (define-key map (kbd "C-c C-k") #'org-sm-capture-abort)
+    map)
+  "Keymap for `org-sm-capture-mode'.
+The AI extension (`org-sm-gptel') adds \\`C-c C-a' to split via AI.")
+
+(define-derived-mode org-sm-capture-mode org-mode "org-sm-cap"
+  "Lightweight capture buffer.  Edit the content, then commit.
+
+The buffer holds either plain text (one card) or ** headings (one card
+each).  \\<org-sm-capture-mode-map>\\[org-sm-capture-commit] writes the
+card(s); \\[org-sm-capture-abort] discards.  With `org-sm-gptel' loaded,
+\\[org-sm-gptel-capture-ai] hands the content to the AI to split/clean.")
+
+(defun org-sm--capture-buffer (content)
+  "Pop up an `org-sm-capture-mode' buffer pre-filled with CONTENT."
+  (let ((buf (get-buffer-create "*org-sm capture*")))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'org-sm-capture-mode) (org-sm-capture-mode))
+      (erase-buffer)
+      (insert content)
+      (goto-char (point-min)))
+    (pop-to-buffer buf
+                   '(display-buffer-in-side-window
+                     (side . right) (window-width . 0.5)))))
 
 ;;;###autoload
-(defun org-sm-capture-topic-from-input ()
-  "Capture a new topic card by interactively entering heading and body."
-  (interactive)
-  (unless org-sm-capture-file
-    (user-error "Set `org-sm-capture-file' and call `org-sm-setup-capture' first"))
-  (org-capture nil "org-sm-topic-from-input"))
+(defun org-sm-capture ()
+  "Capture region/clipboard into an editable buffer, then commit as topic card(s).
 
-(defun org-sm--select-capture-olp ()
-  "Prompt to select a heading in `org-sm-capture-file'; set `org-sm-capture-olp'."
-  (with-current-buffer (or (find-buffer-visiting org-sm-capture-file)
-                           (find-file-noselect org-sm-capture-file))
-    (let* ((entries (org-map-entries
-                     (lambda ()
-                       (let ((olp (org-get-outline-path t)))
-                         (cons (org-format-outline-path olp) olp)))
-                     nil 'file))
-           (choice (completing-read "Select heading: " (mapcar #'car entries) nil t)))
-      (setq org-sm-capture-olp (cdr (assoc choice entries)))
-      (message "org-sm capture olp: %s" org-sm-capture-olp))))
+Grabs the region or clipboard (see `org-sm--grab-content') into an
+`org-sm-capture-mode' side buffer so you can see and edit it before
+writing.  \\`C-c C-c' writes it as a topic card; \\`C-c C-k' discards.
+With `org-sm-gptel' loaded, \\`C-c C-a' hands the content to the AI to
+split it into multiple clean cards.
+
+Cards go to `org-sm-capture-file' / `org-sm-capture-olp' (by default an
+\"sm-cards\" heading in sm-cards.org under `org-sm-directory'), created on
+demand.  This is a single inbox; refile cards into per-topic files yourself."
+  (interactive)
+  (org-sm--capture-buffer (org-sm--grab-content)))
+
 ;;;; ---- Mark / Extract ------------------------------------------------------
 
 ;;;###autoload
@@ -538,13 +602,62 @@ child's id.  Pure buffer logic: no region, no prompt, no overlay/UI.
     (save-excursion
       (org-sm--insert-child level type title child-body id))))
 
+(defun org-sm--extract-cards (cards)
+  "Split the parent card at point into child topic cards from CARDS.
+Point must be on the parent heading.  CARDS is a list of (TITLE . BODY).
+Each becomes a scheduled + inited child topic; a back-reference link to
+each child is appended to the parent body.  The parent is left intact
+\(not dismissed).  Returns the list of new child ids.  Pure buffer logic:
+no prompt, no AI, no save.
+
+Like `org-sm--extract' but for a whole-card split: many children, no
+selection, back-references appended at the end of the parent body."
+  (let ((level (org-current-level))
+        (end   (cdr (org-sm--body-bounds)))
+        ids links)
+    (dolist (card cards)
+      (let* ((id    (org-id-new))
+             (title (concat org-sm-topic-prefix
+                            (or (org-string-nw-p (car card))
+                                (org-sm--truncate-title (cdr card))))))
+        (push id ids)
+        (push (format "[[id:%s][<T>]]" id) links)
+        (save-excursion
+          (org-sm--insert-child level 'topic title (cdr card) id))))
+    ;; Append all back-references at the end of the (original) parent body,
+    ;; keeping a trailing newline so the first child heading stays on its
+    ;; own line.
+    (goto-char end)
+    (insert " " (string-join (nreverse links) " "))
+    (unless (bolp) (insert "\n"))
+    (nreverse ids)))
+
+(defun org-sm--ensure-olp (file olp)
+  "Return a marker at OLP in FILE, creating the file and headings as needed."
+  (let ((buf (find-file-noselect file)))
+    (with-current-buffer buf
+      (org-with-wide-buffer
+       (or (ignore-errors (org-find-olp olp 'this-buffer))
+           (let ((level 0))
+             (goto-char (point-max))
+             (dolist (head olp (point-marker))
+               (setq level (1+ level))
+               (let ((m (ignore-errors
+                          (org-find-olp (seq-take olp level) 'this-buffer))))
+                 (if m
+                     (progn (goto-char m) (set-marker m nil)
+                            (org-end-of-subtree t t))
+                   (unless (bolp) (insert "\n"))
+                   (insert (make-string level ?*) " " head "\n"))))))))))
+
 (defun org-sm--capture (type body &optional file olp title)
   "Create a new SRS card of TYPE with BODY under FILE / OLP; return its id.
 Insert a scheduled + inited heading as the last child of the deepest heading
 in OLP and fill it with BODY (via `org-sm--insert-child').  Like
 `org-sm--extract' but with no parent and no back-reference; saves nothing.
-FILE/OLP default to `org-sm-capture-file'/`org-sm-capture-olp'; TITLE, when
-blank, is derived from BODY."
+FILE/OLP default to `org-sm--capture-target-file'/`org-sm-capture-olp'; the
+file and headings are created if missing.  TITLE, when blank, is derived
+from BODY."
   (let* ((body   (org-sm--body-clean (or body "")))
          (id     (org-id-new))
          (prefix (pcase type
@@ -555,9 +668,8 @@ blank, is derived from BODY."
                          (if (and title (org-string-nw-p title))
                              (string-trim title)
                            (org-sm--truncate-title body))))
-         (target (org-find-olp (cons (expand-file-name (or file org-sm-capture-file))
-                                     (or olp org-sm-capture-olp)))))
-    (unless target (user-error "Capture target not found"))
+         (target (org-sm--ensure-olp (or file (org-sm--capture-target-file))
+                                     (or olp org-sm-capture-olp))))
     (set-buffer (marker-buffer target))
     (org-with-wide-buffer
      (goto-char target)
@@ -617,11 +729,11 @@ When PRED is non-nil, only entries for which it returns non-nil are visited."
 (defun org-sm--collect-markers (&optional pred)
   "Return priority-sorted markers for SRS cards satisfying PRED (all if nil)."
   (mapcar #'cdr
-          (sort (org-sm--map-items
-                 (lambda () (cons (org-get-priority (org-get-heading t t t t))
-                                  (point-marker)))
-                 pred)
-                (lambda (a b) (> (car a) (car b))))))
+          (seq-sort-by #'car #'>
+                       (org-sm--map-items
+                        (lambda () (cons (org-get-priority (org-get-heading t t t t))
+                                         (point-marker)))
+                        pred))))
 
 (defun org-sm--collect-due-markers ()
   "Return priority-sorted markers for all due SRS cards."
@@ -731,10 +843,7 @@ collects the user's choice and advances the queue."
 
 (defun org-sm--cloze-rating-label (rating secs)
   "Format a menu LABEL for RATING with interval SECS."
-  (let ((days (fsrs-seconds-days secs)))
-    (if (< days 1)
-        (format "%s(%dm)" rating (round (/ secs 60)))
-      (format "%s(%dd)" rating days))))
+  (format "%s(%s)" rating (org-sm--secs-label secs)))
 
 (defun org-sm--review-confirm-cloze ()
   "Interactive cloze review: reveal, then rate (or dismiss).
@@ -1003,7 +1112,7 @@ KEYWORD (blank = any; a regexp on the title)."
 ;;;###autoload
 (defvar org-sm-read-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "M-z") #'org-sm-capture-topic)
+    (define-key map (kbd "M-z") #'org-sm-capture)
     map))
 
 (define-minor-mode org-sm-read-mode
