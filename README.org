@@ -42,6 +42,7 @@ Suggested keybindings:
   (define-key org-mode-map (kbd "C-c s d")   #'org-sm-item-dismiss)
   (define-key org-mode-map (kbd "C-c s q")   #'org-sm-review-abort)
   (define-key org-mode-map (kbd "C-c s t")   #'org-sm-tree)
+  (define-key org-mode-map (kbd "C-c s A")   #'org-sm-card-workbench)
   (define-key global-map   (kbd "C-c s c")   #'org-sm-capture))
 #+end_src
 
@@ -60,6 +61,8 @@ Suggested keybindings:
 | ~org-sm-set-readpoint~  | Drop a read-point anchor; review jumps here     |
 | ~org-sm-goto-source~    | Grep the vault for this card's source           |
 | ~org-sm-capture~        | Capture region/clipboard into an editable buffer |
+| ~org-sm-card-workbench~ | Refine and/or split the card at point, in a workbench |
+| ~org-sm-capture-commit~ | Commit a capture buffer's body and/or ~**~ cards (see below) |
 
 * Review Flow
 
@@ -81,17 +84,36 @@ first (works in any buffer: pdf, nov, etc.), otherwise reads the clipboard.
 
 Inside the capture buffer:
 
-| Key       | Action                                                    |
-|-----------+-----------------------------------------------------------|
-| ~C-c C-c~ | Write the card(s) and close                               |
-| ~C-c C-k~ | Discard                                                   |
-| ~C-c C-a~ | (with ~org-sm-gptel~) AI-split the content into cards     |
-| ~C-c C-i~ | (with ~org-sm-gptel~) refine the card at point            |
+| Key       | Action                                                     |
+|-----------+------------------------------------------------------------|
+| ~C-c C-c~ | ~org-sm-capture-commit~: write back whatever's present     |
+| ~C-c C-k~ | Discard                                                    |
+| ~C-c C-a~ | (with ~org-sm-gptel~) AI-split the content into cards      |
+| ~C-c C-i~ | (with ~org-sm-gptel~) ~org-sm-gptel-refine-card~: refine the card at point, in place |
 
-The buffer holds either plain text (one card) or ~**~ headings (one card
-each — e.g. after an AI split); ~C-c C-c~ writes them all as topics via the
-pure ~org-sm--capture~.  Add cards by typing a ~**~ heading; delete by
-editing.
+~org-sm-capture-commit~ is the *same command* used everywhere -- plain
+capture and the card workbench alike (see below).  It processes both
+halves of the buffer independently, whichever are present:
+
+- The leading text (before any ~**~ heading, or the whole buffer if
+  there's none) becomes *one card's body*. In plain ~org-sm-capture~ (no
+  source card yet) this creates a brand-new top-level topic card via the
+  pure ~org-sm--capture~. In ~org-sm-card-workbench~ (a source card already
+  exists) this replaces that card's body in place via ~org-sm--set-body~
+  -- its SRS type/schedule/id are left untouched.
+- Every ~**~ heading becomes *its own card*. In plain ~org-sm-capture~
+  each becomes an independent top-level topic card (same as this command
+  has always done). In ~org-sm-card-workbench~ each becomes a new
+  scheduled *child* of the source card via ~org-sm--extract-cards~, with a
+  back-reference appended -- pre-existing children are never touched, only
+  appended after.
+
+One press does both at once if both are present, or just the applicable
+half if only one is; it signals "nothing to commit" only if the buffer is
+empty, and closes the window once done.  Add cards by typing a ~**~
+heading; delete by editing.  Every ~C-c C-i~ edit here is undo-only and
+un-committed until you explicitly press ~C-c C-c~, so feel free to refine
+drafts freely.
 
 ~org-sm-capture~ writes to a single inbox with no prompt: an ~sm-cards~
 heading in ~sm-cards.org~ under ~org-sm-directory~ (both created on demand).
@@ -99,6 +121,44 @@ Just ~M-z~ -> edit -> ~C-c C-c~.  Sort cards into per-topic files yourself
 afterwards (plain org refile).  Change the inbox with ~org-sm-capture-file~ /
 ~org-sm-capture-olp~.  ~global-org-sm-read-mode~ binds ~M-z~ globally to
 ~org-sm-capture~.
+
+* Card workbench
+
+~org-sm-card-workbench~ (=C-c s A=) refines *and/or* splits the card at
+point, through *one editable workbench* using the same visual convention as
+capture -- nothing changes in the source card until you commit.  It shares
+its commit command, ~C-c C-c~ (~org-sm-capture-commit~), with plain
+capture (see above):
+
+- The text *above* any ~**~ heading *is* the card's body -- edit it to
+  refine (in place, type/schedule/id untouched).
+- Each ~**~ heading *below* it becomes a child card -- add one to split it
+  off as a new scheduled child with a back-reference, without touching any
+  existing children.
+
+Run it with point on the card you're reading (e.g. during review):
+
+1. The card's body is copied into an ~org-sm-capture-mode~ buffer as plain
+   leading text (no ~**~ headings yet) — no AI call, no writes.
+2. Adjust either or both halves, any number of times:
+   - Edit the leading text directly, or (with ~org-sm-gptel~ loaded) press
+     ~C-c C-i~ to have the AI rewrite just that text in place.
+   - Add ~**~ headings below it by hand, or press ~C-c C-a~ to ask the AI to
+     do *both in one call*: refine the leading text AND propose child cards
+     (empty if none are worth splitting off) — re-rendered as leading text
+     + ~**~ headings.  Press ~C-c C-a~ again to re-run; ~C-u C-c C-a~ adds a
+     one-off instruction.  ~C-c C-i~ also refines any single ~**~ card.
+3. ~C-c C-c~ commits both halves at once, whichever are present: the
+   (possibly edited) leading text becomes the card's new body -- a no-op
+   if unchanged; and every ~**~ heading becomes a scheduled child topic
+   card under the source heading, with back-references appended, leaving
+   existing children alone.  Then saves.  ~C-c C-k~ discards the workbench
+   without touching the source at all.
+
+So this single workbench doubles as a pure refine (no ~**~ headings), a
+pure split (leave/clear the leading text), or both at once -- and, with
+~org-sm-gptel~, a single AI call can do the refine + split judgment call
+for you instead of two separate AI actions.
 
 * Extract
 
@@ -129,14 +189,18 @@ Optional extension powered by [[https://github.com/karthink/gptel][gptel]].
 #+begin_src elisp
 (with-eval-after-load 'gptel
   (require 'org-sm-gptel)
-  (define-key org-mode-map (kbd "C-c s ?") #'org-sm-gptel-explain)
-  (define-key org-mode-map (kbd "C-c s i") #'org-sm-gptel-refine)
-  (define-key org-mode-map (kbd "C-c s A") #'org-sm-gptel-extract-split))
+  (define-key org-mode-map (kbd "C-c s ?") #'org-sm-gptel-explain))
 #+end_src
 
-Loading ~org-sm-gptel~ also adds two keys inside every ~org-sm-capture-mode~
-buffer: ~C-c C-a~ (AI-split the content) and ~C-c C-i~ (refine the card at
-point).
+~org-sm-card-workbench~ (see above) is a core command, bound to =C-c s A=
+regardless of ~org-sm-gptel~; loading ~org-sm-gptel~ only makes its
+~C-c C-i~ / ~C-c C-a~ AI actions available inside the resulting workbench
+buffer.  It also adds those same two keys inside every ~org-sm-capture-mode~
+buffer (plain capture and the card workbench alike): ~C-c C-a~
+\(~org-sm-gptel-capture-ai~, whose behavior depends on which buffer it's in
+— see below) and ~C-c C-i~ (~org-sm-gptel-refine-card~, refine the text at
+point — a draft ~**~ card, or a card-workbench's leading body text — in
+place).
 
 ** Commands
 
@@ -150,14 +214,20 @@ single question asking which word the sentence can't live without, leaving the
 card-making to you.  The chat buffer ~*org-sm-explain: <heading>*~ is reused on
 re-invoke.
 
-*** ~org-sm-gptel-refine~ (=C-c s i=)
+*** ~org-sm-gptel-refine-card~ (=C-c C-i= inside any capture-mode buffer)
 
-Refines the current heading body in-place with a single async AI request,
-then replaces the body in place — no ~gptel-rewrite~ dependency, no diff /
-accept step.  Don't like the result?  Just ~undo~.  Works on any org
-heading, including an ~org-sm-capture-mode~ buffer.
+Refines just the text at point, in place, without invoking the combined
+action below.  Two flavors depending on where point is:
 
-The system prompt is chosen automatically by card type:
+- in a ~**~ heading → refines that one card's body.
+- before any ~**~ heading (a card workbench's leading text, i.e. the source
+  card's own body) → refines that whole block, using the source card's
+  original type (captured when ~org-sm-card-workbench~ opened the buffer).
+
+Asynchronous, no diff.  Don't like it?  ~undo~, or press ~C-c C-i~ again to
+re-refine (e.g. after manual edits or a different angle).  Nothing is
+committed until you press ~C-c C-c~.  The system prompt is chosen
+automatically by card type:
 
 - *cloze* → enforces the minimum-information principle (one ~{{}}~ per
   card, answer ≤ 5 words, split multi-fact content), preferring a
@@ -167,49 +237,51 @@ The system prompt is chosen automatically by card type:
   resolves pronoun ambiguity, preserves paragraph structure (not a summary),
   and never deletes causal links (flags ~【需补充】~ when a conclusion lacks its why).
 
-This mirrors the web front-end's plain refill-and-edit flow (see
-~org-sm-gptel-rewrite-text~, its synchronous counterpart) — both share one
-request core, ~org-sm-gptel--rewrite-request~.
+Shares its request core, ~org-sm-gptel--rewrite-request~, with the web
+front-end's ~org-sm-gptel-rewrite-text~ (synchronous, pure-transform
+variant).
 
-Typical workflow after ~org-sm-capture~ or ~org-sm-item-extract~:
-1. Land on the new child heading.
-2. ~C-c s i~ to refine raw content in place.
-3. ~undo~ if you don't like it, otherwise continue.
+*** ~org-sm-gptel-capture-ai~ (=C-c C-a= inside any capture-mode buffer)
 
-*** AI capture (=C-c C-a= inside a capture buffer)
+Bound in every ~org-sm-capture-mode~ buffer, but does one of two different
+things depending on which buffer it's in (via the buffer-local
+~org-sm-capture-ai-system~, set when the buffer is opened):
 
-~org-sm-gptel-capture-ai~ is bound to ~C-c C-a~ in every ~org-sm-capture-mode~
-buffer.  It sends the buffer's current content to the AI, which *cleans and
-splits* it into one or more Topic cards (per ~org-sm-gptel-system-capture~:
-strip filler, keep causal chains, make implicit logic explicit, no new
-facts), then replaces the buffer with the resulting ~**~ headings for you to
-edit and commit with ~C-c C-c~.  Asynchronous.  Press ~C-c C-a~ again to
-re-split; ~C-u C-c C-a~ adds a one-off instruction (e.g. split finer / merge).
+- *plain ~org-sm-capture~* → sends the whole buffer to the AI, which
+  *cleans and splits* it into one or more independent cards
+  (~org-sm-gptel-system-capture~), then replaces the buffer with the
+  resulting ~**~ headings.
+- *~org-sm-card-workbench~* → ONE AI call does both jobs at once: refines
+  the leading body text (per the source card's type, same rules as
+  ~org-sm-gptel-refine-card~ above) *and* judges whether any part is worth
+  splitting off into a child card (~org-sm-gptel-system-split~, appended
+  after the refine prompt — see ~org-sm-gptel--card-system~); returns an
+  empty ~cards~ array when nothing warrants it, so this one action also
+  covers the pure-refine case.  Re-renders the buffer as leading text +
+  any ~**~ headings.
 
-This keeps one flow for both plain and AI capture: ~C-c s c~ -> look -> either
-~C-c C-c~ (as-is) or ~C-c C-a~ then edit then ~C-c C-c~.
+Either way: edit and commit with ~C-c C-c~ (writes back the leading text
+and/or the ~**~ cards, whichever are present).  Asynchronous.  Press
+~C-c C-a~ again to re-run; ~C-u C-c C-a~ adds a one-off instruction (e.g.
+split finer / merge, or a hint for the refine).
 
-*** ~org-sm-gptel-extract-split~ (=C-c s A=)
+Typical card-workbench flow: ~C-c s A~ on a card during review -> ~C-c C-a~
+for the combined AI pass (or ~C-c C-i~ for refine-only) -> edit / re-run as
+needed -> ~C-c C-c~ to commit.
 
-Split the card you are *reading* into child cards.  Run it with point on an
-SRS card (e.g. during review): it sends the card's body to the AI (per
-~org-sm-gptel-system-split~), which proposes several atomic child topics --
-*preferring reusable concept / claim cards* (high memory-reuse value), but
-following the content's own structure when narrative/procedural/list content
-fits better.  Each becomes a scheduled child topic and a back-reference is
-appended to the parent body; the parent card is kept.  With prefix arg,
-prompt for a one-off extra instruction.
-
-Both AI capture and extract-split share one core
-(~org-sm-gptel-split-text~ / ~org-sm-gptel--split-request~), which the web
-~/api/split~ endpoint also calls -- one source of truth for “text -> cards”.
+The plain-capture branch shares its core (~org-sm-gptel-split-text~ /
+~org-sm-gptel--split-request~) with the web ~/api/split~ endpoint — one
+source of truth for “text -> cards”.  The card-workbench branch has its own
+schema/core (~org-sm-gptel--card-schema~ / ~org-sm-gptel--card-request~),
+since it returns ~{body, cards}~ instead of just ~{cards}~.
 
 Relevant options:
 
 | Variable                      | Meaning                                          |
 |-------------------------------+--------------------------------------------------|
-| ~org-sm-gptel-system-capture~ | System prompt for AI capture (clean + split)     |
-| ~org-sm-gptel-system-split~   | System prompt for extract-split (concept-biased) |
+| ~org-sm-gptel-system-capture~ | System prompt for plain AI capture (clean + split) |
+| ~org-sm-gptel-system-topic~ / ~-cloze~ | Per-type refine half of the card-workbench prompt |
+| ~org-sm-gptel-system-split~   | Child-splitting addendum for the card-workbench prompt (concept-biased, optional) |
 
 
 * Web front-end (org-sm-web)
@@ -264,19 +336,23 @@ tomorrow, and returns its new ~id~.  Cloze bodies must contain at least one
 ~/api/split~ is a pure transform: it returns the AI's proposed
 ~{cards:[{title,body}]}~ *without writing anything*.  The UI shows them for
 editing, then creates each via ~/api/capture~ — so there is still one write
-path.  It shares its core with the Emacs AI capture / extract-split.
+path.  It shares its core (~org-sm-gptel-split-text~) with the Emacs
+plain-capture branch of ~org-sm-gptel-capture-ai~.
 
-~/api/refine~ and ~/api/extract-split~ mirror the Emacs ~org-sm-gptel-refine~ /
-~org-sm-gptel-extract-split~ commands, sharing the same AI cores
-(~org-sm-gptel-rewrite-text~ / ~org-sm-gptel-split-text~):
+~/api/refine~ and ~/api/extract-split~ share their AI cores
+(~org-sm-gptel-rewrite-text~ / ~org-sm-gptel-split-text~ — the same
+cards-only/body-only cores as plain capture and ~org-sm-gptel-refine-card~,
+not the combined ~{body,cards}~ core the card workbench uses) with the
+Emacs commands, but stay one-shot (no separate mobile-web workbench UI):
 - ~/api/refine~ is a *pure transform* like ~/api/split~ — it returns the
   rewritten body *without writing anything*; the existing Edit textarea +
-  ~Save~ (~/api/body/:id~) remains the one write path.  This matches Emacs
-  ~org-sm-gptel-refine~, which also only edits the buffer (no auto-save).
+  ~Save~ (~/api/body/:id~) remains the one write path — the browser's
+  textarea plays the role of the Emacs card workbench's leading text.
 - ~/api/extract-split~ *does* write — it creates the child cards and
-  appends back-references to the parent, then saves, matching Emacs
-  ~org-sm-gptel-extract-split~ (which also auto-saves, since it's a
-  structural change spanning multiple new headings).
+  appends back-references to the parent, then saves, mirroring what
+  ~C-c C-c~ does at the end of the Emacs card workbench (minus the
+  intermediate look-and-edit step, and the combined refine, which the
+  mobile UI doesn't have yet).
 
 Note: ~:id~ must be the trailing path component — simple-httpd only supports
 trailing template parameters, hence ~/api/body/:id~ rather than ~/api/card/:id/body~.
@@ -303,12 +379,15 @@ Button labels mirror the Emacs wording:
 - *AI Refine* (needs ~org-sm-gptel~): while reviewing, ~Edit~ then ~AI
   Refine~ sends the current body to ~/api/refine/:id~ and refills the
   textarea with the result; edit further if you like, then ~Save~.  No
-  diff — mirrors the Emacs ~org-sm-gptel-refine~ (undo-to-revert) flow.
+  diff — mirrors the Emacs ~org-sm-card-workbench~ / ~org-sm-gptel-refine-card~
+  flow (edit-then-explicit-commit), minus the separate buffer and the
+  combined split judgment.
 - *AI Split card* (needs ~org-sm-gptel~): while reviewing, ~AI Split card~
   posts to ~/api/extract-split/:id~, which splits the card into several
   child topics (preferring reusable concept/claim cards) and appends
   back-references; the current card is reloaded to show the links.
-  Mirrors the Emacs ~org-sm-gptel-extract-split~.
+  Mirrors the *split* half of the Emacs ~org-sm-card-workbench~ (minus the
+  intermediate edit step before commit, and the combined refine).
 
 ** Security
 

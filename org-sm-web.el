@@ -296,8 +296,9 @@ functions; this dispatcher performs no computation of its own."
 ;; AI refine (optional; needs `org-sm-gptel').  Pure transform, like
 ;; /api/split: returns the rewritten body WITHOUT writing anything, so the
 ;; single write path stays the existing Edit textarea + Save
-;; (/api/body/:id).  Mirrors the Emacs `org-sm-gptel-refine', which also
-;; only edits the buffer and does not save until the buffer itself is saved.
+;; (/api/body/:id).  Mirrors the Emacs `org-sm-card-workbench' /
+;; `org-sm-gptel-refine-card' flow, which also only edits a buffer and does
+;; not save until an explicit commit.
 (org-sm-web--json-servlet api/refine/:id ()
   (unless (fboundp 'org-sm-gptel-rewrite-text)
     (user-error "AI refine unavailable: load org-sm-gptel"))

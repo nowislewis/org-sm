@@ -13,14 +13,25 @@
 ;; Commands:
 ;;   org-sm-gptel-explain       - AI explains a heading TO you (why-before-what,
 ;;                                3 layers).  Persistent side-window chat.
-;;   org-sm-gptel-refine        - Refine heading body in-place via a plain
-;;                                async AI request (cloze: min-information;
-;;                                topic: clean prose); no diff, use `undo'.
 ;;   org-sm-gptel-capture-ai    - In an `org-sm-capture-mode' buffer (C-c C-a):
-;;                                AI-split the content into topic cards in place.
-;;   org-sm-gptel-extract-split - Split the card at point into child topic cards
-;;                                (concept/claim-biased); appends back-references.
+;;                                - plain `org-sm-capture': AI-split the
+;;                                  content into independent topic cards.
+;;                                - `org-sm-card-workbench': ONE AI call both
+;;                                  refines the leading body text and proposes
+;;                                  child cards (empty if none warranted);
+;;                                  re-rendered as body + `**' headings.
+;;                                Runs in place; C-c C-c commits whatever
+;;                                is present (body and/or `**' cards).
+;;                                Call again to re-run.
+;;   org-sm-gptel-refine-card   - Inside an `org-sm-capture-mode' buffer
+;;                                (C-c C-i): refine just the text at point
+;;                                in-place -- a `**' card, or (in a
+;;                                card-workbench) the leading body text --
+;;                                without touching the rest.  Synchronous
+;;                                feel, no workbench of its own: nothing here
+;;                                is committed yet anyway.
 ;;   org-sm-gptel-split-text    - Synchronous text -> cards core (used by web).
+;;   org-sm-gptel-rewrite-text  - Synchronous text -> refined text core (web).
 
 ;;; Code:
 
@@ -31,7 +42,6 @@
 (declare-function gptel-context-add-file "gptel-context")
 (declare-function org-sm--capture "org-sm")
 (declare-function org-sm-capture-fill-cards "org-sm")
-(declare-function org-sm--extract-cards "org-sm")
 (declare-function org-sm--set-body "org-sm")
 (declare-function gptel--apply-preset "gptel")
 (declare-function gptel-get-preset "gptel")
@@ -139,21 +149,36 @@ nil = plain `gptel' (no tools); any registered preset symbol also works."
 
 (defcustom org-sm-gptel-system-split
   (concat
-   "你是渐进阅读专家，把一张已有的 Topic 卡拆成多张更原子、更易复用的子卡。\n"
-   "目标：每张子卡都能被未来反复引用、能挂接新知识、能单独主动回忆——即记忆复用价值高。\n\n"
-   "【拆分倒向（soft）】\n"
-   "1. 优先按「一个概念 / 一条论断」原子化切：这类卡复用价值最高，优先产出。\n"
-   "2. 但不强行概念化：当内容本质是流程/叙事/并列事实时，就按其自然结构切，不硬套。\n"
-   "3. 原子但不碎：一张只讲一件事，但要讲完整；同一推理链留在同一张。原卡不可分时只输出一张。\n\n"
-   "【标题 = API】优先用可被其他卡引用的句柄：\n"
-   "  首选完整论断（如「结构化表达能降低认知负荷」）；其次问句；仅核心术语用名词。不含 [T] 前缀。\n"
-   "【正文】剥离废话、消除代词歧义、保持可读不压缩成摘要、严禁删因果链、显式化隐含逻辑（不引入新事实）。\n"
-   "保留因果是为了日后能挖空成 cloze。\n\n"
-   "只输出结构化结果。")
-  "System prompt for `org-sm-gptel-extract-split' (split an existing card).
-Biases toward concept/claim atoms (high memory-reuse value) but stays
-flexible: narrative/procedural/list content is split by its own structure."
+   "\n\n【子卡拆分（可选）】完成上面的正文优化后，再判断原文是否包含值得独立拆出的\n"
+   "原子概念/论断——复用价值高、能被其他卡引用、能单独主动回忆的内容。\n\n"
+   "拆分倒向（soft）：\n"
+   "1. 优先按「一个概念 / 一条论断」原子化拆：这类卡复用价值最高，优先产出。\n"
+   "2. 不强行概念化：内容本质是流程/叙事/并列事实时，按其自然结构拆，不硬套。\n"
+   "3. 原子但不碎：一张只讲一件事，但要讲完整；同一推理链留在同一张子卡。\n"
+   "4. 没有值得拆的内容就返回空数组 cards: []，不要为了拆而拆——大多数卡不需要子卡。\n\n"
+   "子卡【标题 = API】优先用可被其他卡引用的句柄：首选完整论断，其次问句，\n"
+   "仅核心术语用名词，不含 [T] 前缀。\n"
+   "子卡【正文】遵循与正文相同的清理规则（剥离废话、消除代词歧义、不压缩成摘要、\n"
+   "不删因果链、显式化隐含逻辑、不引入新事实）；拆出的内容不必从正文里删除，\n"
+   "正文与子卡各自独立存在，允许重叠。")
+  "Child-splitting instructions appended after the per-type refine prompt
+\(`org-sm-gptel-system-topic' / `org-sm-gptel-system-cloze') to build the
+combined `org-sm-card-workbench' system prompt -- see
+`org-sm-gptel--card-system'.  Biases toward concept/claim atoms (high
+memory-reuse value) but stays flexible, and explicitly allows an empty
+result when nothing is worth splitting off."
   :type 'string :group 'org-sm-gptel)
+
+(defun org-sm-gptel--card-system (type)
+  "Return the combined refine+split system prompt for TYPE (`topic'/`cloze'/nil).
+Concatenates the per-type refine prompt (`org-sm-gptel-system-cloze' /
+`org-sm-gptel-system-topic') with the child-splitting addendum
+\(`org-sm-gptel-system-split') and a final JSON-contract line, so a single
+AI call both refines the body and proposes any child cards.  Used by
+`org-sm-gptel--card-ai' for `org-sm-card-workbench' buffers."
+  (concat (if (eq type 'cloze) org-sm-gptel-system-cloze org-sm-gptel-system-topic)
+          org-sm-gptel-system-split
+          "\n\n只输出结构化结果：{body: 优化后的正文, cards: 子卡数组（可为空）}。"))
 
 ;;;; ---- Internal helpers ----------------------------------------------------
 
@@ -246,39 +271,67 @@ Applies `org-sm-gptel-agent-preset' so the AI can read book skills and
 重点放在②③，①一句带过。不要替我制卡，不要生成总结。"))
 
 ;;;###autoload
-(defun org-sm-gptel-refine ()
-  "Refine the current heading body in-place using the AI, then replace it.
+(defun org-sm-gptel-refine-card (&optional arg)
+  "Refine the text at point in-place using the AI, then replace it.
 
-Works on any org heading, including an `org-sm-capture-mode' buffer.  Card
-type determines the system prompt:
+Works inside any `org-sm-capture-mode' buffer (plain capture or
+`org-sm-card-workbench'), two ways:
+- point in a `**' heading -> refines that one card's body.
+- point before any `**' heading (a card-workbench's leading text, i.e.
+  the source card's own body) -> refines that whole block, using the
+  source card's original type (`org-sm-capture-card-type', set by
+  `org-sm-card-workbench'; nil in plain capture, defaults to the topic
+  prompt).
+
+Nothing is committed here yet either way, so an undo-only in-place edit is
+fine.  Card type determines the system prompt:
   cloze -> minimum-information principle, one {{}} per card.
   topic -> clean prose for incremental reading, preserve paragraphs.
+With prefix ARG, prompt for a one-off extra instruction appended to the
+text before sending.
 
-Sends the body and waits for the AI asynchronously (Emacs is not blocked),
-then replaces the body with the result in place.  There is no diff/accept
-step -- use `undo' to revert -- mirroring the web front-end's plain
-refill-and-edit flow (see `org-sm-gptel-rewrite-text')."
-  (interactive)
-  (when (org-before-first-heading-p) (user-error "Not inside any org heading"))
-  (org-back-to-heading t)
-  (let* ((bounds (org-sm--body-bounds))
-         (type   (org-sm-type))
+Sends the text and waits for the AI asynchronously (Emacs is not
+blocked), then replaces it with the result in place.  There is no
+diff/accept step -- use `undo' to revert.  For a combined refine +
+child-split in one AI call, use `org-sm-gptel-capture-ai' (\\`C-c C-a')
+inside an `org-sm-card-workbench' instead."
+  (interactive "P")
+  (let* ((in-preamble (org-before-first-heading-p))
+         (bounds (if in-preamble
+                     (cons (point-min)
+                           (save-excursion
+                             (goto-char (point-min))
+                             (if (re-search-forward "^\\*\\* " nil t)
+                                 (match-beginning 0)
+                               (point-max))))
+                   (progn (org-back-to-heading t) (org-sm--body-bounds))))
+         (type   (if in-preamble org-sm-capture-card-type (org-sm-type)))
          (body   (string-trim (buffer-substring-no-properties
                                (car bounds) (cdr bounds))))
-         (marker (point-marker)))
-    (when (string-empty-p body) (user-error "Card body is empty"))
+         (extra  (and arg (read-string "额外指令：")))
+         (start  (copy-marker (car bounds)))
+         (end    (copy-marker (cdr bounds)))
+         (buf    (current-buffer)))
+    (when (string-empty-p body) (user-error "Nothing to refine"))
     (message "org-sm: asking AI to refine...")
     (org-sm-gptel--rewrite-request
-     body type
+     (if (org-string-nw-p extra)
+         (concat body "\n\n【额外要求】" (string-trim extra))
+       body)
+     type
      (lambda (text err)
        (cond
         (err (message "org-sm refine failed: %s" err))
-        ((not (marker-buffer marker)) (message "org-sm refine: buffer gone"))
+        ((not (buffer-live-p buf)) (message "org-sm refine: buffer gone"))
         (t
-         (with-current-buffer (marker-buffer marker)
-           (save-excursion (goto-char marker) (org-sm--set-body text)))
+         (with-current-buffer buf
+           (save-excursion
+             (goto-char start)
+             (delete-region start end)
+             (insert text)
+             (unless (bolp) (insert "\n"))))
          (message "org-sm: refined -- undo to revert")))
-       (set-marker marker nil)))))
+       (set-marker start nil) (set-marker end nil)))))
 
 ;;;; ---- AI capture (split into topic cards) ---------------------------------
 ;;
@@ -361,8 +414,8 @@ result.  Shares its logic with `org-sm-gptel-capture-ai' via
 TYPE (`cloze' or `topic') selects the system prompt (`org-sm-gptel-system-cloze'
 / `org-sm-gptel-system-topic').  CALLBACK receives two args: the rewritten
 string (or nil) and an error string (or nil).  The single owner of the
-rewrite request flow; both `org-sm-gptel-refine' (async, in-buffer) and
-`org-sm-gptel-rewrite-text' (sync, for the web) go through it."
+rewrite request flow; `org-sm-gptel-refine-card' (async, in-buffer) and
+`org-sm-gptel-rewrite-text' (sync, for the web) both go through it."
   (gptel-request text
     :system (if (eq type 'cloze) org-sm-gptel-system-cloze org-sm-gptel-system-topic)
     :callback
@@ -375,7 +428,7 @@ rewrite request flow; both `org-sm-gptel-refine' (async, in-buffer) and
   "Synchronously refine TEXT with the AI and return the rewritten string.
 TYPE (`cloze' or `topic', default topic) selects the system prompt.  Blocks
 up to TIMEOUT seconds (default 60); signals an error on failure, timeout,
-or an empty result.  Shares its logic with `org-sm-gptel-refine' via
+or an empty result.  Shares its logic with `org-sm-gptel-refine-card' via
 `org-sm-gptel--rewrite-request'.  Used by the web front-end."
   (let ((done nil) (result nil) (err nil)
         (deadline (+ (float-time) (or timeout 60))))
@@ -389,16 +442,70 @@ or an empty result.  Shares its logic with `org-sm-gptel-refine' via
           ((not (org-string-nw-p result)) (error "AI refine: empty result"))
           (t (string-trim result)))))
 
-;;;###autoload
-(defun org-sm-gptel-capture-ai (&optional arg)
-  "Hand the capture buffer's content to the AI to split into topic cards.
+;;;; ---- AI card action (refine + optional split, one call) ------------------
 
-Sends the whole buffer to the AI (see `org-sm-gptel-system-capture'), then
-replaces the content with the resulting ** headings for you to edit and
-commit with \\`C-c C-c'.  Runs asynchronously.  Call again to re-split; with
-prefix ARG, prompt for a one-off extra instruction (e.g. split finer /
-merge into one).  Intended for use inside an `org-sm-capture-mode' buffer."
-  (interactive "P")
+(defconst org-sm-gptel--card-schema
+  '(:type "object"
+    :properties
+    (:body  (:type "string")
+     :cards (:type "array"
+             :items
+             (:type "object"
+              :properties
+              (:title (:type "string")
+               :body  (:type "string"))
+              :required ["title" "body"])))
+    :required ["body" "cards"])
+  "JSON schema: model returns {body, cards:[{title,body}]} for the combined
+refine+split action used by `org-sm-card-workbench'.")
+
+(defun org-sm-gptel--parse-card-response (response)
+  "Parse RESPONSE JSON into (BODY . CARDS); nil on failure or missing BODY.
+CARDS uses the same (TITLE . BODY) format as `org-sm-gptel--parse-cards'."
+  (when (stringp response)
+    (let* ((data  (ignore-errors
+                    (json-parse-string response :object-type 'plist
+                                       :array-type 'list)))
+           (body  (plist-get data :body))
+           (cards (plist-get data :cards)))
+      (when (and (stringp body) (org-string-nw-p body))
+        (cons (string-trim body)
+              (delq nil
+                    (mapcar (lambda (c)
+                              (let ((title (plist-get c :title))
+                                    (b     (plist-get c :body)))
+                                (when (and (stringp b) (org-string-nw-p b))
+                                  (cons (and (stringp title) (string-trim title))
+                                        (string-trim b)))))
+                            cards)))))))
+
+(defun org-sm-gptel--card-request (text type extra callback)
+  "Ask the AI to refine TEXT and optionally split it into child cards.
+TYPE (`topic'/`cloze'/nil) selects the refine half of the system prompt
+\(see `org-sm-gptel--card-system'); EXTRA, when non-empty, is appended as a
+one-off instruction.  CALLBACK receives three args: the refined body
+string (or nil), the cards list (or nil, possibly empty), and an error
+string (or nil).  The single owner of the schema and request flow for
+`org-sm-card-workbench''s combined action."
+  (let ((prompt (if (org-string-nw-p extra)
+                    (concat text "\n\n【额外要求】" (string-trim extra))
+                  text)))
+    (gptel-request prompt
+      :system (org-sm-gptel--card-system type)
+      :schema org-sm-gptel--card-schema
+      :callback
+      (lambda (response info)
+        (if (stringp response)
+            (let ((parsed (org-sm-gptel--parse-card-response response)))
+              (if parsed
+                  (funcall callback (car parsed) (cdr parsed) nil)
+                (funcall callback nil nil "parse failed")))
+          (funcall callback nil nil (format "%s" (plist-get info :status))))))))
+
+(defun org-sm-gptel--plain-capture-ai (arg)
+  "AI action for plain `org-sm-capture' buffers: split into independent cards.
+ARG, when non-nil, prompts for a one-off extra instruction.  See
+`org-sm-gptel-capture-ai'."
   (let ((raw   (string-trim (buffer-substring-no-properties
                              (point-min) (point-max))))
         (extra (and arg (read-string "额外指令（如：拆得更细 / 合并成一张）：")))
@@ -416,52 +523,59 @@ merge into one).  Intended for use inside an `org-sm-capture-mode' buffer."
          (message "org-sm: AI split into %d card%s — edit, then C-c C-c"
                   (length cards) (if (= (length cards) 1) "" "s"))))))))
 
-;;;###autoload
-(defun org-sm-gptel-extract-split (&optional arg)
-  "Split the current SRS card into child cards using the AI.
-
-Sends the current heading's body to the AI (see `org-sm-gptel-system-split'),
-which proposes several atomic child topics — preferring reusable concept /
-claim cards, but following the content's own structure when that fits
-better.  Each becomes a scheduled child topic and a back-reference is
-appended to this card's body; the card itself is kept.  Runs asynchronously.
-With prefix ARG, prompt for a one-off extra instruction.
-
-Run it with point on the card you are reading (e.g. during review)."
-  (interactive "P")
-  (when (org-before-first-heading-p) (user-error "Not on an org heading"))
-  (org-back-to-heading t)
-  (let* ((bounds (org-sm--body-bounds))
-         (raw    (string-trim (buffer-substring-no-properties
-                               (car bounds) (cdr bounds))))
-         (extra  (and arg (read-string "额外指令（如：拆得更细 / 按概念切）：")))
-         (marker (point-marker)))
-    (when (string-empty-p raw) (user-error "Card body is empty"))
-    (message "org-sm: asking AI to split this card...")
-    (org-sm-gptel--split-request
-     raw extra
-     (lambda (cards err)
+(defun org-sm-gptel--card-ai (arg)
+  "AI action for `org-sm-card-workbench' buffers: refine + optional split.
+ARG, when non-nil, prompts for a one-off extra instruction.  See
+`org-sm-gptel-capture-ai'."
+  (let ((raw   (string-trim (buffer-substring-no-properties
+                             (point-min) (point-max))))
+        (extra (and arg (read-string "额外指令：")))
+        (type  org-sm-capture-card-type)
+        (buf   (current-buffer)))
+    (when (string-empty-p raw) (user-error "Buffer is empty"))
+    (message "org-sm: asking AI to refine + look for child cards...")
+    (org-sm-gptel--card-request
+     raw type extra
+     (lambda (body cards err)
        (cond
-        (err (message "org-sm split failed: %s" err))
-        ((null cards) (message "org-sm split: no cards parsed"))
-        ((not (marker-buffer marker)) (message "org-sm split: buffer gone"))
+        (err (message "org-sm AI failed: %s" err))
+        ((not (buffer-live-p buf)) (message "org-sm AI: buffer gone"))
         (t
-         (with-current-buffer (marker-buffer marker)
-           (save-excursion
-             (goto-char marker)
-             (org-sm--extract-cards cards)
-             (when (buffer-file-name)
-               (let ((save-silently t)) (save-buffer))))
-           (set-marker marker nil))
-         (message "org-sm: split into %d child card%s"
-                  (length cards) (if (= (length cards) 1) "" "s")))))
-     org-sm-gptel-system-split)))
+         (with-current-buffer buf (org-sm-capture-fill-body-and-cards body cards))
+         (message "org-sm: AI refined%s — edit, then C-c C-c"
+                  (if cards
+                      (format " + split into %d card%s"
+                              (length cards) (if (= (length cards) 1) "" "s"))
+                    ""))))))))
 
-;; Wire the AI actions into the core capture buffer when gptel is present.
+;;;###autoload
+(defun org-sm-gptel-capture-ai (&optional arg)
+  "Ask the AI to act on the current `org-sm-capture-mode' buffer, in place.
+
+Dispatches on the buffer-local `org-sm-capture-ai-system':
+- plain `org-sm-capture' buffers (nil/`capture') -- split the content into
+  independent topic cards (`org-sm-gptel-system-capture').
+- `org-sm-card-workbench' buffers (`card') -- ONE AI call both refines the
+  leading body text (per the source card's type) and proposes child cards
+  \(empty array if none warranted; see `org-sm-gptel-system-split'),
+  re-rendered as leading text + `**' headings.
+
+Either way replaces the buffer content for you to edit and commit with
+\\`C-c C-c' (writes back the leading text and/or the `**' cards, whichever
+are present).  Runs asynchronously.  Call again to re-run; with prefix
+ARG, prompt for a one-off extra instruction (e.g. split finer / merge into
+one,
+or a hint for the refine)."
+  (interactive "P")
+  (if (eq org-sm-capture-ai-system 'card)
+      (org-sm-gptel--card-ai arg)
+    (org-sm-gptel--plain-capture-ai arg)))
+
+;; Wire the AI actions into the core capture workbenches when gptel is present.
 (with-eval-after-load 'org-sm
   (when (boundp 'org-sm-capture-mode-map)
     (define-key org-sm-capture-mode-map (kbd "C-c C-a") #'org-sm-gptel-capture-ai)
-    (define-key org-sm-capture-mode-map (kbd "C-c C-i") #'org-sm-gptel-refine)))
+    (define-key org-sm-capture-mode-map (kbd "C-c C-i") #'org-sm-gptel-refine-card)))
 
 (provide 'org-sm-gptel)
 ;;; org-sm-gptel.el ends here
