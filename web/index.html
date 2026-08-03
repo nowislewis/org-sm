@@ -141,7 +141,6 @@
     <textarea id="cap-body" placeholder="Paste or type content…"></textarea>
     <div class="cap-hint" id="cap-hint"></div>
     <div class="btn-row">
-      <button class="r-ai" id="cap-ai">AI Split</button>
       <button class="r-good" id="cap-save">Save card</button>
     </div>
   </div>
@@ -254,9 +253,9 @@ function renderFooter() {
       mkBtn2('Reschedule', (card.intervals || {}).reschedule, 'r-good', () => review({action:'reschedule'})),
       mkBtn('Postpone', 'r-hard',  postpone),
       mkBtn('Dismiss', 'wide',    () => review({action:'dismiss'}))));
-    // AI split (topic only): breaks this card into several child topics.
-    const splitBtn = mkBtn('AI Split card', 'r-ai', () => aiSplitCard(splitBtn));
-    f.append(row(splitBtn));
+    // AI (topic only): refine this card's body + split off child topics.
+    const aiBtn = mkBtn('AI Refine + Split', 'r-ai', () => aiCardAction(aiBtn));
+    f.append(row(aiBtn));
   }
 }
 
@@ -345,18 +344,25 @@ async function aiRefineBody(btn) {
   }
 }
 
-// AI split (review, topic cards): splits the current card into several
-// child topics (server saves immediately, mirroring org-sm-gptel-extract-split).
-async function aiSplitCard(btn) {
+// AI card action (review, topic cards): ONE call refines this card's body and
+// splits off any child topics, then the server saves -- the web counterpart of
+// the Emacs `org-sm-card-workbench' C-c C-a + C-c C-c round.  There is no
+// intermediate edit step here, so confirm first; for body-only work with a
+// preview, use Edit -> AI Refine -> Save instead.
+async function aiCardAction(btn) {
+  if (!confirm('AI will rewrite this card body and split off child cards. Continue?'))
+    return;
   const label = btn.textContent;
-  btn.disabled = true; btn.textContent = 'Splitting…';
+  btn.disabled = true; btn.textContent = 'Working…';
   try {
-    const res = await post('/api/extract-split/' + encodeURIComponent(card.id), {});
+    const res = await post('/api/card-ai/' + encodeURIComponent(card.id), {});
     if (res && res.error) throw new Error(res.error);
-    toast('Split into ' + res.children + ' card' + (res.children === 1 ? '' : 's'));
-    await reloadCard();   // refresh body: now has back-reference links
+    toast('Refined' + (res.children
+      ? ' + split into ' + res.children + ' card' + (res.children === 1 ? '' : 's')
+      : ''));
+    await reloadCard();   // refresh body: refined, with back-reference links
   } catch (e) {
-    toast('AI split failed: ' + (e.message || e));
+    toast('AI failed: ' + (e.message || e));
   } finally {
     btn.disabled = false; btn.textContent = label;
   }
@@ -424,8 +430,6 @@ function syncCapTypes() {
     b.classList.toggle('active', b.dataset.type === capType));
   $('cap-hint').textContent =
     capType === 'cloze' ? 'Wrap the answer in {{ }} — e.g. is {{Paris}}.' : '';
-  // AI split only makes sense for topic material.
-  $('cap-ai').style.display = capType === 'topic' ? '' : 'none';
 }
 function closeCapture() { $('capture').classList.remove('show'); }
 function openCapture() {
@@ -439,53 +443,12 @@ function openCapture() {
   setTimeout(() => $('cap-body').focus(), 50);
 }
 
-// AI split: send the body to the server, refill the textarea with the
-// proposed cards as "# TITLE\nBODY" blocks for the user to edit before saving.
-async function aiSplit() {
-  const text = $('cap-body').value.trim();
-  if (!text) return toast('Body is empty');
-  const btn = $('cap-ai'), label = btn.textContent;
-  btn.disabled = true; btn.textContent = 'Splitting…';
-  try {
-    const res = await post('/api/split', { text });
-    if (res && res.error) throw new Error(res.error);
-    const cards = res.cards || [];
-    if (!cards.length) return toast('No cards produced');
-    $('cap-body').value = cards.map(c =>
-      '# ' + (c.title || '').trim() + '\n' + (c.body || '').trim()).join('\n\n');
-    $('cap-title').value = '';
-    $('cap-hint').textContent =
-      cards.length + ' card(s) — edit, then Save (each "# " line is one card).';
-  } catch (e) { toast('AI split failed: ' + (e.message || e)); }
-  finally { btn.disabled = false; btn.textContent = label; }
-}
-
-// Split the textarea into cards on "# " heading lines; [] means single card.
-function parseCapCards(text) {
-  if (!/^# /m.test(text)) return null;
-  return text.split(/^# /m).map(s => s.trim()).filter(Boolean).map(block => {
-    const nl = block.indexOf('\n');
-    return nl < 0
-      ? { title: block.trim(), body: '' }
-      : { title: block.slice(0, nl).trim(), body: block.slice(nl + 1).trim() };
-  }).filter(c => c.body);
-}
-
+// Capture writes exactly what you typed -- one card, no AI.  Refining and
+// splitting happen later, while reviewing the card (AI Refine / AI Refine +
+// Split), mirroring the Emacs side.
 async function saveCapture() {
   const raw = $('cap-body').value.trim(), title = $('cap-title').value.trim();
   if (!raw) return toast('Body is empty');
-  const multi = capType === 'topic' && parseCapCards(raw);
-  if (multi && multi.length) {
-    try {
-      for (const c of multi) {
-        const res = await post('/api/capture', { type: 'topic', body: c.body, title: c.title });
-        if (res && res.error) throw new Error(res.error);
-      }
-      closeCapture(); toast(multi.length + ' cards created');
-      await loadQueue();
-    } catch (e) { toast('Save failed: ' + (e.message || e)); }
-    return;
-  }
   if (capType === 'cloze' && !/\{\{[^}\n]+\}\}/.test(raw))
     return toast('Cloze needs {{answer}} markers');
   try {
@@ -498,7 +461,6 @@ async function saveCapture() {
 
 $('add').onclick = openCapture;
 $('cap-close').onclick = closeCapture;
-$('cap-ai').onclick = aiSplit;
 $('cap-save').onclick = saveCapture;
 $('capture').onclick = e => { if (e.target === $('capture')) closeCapture(); };
 document.querySelector('.cap-types').onclick = e => {

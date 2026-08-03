@@ -3,9 +3,18 @@
 
 Minimal incremental reading for org-mode, inspired by SuperMemo.
 
+*Design rule: capture is dumb, review is smart.*  Capture only stores the raw
+material — instant, no AI, no judgment.  Every AI action operates on an
+*existing* card, once the material has proven worth the effort.
+
+#+begin_example
+  grab text ──► capture (verbatim) ──► review ──► refine / split (AI, optional)
+                 M-z, C-c C-c                     C-c s A, C-c C-a / C-c C-i
+#+end_example
+
 * Card Types
 
-*topic* — repeated reading passage.  No grading; interval grows by A-Factor each review.
+*topic* — repeated reading passage.  No grading; interval grows by A-Factor.
 
 | Priority      | A-Factor | Behavior                       |
 |---------------+----------+--------------------------------|
@@ -13,8 +22,9 @@ Minimal incremental reading for org-mode, inspired by SuperMemo.
 | =[#B]=        |      1.5 | moderate                       |
 | =[#C]= / none |      1.8 | fast growth, fades out quickly |
 
-*cloze* — fill-in-the-blank with ~{{answer}}~ markers, scheduled by [[https://github.com/bohonghuang/fsrs.el][FSRS]].
-Answers are hidden as ~[___]~ during review; rated again / hard / good / easy.
+*cloze* — fill-in-the-blank with ~{{answer}}~ markers, scheduled by
+[[https://github.com/bohonghuang/fsrs.el][FSRS]].  Answers are hidden as
+~[___]~ during review; rated again / hard / good / easy.
 
 * Installation
 
@@ -24,16 +34,9 @@ Requires Emacs 29.1+, org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
 (use-package org-sm
   :hook (org-mode . org-sm-mode)
   :config
-  (setq org-sm-directory "~/notes/")
-  ;; Cards go to an "sm-cards" heading in sm-cards.org under
-  ;; org-sm-directory by default (created on demand).  Override with
-  ;; org-sm-capture-file / org-sm-capture-olp if you want a different inbox.
-  (global-org-sm-read-mode 1))  ; M-z captures region/clipboard from any buffer
-#+end_src
+  (setq org-sm-directory "~/notes/")   ; inbox: sm-cards.org, created on demand
+  (global-org-sm-read-mode 1))         ; M-z captures from any buffer
 
-Suggested keybindings:
-
-#+begin_src elisp
 (with-eval-after-load 'org-sm
   (define-key org-mode-map (kbd "C-c s m")   #'org-sm-item-mark)
   (define-key org-mode-map (kbd "C-c s x")   #'org-sm-item-extract)
@@ -61,113 +64,66 @@ Suggested keybindings:
 | ~org-sm-set-readpoint~  | Drop a read-point anchor; review jumps here     |
 | ~org-sm-goto-source~    | Grep the vault for this card's source           |
 | ~org-sm-capture~        | Capture region/clipboard into an editable buffer |
-| ~org-sm-card-workbench~ | Refine and/or split the card at point, in a workbench |
-| ~org-sm-capture-commit~ | Commit a capture buffer's body and/or ~**~ cards (see below) |
+| ~org-sm-card-workbench~ | Refine and/or split the card at point           |
+| ~org-sm-capture-commit~ | Commit a capture/workbench buffer (~C-c C-c~)   |
 
 * Review Flow
 
-*Topic:* ~review-start~ → read → ~review-confirm~ (reschedules, next item).
+- *topic:* ~review-start~ → read → ~review-confirm~ (reschedules, next item).
+- *cloze:* ~review-start~ (hidden) → ~review-confirm~ (reveals) →
+  ~review-confirm~ (rate).
 
-*Cloze:* ~review-start~ (answers hidden) → ~review-confirm~ (reveals) → ~review-confirm~ (rate).
+Every prompt also offers *skip* (no change; stays due) and *dismiss*.
+Intervals are computed from the scheduled date, so early/late reviews don't
+distort spacing.
 
-Every review prompt also offers *skip* and *dismiss*.  *skip* advances to the
-next card with no change — the card stays due and reappears next session.
+* Capture and card workbench
 
-Intervals are calculated from the scheduled date, so early/late reviews don't distort spacing.
+Both use one buffer type (~org-sm-capture-mode~) with one visual convention
+and one commit command:
 
-* Capture
+| In the buffer | Means                                                       |
+|---------------+-------------------------------------------------------------|
+| leading text  | one card's body (text before any ~**~ heading)              |
+| each ~**~     | one more card                                               |
+| ~C-c C-c~     | ~org-sm-capture-commit~: write back whichever are present    |
+| ~C-c C-k~     | discard, touching nothing                                    |
 
-~org-sm-capture~ grabs a region or clipboard content into a lightweight
-editable side buffer (~org-sm-capture-mode~) so you can see and adjust it
-before writing.  With a region active or in ~reader-mode~, it triggers ~M-w~
-first (works in any buffer: pdf, nov, etc.), otherwise reads the clipboard.
+** ~org-sm-capture~ (=M-z= / =C-c s c=)
 
-Inside the capture buffer:
+Grabs the region (via ~M-w~, so pdf/nov/~reader-mode~ work too) or else the
+clipboard into a side buffer, so you can see and edit it before writing.
+Committing creates brand-new top-level topic cards, due tomorrow, in a single
+inbox: an ~sm-cards~ heading in ~sm-cards.org~ under ~org-sm-directory~ (both
+created on demand; change with ~org-sm-capture-file~ / ~org-sm-capture-olp~).
+Refile into per-topic files yourself afterwards.
 
-| Key       | Action                                                     |
-|-----------+------------------------------------------------------------|
-| ~C-c C-c~ | ~org-sm-capture-commit~: write back whatever's present     |
-| ~C-c C-k~ | Discard                                                    |
-| ~C-c C-a~ | (with ~org-sm-gptel~) AI-split the content into cards      |
-| ~C-c C-i~ | (with ~org-sm-gptel~) ~org-sm-gptel-refine-card~: refine the card at point, in place |
+*No AI here.*  Capture stores exactly what you grabbed: at capture time you
+don't yet know what the material is worth, the action must stay instant, and a
+card you never revisit doesn't deserve tokens.
 
-~org-sm-capture-commit~ is the *same command* used everywhere -- plain
-capture and the card workbench alike (see below).  It processes both
-halves of the buffer independently, whichever are present:
+** ~org-sm-card-workbench~ (=C-c s A=)
 
-- The leading text (before any ~**~ heading, or the whole buffer if
-  there's none) becomes *one card's body*. In plain ~org-sm-capture~ (no
-  source card yet) this creates a brand-new top-level topic card via the
-  pure ~org-sm--capture~. In ~org-sm-card-workbench~ (a source card already
-  exists) this replaces that card's body in place via ~org-sm--set-body~
-  -- its SRS type/schedule/id are left untouched.
-- Every ~**~ heading becomes *its own card*. In plain ~org-sm-capture~
-  each becomes an independent top-level topic card (same as this command
-  has always done). In ~org-sm-card-workbench~ each becomes a new
-  scheduled *child* of the source card via ~org-sm--extract-cards~, with a
-  back-reference appended -- pre-existing children are never touched, only
-  appended after.
+Run it on the card you are reading.  The card's body is copied in as leading
+text; nothing changes in the source until you commit.  Then ~C-c C-c~:
 
-One press does both at once if both are present, or just the applicable
-half if only one is; it signals "nothing to commit" only if the buffer is
-empty, and closes the window once done.  Add cards by typing a ~**~
-heading; delete by editing.  Every ~C-c C-i~ edit here is undo-only and
-un-committed until you explicitly press ~C-c C-c~, so feel free to refine
-drafts freely.
+- the leading text replaces the card's body in place (type / schedule / id
+  untouched);
+- each ~**~ heading becomes a new scheduled *child* topic with a
+  back-reference appended — existing children are left alone.
 
-~org-sm-capture~ writes to a single inbox with no prompt: an ~sm-cards~
-heading in ~sm-cards.org~ under ~org-sm-directory~ (both created on demand).
-Just ~M-z~ -> edit -> ~C-c C-c~.  Sort cards into per-topic files yourself
-afterwards (plain org refile).  Change the inbox with ~org-sm-capture-file~ /
-~org-sm-capture-olp~.  ~global-org-sm-read-mode~ binds ~M-z~ globally to
-~org-sm-capture~.
-
-* Card workbench
-
-~org-sm-card-workbench~ (=C-c s A=) refines *and/or* splits the card at
-point, through *one editable workbench* using the same visual convention as
-capture -- nothing changes in the source card until you commit.  It shares
-its commit command, ~C-c C-c~ (~org-sm-capture-commit~), with plain
-capture (see above):
-
-- The text *above* any ~**~ heading *is* the card's body -- edit it to
-  refine (in place, type/schedule/id untouched).
-- Each ~**~ heading *below* it becomes a child card -- add one to split it
-  off as a new scheduled child with a back-reference, without touching any
-  existing children.
-
-Run it with point on the card you're reading (e.g. during review):
-
-1. The card's body is copied into an ~org-sm-capture-mode~ buffer as plain
-   leading text (no ~**~ headings yet) — no AI call, no writes.
-2. Adjust either or both halves, any number of times:
-   - Edit the leading text directly, or (with ~org-sm-gptel~ loaded) press
-     ~C-c C-i~ to have the AI rewrite just that text in place.
-   - Add ~**~ headings below it by hand, or press ~C-c C-a~ to ask the AI to
-     do *both in one call*: refine the leading text AND propose child cards
-     (empty if none are worth splitting off) — re-rendered as leading text
-     + ~**~ headings.  Press ~C-c C-a~ again to re-run; ~C-u C-c C-a~ adds a
-     one-off instruction.  ~C-c C-i~ also refines any single ~**~ card.
-3. ~C-c C-c~ commits both halves at once, whichever are present: the
-   (possibly edited) leading text becomes the card's new body -- a no-op
-   if unchanged; and every ~**~ heading becomes a scheduled child topic
-   card under the source heading, with back-references appended, leaving
-   existing children alone.  Then saves.  ~C-c C-k~ discards the workbench
-   without touching the source at all.
-
-So this single workbench doubles as a pure refine (no ~**~ headings), a
-pure split (leave/clear the leading text), or both at once -- and, with
-~org-sm-gptel~, a single AI call can do the refine + split judgment call
-for you instead of two separate AI actions.
+So one workbench covers a pure refine (no ~**~ headings), a pure split, or
+both at once — by hand, or with the AI actions below.
 
 * Extract
 
-Select text, then call ~org-sm-item-extract~:
+Select text, then ~org-sm-item-extract~:
 
-- *topic* — selected text becomes the child body.
-- *cloze* — full parent body copied to child; selection wrapped as ~{{answer}}~.
+- *topic* — the selection becomes the child body.
+- *cloze* — the full parent body is copied to the child, selection wrapped as
+  ~{{answer}}~.
 
-The selection in the parent is replaced with an ~[[id:...][title]]~ link.
+The selection in the parent gains an ~[[id:...][title]]~ back-reference.
 
 * Properties
 
@@ -182,9 +138,9 @@ The selection in the parent is replaced with an ~[[id:...][title]]~ link.
 
 ~SCHEDULED~ is the due date for both types.
 
-* AI Assistant (org-sm-gptel)
+* AI assistant (org-sm-gptel)
 
-Optional extension powered by [[https://github.com/karthink/gptel][gptel]].
+Optional, powered by [[https://github.com/karthink/gptel][gptel]]:
 
 #+begin_src elisp
 (with-eval-after-load 'gptel
@@ -192,214 +148,97 @@ Optional extension powered by [[https://github.com/karthink/gptel][gptel]].
   (define-key org-mode-map (kbd "C-c s ?") #'org-sm-gptel-explain))
 #+end_src
 
-~org-sm-card-workbench~ (see above) is a core command, bound to =C-c s A=
-regardless of ~org-sm-gptel~; loading ~org-sm-gptel~ only makes its
-~C-c C-i~ / ~C-c C-a~ AI actions available inside the resulting workbench
-buffer.  It also adds those same two keys inside every ~org-sm-capture-mode~
-buffer (plain capture and the card workbench alike): ~C-c C-a~
-\(~org-sm-gptel-capture-ai~, whose behavior depends on which buffer it's in
-— see below) and ~C-c C-i~ (~org-sm-gptel-refine-card~, refine the text at
-point — a draft ~**~ card, or a card-workbench's leading body text — in
-place).
+All three commands act on an *existing* card.  The two workbench keys are
+bound in ~org-sm-capture-mode-map~ but refuse to run in a plain capture
+buffer.
 
-** Commands
+| Key       | Command                     | Action                                    |
+|-----------+-----------------------------+-------------------------------------------|
+| ~C-c s ?~ | ~org-sm-gptel-explain~      | Chat that explains this heading *to you*  |
+| ~C-c C-a~ | ~org-sm-gptel-card-ai~      | Workbench: refine body + propose children |
+| ~C-c C-i~ | ~org-sm-gptel-refine-card~  | Workbench: refine just the text at point  |
 
-*** ~org-sm-gptel-explain~ (=C-c s ?=)
+*explain* — persistent side-window chat, why-before-what: motive and causal
+chain first, definition second; ends by asking which word the sentence can't
+live without.  It never makes cards for you.  Buffer reused on re-invoke.
 
-Opens a persistent side-window chat where the AI explains the current heading
-*to you* — use when you're stuck during review.  Follows a *why-before-what*
-order: it first explains the design motive / causal chain (why the thing exists
-and why it's built this way), and only then states what it is.  Closes with a
-single question asking which word the sentence can't live without, leaving the
-card-making to you.  The chat buffer ~*org-sm-explain: <heading>*~ is reused on
-re-invoke.
+*card-ai* — ONE call does both jobs: refine the leading text (per the card's
+type) and judge whether anything is worth splitting off (empty result is
+normal, so this also covers pure refine).  Re-renders the buffer as leading
+text + ~**~ headings for you to edit, then ~C-c C-c~.  Async; press again to
+re-run, ~C-u C-c C-a~ to add a one-off instruction.
 
-*** ~org-sm-gptel-refine-card~ (=C-c C-i= inside any capture-mode buffer)
+*refine-card* — refines only the text at point (the leading body text, or one
+~**~ card), leaving the rest alone.  Async, no diff: ~undo~ to revert, and
+nothing is committed until ~C-c C-c~ anyway.
 
-Refines just the text at point, in place, without invoking the combined
-action below.  Two flavors depending on where point is:
-
-- in a ~**~ heading → refines that one card's body.
-- before any ~**~ heading (a card workbench's leading text, i.e. the source
-  card's own body) → refines that whole block, using the source card's
-  original type (captured when ~org-sm-card-workbench~ opened the buffer).
-
-Asynchronous, no diff.  Don't like it?  ~undo~, or press ~C-c C-i~ again to
-re-refine (e.g. after manual edits or a different angle).  Nothing is
-committed until you press ~C-c C-c~.  The system prompt is chosen
-automatically by card type:
-
-- *cloze* → enforces the minimum-information principle (one ~{{}}~ per
-  card, answer ≤ 5 words, split multi-fact content), preferring a
-  why-type cloze (mechanism/cause/result) over a what-type one when the
-  source has a causal relation.
-- *topic / unset* → cleans prose for incremental reading: strips filler,
-  resolves pronoun ambiguity, preserves paragraph structure (not a summary),
-  and never deletes causal links (flags ~【需补充】~ when a conclusion lacks its why).
-
-Shares its request core, ~org-sm-gptel--rewrite-request~, with the web
-front-end's ~org-sm-gptel-rewrite-text~ (synchronous, pure-transform
-variant).
-
-*** ~org-sm-gptel-capture-ai~ (=C-c C-a= inside any capture-mode buffer)
-
-Bound in every ~org-sm-capture-mode~ buffer, but does one of two different
-things depending on which buffer it's in (via the buffer-local
-~org-sm-capture-ai-system~, set when the buffer is opened):
-
-- *plain ~org-sm-capture~* → sends the whole buffer to the AI, which
-  *cleans and splits* it into one or more independent cards
-  (~org-sm-gptel-system-capture~), then replaces the buffer with the
-  resulting ~**~ headings.
-- *~org-sm-card-workbench~* → ONE AI call does both jobs at once: refines
-  the leading body text (per the source card's type, same rules as
-  ~org-sm-gptel-refine-card~ above) *and* judges whether any part is worth
-  splitting off into a child card (~org-sm-gptel-system-split~, appended
-  after the refine prompt — see ~org-sm-gptel--card-system~); returns an
-  empty ~cards~ array when nothing warrants it, so this one action also
-  covers the pure-refine case.  Re-renders the buffer as leading text +
-  any ~**~ headings.
-
-Either way: edit and commit with ~C-c C-c~ (writes back the leading text
-and/or the ~**~ cards, whichever are present).  Asynchronous.  Press
-~C-c C-a~ again to re-run; ~C-u C-c C-a~ adds a one-off instruction (e.g.
-split finer / merge, or a hint for the refine).
-
-Typical card-workbench flow: ~C-c s A~ on a card during review -> ~C-c C-a~
-for the combined AI pass (or ~C-c C-i~ for refine-only) -> edit / re-run as
-needed -> ~C-c C-c~ to commit.
-
-The plain-capture branch shares its core (~org-sm-gptel-split-text~ /
-~org-sm-gptel--split-request~) with the web ~/api/split~ endpoint — one
-source of truth for “text -> cards”.  The card-workbench branch has its own
-schema/core (~org-sm-gptel--card-schema~ / ~org-sm-gptel--card-request~),
-since it returns ~{body, cards}~ instead of just ~{cards}~.
-
-Relevant options:
-
-| Variable                      | Meaning                                          |
-|-------------------------------+--------------------------------------------------|
-| ~org-sm-gptel-system-capture~ | System prompt for plain AI capture (clean + split) |
-| ~org-sm-gptel-system-topic~ / ~-cloze~ | Per-type refine half of the card-workbench prompt |
-| ~org-sm-gptel-system-split~   | Child-splitting addendum for the card-workbench prompt (concept-biased, optional) |
-
+Prompts are chosen by card type: *cloze* enforces the minimum-information
+principle (one ~{{}}~, answer ≤ 5 words, why-type over what-type); *topic*
+cleans prose for incremental reading (strip filler, resolve pronouns, keep
+paragraphs and causal links, flag ~【需补充】~ when a conclusion lacks its
+why).  Customize via ~org-sm-gptel-system-topic~ / ~-cloze~ (refine),
+~-split~ (the child-splitting addendum) and ~-explain~.
 
 * Web front-end (org-sm-web)
 
-Optional HTTP/JSON front-end for reviewing cards from a phone browser.  A thin
-layer: all scheduling is delegated to org-sm's pure functions
-(~org-sm--{topic,cloze}-grade~, ~org-sm--dismiss~, ~org-sm--extract~), so it and
-the Emacs commands share one source of truth.  Requires
-[[https://github.com/skeeto/emacs-web-server][simple-httpd]].
-
-** Usage
+Optional HTTP/JSON UI for reviewing from a phone browser; needs
+[[https://github.com/skeeto/emacs-web-server][simple-httpd]].  A thin layer:
+all scheduling and writing goes through the same org-sm functions the Emacs
+commands use.
 
 #+begin_src elisp
-(require 'org-sm-web)          ; or rely on the autoloaded command
-(org-sm-web-start)            ; M-x org-sm-web-start   (autoloaded)
-;; open the printed URL on any device on the same LAN
+(org-sm-web-start)   ; autoloaded; prints the localhost + LAN URLs
 #+end_src
 
-~org-sm-web-start~ prints the localhost and LAN URLs.  Add the page to the iOS
-home screen for a full-screen PWA.
-
-** Configuration
-
-| Variable            | Default     | Meaning                                        |
-|---------------------+-------------+------------------------------------------------|
-| ~org-sm-web-port~   | ~8842~      | Listen port (must be ≥ 1024 unless root).      |
-| ~org-sm-web-bind~   | ~"0.0.0.0"~ | Bind address.  ~"0.0.0.0"~ = LAN; ~"127.0.0.1"~ = local only. |
-| ~org-sm-web-root~   | ~web/~      | Static UI directory (served ~index.html~).     |
-
-The queue is read from ~(org-sm-files)~, the same live scan of ~org-sm-directory~
-the Emacs commands use.
+| Variable          | Default     | Meaning                                     |
+|-------------------+-------------+---------------------------------------------|
+| ~org-sm-web-port~ | ~8842~      | Listen port                                 |
+| ~org-sm-web-bind~ | ~"0.0.0.0"~ | ~"0.0.0.0"~ = LAN, ~"127.0.0.1"~ = local    |
+| ~org-sm-web-root~ | ~web/~      | Static UI directory (~index.html~)          |
 
 ** Endpoints
 
-| Method + path        | Params                              | Action                          |
-|----------------------+-------------------------------------+---------------------------------|
-| ~GET  /api/queue~     | —                                   | Due cards ~[{id,type,priority,title}]~ |
-| ~GET  /api/card/:id~  | —                                   | One card ~{id,type,title,body,clozes}~ |
-| ~POST /api/review/:id~ | ~rating=~ / ~action=~ [~&days=~]     | Grade / reschedule / postpone / dismiss |
-| ~POST /api/body/:id~   | ~body=~                             | Replace the card body (refine)  |
-| ~POST /api/capture~    | ~type= body= [title=]~              | Create a new card via ~org-sm--capture~ |
-| ~POST /api/split~      | ~text= [extra=]~                    | AI-split text into cards (no write; needs ~org-sm-gptel~) |
-| ~POST /api/refine/:id~  | —                                  | AI-rewrite the card body in place (needs ~org-sm-gptel~) |
-| ~POST /api/extract-split/:id~ | —                            | AI-split the card into children (needs ~org-sm-gptel~) |
-| ~POST /api/extract/:id~ | ~type= selected= start= end=~      | Create a child card via ~org-sm--extract~ |
+| Method + path           | Params                          | Action                     |
+|-------------------------+---------------------------------+----------------------------|
+| ~GET  /api/queue~       | —                               | Due cards                  |
+| ~GET  /api/card/:id~    | —                               | One card + cloze tokens    |
+| ~POST /api/review/:id~  | ~rating=~ / ~action=~ [~days=~] | Grade / postpone / dismiss |
+| ~POST /api/body/:id~    | ~body=~                         | Replace the card body      |
+| ~POST /api/capture~     | ~type= body= [title=]~          | Create a new card          |
+| ~POST /api/extract/:id~ | ~type= selected= start= end=~   | Create a child card        |
+| ~POST /api/refine/:id~  | —                               | AI: rewritten body, *no write* |
+| ~POST /api/card-ai/:id~ | —                               | AI: refine body + write child cards |
 
-~/api/capture~ writes into ~org-sm-capture-file~ / ~org-sm-capture-olp~ (the same
-target the Emacs ~org-sm-capture~ command uses), schedules the card for
-tomorrow, and returns its new ~id~.  Cloze bodies must contain at least one
-~{{answer}}~ marker.
-
-~/api/split~ is a pure transform: it returns the AI's proposed
-~{cards:[{title,body}]}~ *without writing anything*.  The UI shows them for
-editing, then creates each via ~/api/capture~ — so there is still one write
-path.  It shares its core (~org-sm-gptel-split-text~) with the Emacs
-plain-capture branch of ~org-sm-gptel-capture-ai~.
-
-~/api/refine~ and ~/api/extract-split~ share their AI cores
-(~org-sm-gptel-rewrite-text~ / ~org-sm-gptel-split-text~ — the same
-cards-only/body-only cores as plain capture and ~org-sm-gptel-refine-card~,
-not the combined ~{body,cards}~ core the card workbench uses) with the
-Emacs commands, but stay one-shot (no separate mobile-web workbench UI):
-- ~/api/refine~ is a *pure transform* like ~/api/split~ — it returns the
-  rewritten body *without writing anything*; the existing Edit textarea +
-  ~Save~ (~/api/body/:id~) remains the one write path — the browser's
-  textarea plays the role of the Emacs card workbench's leading text.
-- ~/api/extract-split~ *does* write — it creates the child cards and
-  appends back-references to the parent, then saves, mirroring what
-  ~C-c C-c~ does at the end of the Emacs card workbench (minus the
-  intermediate look-and-edit step, and the combined refine, which the
-  mobile UI doesn't have yet).
-
-Note: ~:id~ must be the trailing path component — simple-httpd only supports
-trailing template parameters, hence ~/api/body/:id~ rather than ~/api/card/:id/body~.
+The AI endpoints need ~org-sm-gptel~; there is deliberately none on the
+capture path.  ~/api/refine~ is a pure transform (the Edit textarea + ~Save~
+stays the one write path), while ~/api/card-ai~ is the whole Emacs workbench
+round collapsed into one request — hence the browser confirms first.
+~:id~ must be the trailing path component (simple-httpd limitation).
 
 ** UI
 
-Button labels mirror the Emacs wording:
-
-- *cloze*: ~Show~ to reveal, then ~Again~ / ~Hard~ / ~Good~ / ~Easy~.
-- *topic*: ~Reschedule~ / ~Postpone~ (prompts for days, default 7) / ~Dismiss~.
-- *edit*: ~Edit~ turns the body into a textarea; ~Save~ writes it back.
-- *extract* (incremental reading): select text → a floating menu offers
-  ~Extract Topic~ / ~Extract Cloze~; the selection becomes a scheduled child
-  card with a back-reference link.  Cloze extraction is topic-cards-only, since
-  cloze cards render ~{{}}~ as hidden tokens (no raw-body offsets available).
-- *capture* (new card): the ~＋~ button in the header opens a sheet with a
-  Topic/Cloze toggle, an optional title, and a body box (pre-filled from the
-  clipboard when the browser grants permission).  ~Save card~ posts to
-  ~/api/capture~ and the due count refreshes.
-- *AI Split* (topic only, needs ~org-sm-gptel~): in the capture sheet, ~AI
-  Split~ sends the body to ~/api/split~ and refills the box with the proposed
-  cards as ~# TITLE~ blocks.  Edit them, then ~Save card~ writes each one —
-  mirroring the Emacs ~C-c C-a~ flow.
-- *AI Refine* (needs ~org-sm-gptel~): while reviewing, ~Edit~ then ~AI
-  Refine~ sends the current body to ~/api/refine/:id~ and refills the
-  textarea with the result; edit further if you like, then ~Save~.  No
-  diff — mirrors the Emacs ~org-sm-card-workbench~ / ~org-sm-gptel-refine-card~
-  flow (edit-then-explicit-commit), minus the separate buffer and the
-  combined split judgment.
-- *AI Split card* (needs ~org-sm-gptel~): while reviewing, ~AI Split card~
-  posts to ~/api/extract-split/:id~, which splits the card into several
-  child topics (preferring reusable concept/claim cards) and appends
-  back-references; the current card is reloaded to show the links.
-  Mirrors the *split* half of the Emacs ~org-sm-card-workbench~ (minus the
-  intermediate edit step before commit, and the combined refine).
+- *cloze*: ~Show~, then ~Again~ / ~Hard~ / ~Good~ / ~Easy~.
+- *topic*: ~Reschedule~ / ~Postpone~ (default 7 days) / ~Dismiss~.
+- *edit*: ~Edit~ → textarea → ~Save~.  With ~org-sm-gptel~, ~AI Refine~
+  refills the textarea first, so you preview before saving.
+- *AI Refine + Split* (topic): refines the body and splits off child cards in
+  one shot, then reloads the card.  Use ~Edit~ → ~AI Refine~ instead when you
+  want a preview.
+- *extract*: select text → floating ~Extract Topic~ / ~Extract Cloze~ menu.
+  Cloze extraction is topic-cards-only (cloze bodies render as hidden tokens,
+  so there are no raw-body offsets).
+- *capture*: the ~＋~ button opens a sheet (type toggle, optional title, body
+  prefilled from the clipboard when permitted).  One card, exactly as typed.
 
 ** Security
 
-No authentication.  Binding ~"0.0.0.0"~ exposes it to the whole LAN — keep that
-to trusted networks.  For remote access use a private overlay (e.g. Tailscale),
-or set ~org-sm-web-bind~ to ~"127.0.0.1"~ and tunnel.  Never expose it to the
-public internet.
+No authentication.  ~"0.0.0.0"~ exposes it to the whole LAN — keep it to
+trusted networks, or bind ~"127.0.0.1"~ and tunnel (e.g. Tailscale).  Never
+expose it to the public internet.
 
-** Maintenance
+* Maintenance
 
-After changing any ~;;;###autoload~ signature/docstring, regenerate the
-autoloads:
+After changing any ~;;;###autoload~ signature/docstring:
 
 #+begin_src sh
 emacs --batch --eval '(progn (require (quote loaddefs-gen)) \

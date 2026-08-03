@@ -7,32 +7,20 @@
 ;;; Commentary:
 ;;
 ;; A thin HTTP/JSON front-end over org-sm, so cards can be reviewed from a
-;; phone browser.  All scheduling computation is delegated to org-sm's pure
-;; grading functions -- this file adds no SRS logic of its own.  It only:
+;; phone browser.  It adds no SRS logic of its own: it locates cards by
+;; org-id, serializes them to JSON, and maps requests onto org-sm's pure
+;; functions (`org-sm--{topic,cloze}-grade', `org-sm--dismiss',
+;; `org-sm--capture', `org-sm--extract').  org-sm.el is never modified here.
 ;;
-;;   1. locates cards by org-id  (org-with-point-at + org-id-find)
-;;   2. serializes card state to JSON
-;;   3. maps HTTP requests onto org-sm--{topic,cloze}-grade / org-sm--dismiss
-;;
-;; org-sm.el is never modified by this file.
-;;
-;; Endpoints:
-;;   GET  /api/queue          -> [{id,type,priority,title}, ...]  (due cards)
-;;   GET  /api/card/:id       -> {id,type,title,body,clozes}      (one card)
-;;   POST /api/body/:id       -> {ok}     (body=<new body text>)
-;;   POST /api/capture        -> {ok,id}   (type,body[,title])   (new card)
-;;   POST /api/split          -> {ok,cards} (text[,extra])   (AI split, no write)
-;;   POST /api/refine/:id     -> {ok,body}   (AI-rewrite the card body in place)
-;;   POST /api/extract-split/:id -> {ok,children} (AI-split card into children)
-;;   POST /api/extract/:id    -> {ok,child} (type,selected,start,end)
-;;   POST /api/review/:id      -> {ok,...}   (rating=<again|hard|good|easy>
-;;                                            or action=<reschedule|postpone|dismiss>)
+;; The servlets below (search for `api/') are the endpoint reference; README.org
+;; documents them for users.  AI endpoints need org-sm-gptel.el and act only on
+;; existing cards -- capture stores raw text, matching the Emacs side.
 ;;
 ;; Usage:
 ;;   (require 'org-sm-web)
 ;;   (org-sm-web-start)        ; serves API + static UI on `org-sm-web-port'
 ;;   ;; then open http://<host>:8842/ on your phone
-;;
+
 ;;; Code:
 
 (require 'org)
@@ -41,7 +29,7 @@
 (require 'simple-httpd)
 (require 'org-sm)
 
-(declare-function org-sm-gptel-split-text "org-sm-gptel")
+(declare-function org-sm-gptel-card-text "org-sm-gptel")
 (declare-function org-sm-gptel-rewrite-text "org-sm-gptel")
 
 (defgroup org-sm-web nil
@@ -241,12 +229,10 @@ functions; this dispatcher performs no computation of its own."
 
 ;;;; ---- Editing & extraction (write) ---------------------------------------
 
-(defalias 'org-sm-web--set-body 'org-sm--set-body)
-
 (org-sm-web--json-servlet api/body/:id (body)
   (unless body (user-error "Missing 'body' parameter"))
   (org-sm-web--with-card id
-    (org-sm-web--set-body body)
+    (org-sm--set-body body)
     (org-sm-web--save))
   (list :ok t :id id))
 
@@ -265,21 +251,6 @@ functions; this dispatcher performs no computation of its own."
     (prog1 (list :ok t :id (org-sm--capture (intern type) body nil nil title))
       (org-sm-web--save))))
 
-;; AI split (optional; needs `org-sm-gptel').  Pure transform: takes raw text,
-;; returns the AI's proposed cards WITHOUT writing anything.  The front-end
-;; shows them for review, then creates each via the existing /api/capture, so
-;; there is still one write path.  Synchronous via `org-sm-gptel-split-text'.
-(org-sm-web--json-servlet api/split (text extra)
-  (unless (fboundp 'org-sm-gptel-split-text)
-    (user-error "AI split unavailable: load org-sm-gptel"))
-  (unless (org-string-nw-p text)
-    (user-error "Missing 'text'"))
-  (list :ok t
-        :cards (apply #'vector
-                      (mapcar (lambda (c)
-                                (list :title (or (car c) "") :body (cdr c)))
-                              (org-sm-gptel-split-text text extra)))))
-
 ;; start/end are character offsets of the selection within the card body.
 (org-sm-web--json-servlet api/extract/:id (type selected start end)
   (unless (member type '("topic" "cloze"))
@@ -293,10 +264,9 @@ functions; this dispatcher performs no computation of its own."
                                   (string-to-number (or end (number-to-string (length selected))))))
       (org-sm-web--save))))
 
-;; AI refine (optional; needs `org-sm-gptel').  Pure transform, like
-;; /api/split: returns the rewritten body WITHOUT writing anything, so the
-;; single write path stays the existing Edit textarea + Save
-;; (/api/body/:id).  Mirrors the Emacs `org-sm-card-workbench' /
+;; AI refine (optional; needs `org-sm-gptel').  Pure transform: returns the
+;; rewritten body WITHOUT writing anything, so the single write path stays the
+;; existing Edit textarea + Save (/api/body/:id).  Mirrors the Emacs `org-sm-card-workbench' /
 ;; `org-sm-gptel-refine-card' flow, which also only edits a buffer and does
 ;; not save until an explicit commit.
 (org-sm-web--json-servlet api/refine/:id ()
@@ -310,19 +280,27 @@ functions; this dispatcher performs no computation of its own."
          (type (car info)) (body (cdr info)))
     (list :ok t :body (org-sm-gptel-rewrite-text body type))))
 
-;; AI split (optional; needs `org-sm-gptel').  Split the card at :id into
-;; child topic cards via `org-sm-gptel-split-text' + `org-sm--extract-cards',
-;; appending back-references to this card; the card itself is kept.
-(org-sm-web--json-servlet api/extract-split/:id ()
-  (unless (fboundp 'org-sm-gptel-split-text)
-    (user-error "AI split unavailable: load org-sm-gptel"))
+;; AI card action (optional; needs `org-sm-gptel').  The web counterpart of
+;; the Emacs `org-sm-card-workbench' + `C-c C-a' + `C-c C-c' round: ONE AI
+;; call refines the card body and proposes child cards, and both halves are
+;; applied here (`org-sm--set-body' + `org-sm--extract-cards', which appends
+;; back-references and keeps the parent).  The mobile UI has no intermediate
+;; edit step, so it confirms before calling; `/api/refine/:id' stays the
+;; preview-then-Save path for body-only work.
+(org-sm-web--json-servlet api/card-ai/:id ()
+  (unless (fboundp 'org-sm-gptel-card-text)
+    (user-error "AI unavailable: load org-sm-gptel"))
   (org-sm-web--with-card id
     (let* ((bounds (org-sm--body-bounds))
-           (body   (string-trim (buffer-substring-no-properties
+           (text   (string-trim (buffer-substring-no-properties
                                  (car bounds) (cdr bounds))))
-           (cards  (org-sm-gptel-split-text body)))
+           (result (org-sm-gptel-card-text text (org-sm-type))))
       (org-back-to-heading t)
-      (prog1 (list :ok t :children (length (org-sm--extract-cards cards)))
+      (org-sm--set-body (car result))
+      (org-back-to-heading t)
+      (prog1 (list :ok t :children (if (cdr result)
+                                       (length (org-sm--extract-cards (cdr result)))
+                                     0))
         (org-sm-web--save)))))
 
 ;;;###autoload

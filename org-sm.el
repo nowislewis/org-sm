@@ -7,9 +7,13 @@
 ;;; Commentary:
 ;;
 ;; Minimal incremental reading for org-mode.  Two card types:
-;;   topic  - repeated reading, A-Factor scheduling, no grading.
-;;            org priority [#A]/[#B]/[#C] controls interval growth rate.
+;;   topic  - repeated reading, A-Factor scheduling (org priority [#A]/[#B]/[#C]
+;;            sets the growth rate), no grading.
 ;;   cloze  - memory testing with {{cloze}} markers, FSRS scheduling.
+;;
+;; Design rule: capture only stores raw material; refining and splitting happen
+;; later, on an existing card (`org-sm-card-workbench', plus the optional AI
+;; actions in org-sm-gptel.el).
 ;;
 ;; Commands:
 ;;   org-sm-item-mark      - mark heading as topic or cloze
@@ -19,26 +23,20 @@
 ;;   org-sm-review-start   - start review session
 ;;   org-sm-review-confirm - confirm topic read / advance cloze state
 ;;   org-sm-review-abort   - abort review session
-;;   org-sm-tree           - foldable aggregated tree of all cards; filter + review in place
-;;   org-sm-set-readpoint  - drop an inline read-point anchor at point; review jumps here
-;;   org-sm-goto-source    - grep the vault for this card's source (extraction point)
-;;   org-sm-capture         - capture region/clipboard into an editable buffer,
-;;                            commit as one or more topic cards.
+;;   org-sm-tree           - foldable aggregated tree; filter + review in place
+;;   org-sm-set-readpoint  - drop an inline read-point anchor; review jumps here
+;;   org-sm-goto-source    - grep the vault for this card's source
+;;   org-sm-capture        - capture region/clipboard, commit as topic card(s)
+;;   org-sm-card-workbench - refine and/or split the card at point
 ;;
-;; Two minor modes are provided:
+;; Minor modes:
 ;;   org-sm-mode             - buffer-local; {{cloze}} font-lock (use via :hook)
 ;;   global-org-sm-read-mode - global; binds M-z to `org-sm-capture'
 ;;
-;; Point `org-sm-directory' at the tree containing your SRS items:
-;;
-;;   (use-package org-sm
-;;     :commands (org-sm-review-start org-sm-item-mark org-sm-item-extract org-sm-tree)
-;;     :hook (org-mode . org-sm-mode)
-;;     :config
-;;     (setq org-sm-directory "~/org/incremental/")
-;;     (setq org-sm-capture-file "~/org/inbox.org")
-;;     (setq org-sm-capture-olp '("org-sm topics"))
-;;     (global-org-sm-read-mode 1))
+;; Point `org-sm-directory' at the tree holding your cards, optionally
+;; `org-sm-capture-file' / `org-sm-capture-olp' at a different inbox.  See
+;; README.org for setup and suggested keys.
+
 ;;; Code:
 
 (require 'cl-lib)
@@ -49,7 +47,7 @@
 (require 'fsrs)
 
 (declare-function org-sm-gptel-explain "org-sm-gptel")
-(declare-function org-sm-gptel-capture-ai "org-sm-gptel")
+(declare-function org-sm-gptel-card-ai "org-sm-gptel")
 
 ;;;; ---- Customization -------------------------------------------------------
 
@@ -176,9 +174,9 @@ that `org-schedule' (called internally) would climb to the wrong heading."
     ("A" 1.2) ("B" 1.5) (_ 1.8)))
 
 (defun org-sm--topic-read (a)
-  "Calculate the automatic next interval in days for current topic using A-Factor A.
-Pure function: reads org properties but writes nothing.
-Uses SCHEDULED time as reference to avoid early/late review distortion."
+  "Return the next interval in days for the current topic, given A-Factor A.
+Pure: reads org properties, writes nothing.  Measured from SCHEDULED, not
+now, so early/late reviews don't distort spacing."
   (let* ((last (org-entry-get nil "SRS_LAST"))
          (ref  (or (org-get-scheduled-time nil) (current-time))))
     (max 1 (round (* a (if last
@@ -427,69 +425,54 @@ then read the clipboard.  Otherwise read the clipboard directly."
 
 (defun org-sm--capture-render-cards (cards)
   "Insert CARDS (list of (TITLE . BODY)) as ** headings at point.
-Inverse of `org-sm--capture-cards-in-buffer'; they share the heading format."
-  (let ((n 0))
-    (dolist (card cards)
-      (setq n (1+ n))
-      (insert (format "** %s\n%s\n\n"
-                      (or (org-string-nw-p (car card)) (format "Card %d" n))
-                      (cdr card))))))
+Inverse of `org-sm--capture-split-buffer'; they share the heading format."
+  (cl-loop for (title . body) in cards
+           for n from 1
+           do (insert (format "** %s\n%s\n\n"
+                              (or (org-string-nw-p title) (format "Card %d" n))
+                              body))))
 
-(defun org-sm--capture-cards-in-buffer ()
-  "Collect cards from the current capture buffer as (TITLE . BODY) cons cells.
-If the buffer has ** headings, each becomes one card (TITLE from the heading).
-Otherwise the whole buffer body is one card with an auto-derived title."
+(defconst org-sm--capture-card-rx "^\\*\\* "
+  "Regexp matching a card heading in an `org-sm-capture-mode' buffer.")
+
+(defun org-sm--capture-preamble-bounds ()
+  "Return (START . END) of the buffer's preamble.
+The preamble is the text before the first card heading, or the whole buffer
+if there is none.  The one place that locates that heading."
   (org-with-wide-buffer
    (goto-char (point-min))
-   (if (re-search-forward "^\\*\\* " nil t)
-       (let (cards)
-         (goto-char (point-min))
-         (while (re-search-forward "^\\*\\* " nil t)
-           (let* ((title  (org-get-heading t t t t))
-                  (bounds (org-sm--body-bounds))
-                  (body   (string-trim (buffer-substring-no-properties
-                                        (car bounds) (cdr bounds)))))
-             (when (org-string-nw-p body)
-               (push (cons (and (org-string-nw-p title) (string-trim title)) body)
-                     cards))))
-         (nreverse cards))
-     (let ((body (string-trim (buffer-substring-no-properties
-                               (point-min) (point-max)))))
-       (and (org-string-nw-p body) (list (cons nil body)))))))
+   (cons (point-min)
+         (if (re-search-forward org-sm--capture-card-rx nil t)
+             (match-beginning 0)
+           (point-max)))))
 
 (defun org-sm--capture-split-buffer ()
-  "Split the current buffer into (PREAMBLE . CARDS).
-PREAMBLE is the trimmed text before the first \"** \" heading.  CARDS is a
-list of (TITLE . BODY), one per \"** \" heading, in
-`org-sm--capture-cards-in-buffer' format -- nil if there is no such heading
-\(unlike that function, which then treats the whole buffer as one card;
-here the whole buffer is just the PREAMBLE, with no cards)."
+  "Split the current capture buffer into (PREAMBLE . CARDS).
+PREAMBLE is the trimmed preamble text (see `org-sm--capture-preamble-bounds');
+CARDS is a list of (TITLE . BODY), one per card heading, nil when there are
+none.  Inverse of `org-sm--capture-render-cards'."
   (org-with-wide-buffer
-   (goto-char (point-min))
-   (let ((first (re-search-forward "^\\*\\* " nil t)))
-     (if first
-         (cons (string-trim (buffer-substring-no-properties
-                             (point-min) (match-beginning 0)))
-               (org-sm--capture-cards-in-buffer))
-       (cons (string-trim (buffer-substring-no-properties
-                           (point-min) (point-max)))
-             nil)))))
+   (let ((end (cdr (org-sm--capture-preamble-bounds)))
+         cards)
+     (goto-char end)
+     (while (re-search-forward org-sm--capture-card-rx nil t)
+       (let* ((title  (org-get-heading t t t t))
+              (bounds (org-sm--body-bounds))
+              (body   (string-trim (buffer-substring-no-properties
+                                    (car bounds) (cdr bounds)))))
+         (when (org-string-nw-p body)
+           (push (cons (and (org-string-nw-p title) (string-trim title)) body)
+                 cards))))
+     (cons (string-trim (buffer-substring-no-properties (point-min) end))
+           (nreverse cards)))))
 
 (defvar-local org-sm-capture-parent-marker nil
-  "Marker of the card this buffer edits, or nil -- fixed once at buffer
-creation, never reassigned afterward.  Set buffer-locally by whoever opens
-the capture buffer (see `org-sm--capture-buffer'): non-nil for
-`org-sm-card-workbench' (the existing heading being refined/split); nil for
-plain `org-sm-capture' (no card exists yet).  Read by `org-sm-capture-commit'
-(via `org-sm--capture-commit-body' / `-cards'), which branches on it but
-never mutates it.")
-
-(defvar-local org-sm-capture-ai-system nil
-  "Tag selecting the AI action for `org-sm-gptel-capture-ai'.
-nil/`capture' = plain capture: split into independent top-level cards
-\(`org-sm-gptel-system-capture').  `card' = `org-sm-card-workbench': refine
-the leading body text and optionally propose child cards, in one AI call.
-Read by `org-sm-gptel'; harmless when gptel isn't loaded.")
+  "Marker of the card this buffer edits, or nil when no card exists yet.
+Set once by whoever opens the buffer (`org-sm--capture-buffer'): non-nil in
+`org-sm-card-workbench', nil in plain `org-sm-capture'.  It is the only
+signal distinguishing the two: `org-sm-capture-commit' refines in place when
+it is set and creates new cards when it is not, and the AI actions refuse to
+run without it.  Never reassigned.")
 
 (defvar-local org-sm-capture-card-type nil
   "SRS_TYPE (`topic'/`cloze'/nil) of the source card for `org-sm-card-workbench'.
@@ -497,28 +480,19 @@ Selects the AI refine prompt for the buffer's leading body text (and for
 `org-sm-gptel-refine-card' when point is in that leading text).  nil in
 plain capture buffers, where drafts have no type yet anyway.")
 
-(defun org-sm--capture-preamble-bounds ()
-  "Return (START . END) of the buffer's preamble.
-The preamble is the text before the first \"** \" heading, or the whole
-buffer if there is none."
-  (org-with-wide-buffer
-   (goto-char (point-min))
-   (cons (point-min)
-         (or (and (re-search-forward "^\\*\\* " nil t) (match-beginning 0))
-             (point-max)))))
+(defun org-sm--capture-live-marker ()
+  "Return `org-sm-capture-parent-marker' if its buffer is still alive.
+Read it in the capture buffer before switching buffers: it is buffer-local,
+so reading it later would see the *target* buffer's own nil value."
+  (and org-sm-capture-parent-marker
+       (marker-buffer org-sm-capture-parent-marker)
+       org-sm-capture-parent-marker))
 
-(defun org-sm--capture-maybe-close ()
-  "Close the capture window once nothing meaningful is left in the buffer.
-Called by `org-sm-capture-commit' after erasing whatever it just committed."
-  (when (string-blank-p (buffer-substring-no-properties (point-min) (point-max)))
-    (quit-window t)))
-
-(defun org-sm-capture-fill-cards (cards)
-  "Replace the current capture buffer with CARDS rendered as ** headings."
-  (erase-buffer)
-  (org-sm--capture-render-cards cards)
-  (goto-char (point-min))
-  (org-fold-show-all))
+(defun org-sm--capture-at-marker (marker fn)
+  "Call FN with point on MARKER's heading, then save that buffer."
+  (with-current-buffer (marker-buffer marker)
+    (save-excursion (goto-char marker) (funcall fn))
+    (when (buffer-file-name) (let ((save-silently t)) (save-buffer)))))
 
 (defun org-sm-capture-fill-body-and-cards (body cards)
   "Replace the buffer with BODY as leading text, then CARDS as ** headings.
@@ -531,91 +505,52 @@ the inverse read is `org-sm--capture-split-buffer'."
   (org-fold-show-all))
 
 (defun org-sm--capture-commit-body (buf)
-  "Commit BUF's preamble (leading text before any `**' heading) as a card
-body, if it is non-empty.  Return a status string, or nil if there was
-nothing to commit.  Internal shared core of `org-sm-capture-commit'; BUF is
-left selected as the current buffer either way."
+  "Commit BUF's preamble as a card body, if it is non-empty.
+Refine the parent card in place when BUF has one, else create a new card.
+Return a status string, or nil when there was nothing to commit.  Internal
+half of `org-sm-capture-commit'; leaves BUF current either way (see
+`org-sm--capture', which strands the target buffer)."
   (let (bounds body marker)
     (with-current-buffer buf
-      (setq bounds (org-sm--capture-preamble-bounds))
-      (setq body (string-trim (buffer-substring-no-properties
-                               (car bounds) (cdr bounds))))
-      ;; Capture into a lexical binding *before* any `with-current-buffer'
-      ;; switch below: `org-sm-capture-parent-marker' is buffer-local, so
-      ;; reading it again after switching buffers would see the *target*
-      ;; buffer's own (nil) value, not BUF's.
-      (setq marker (and org-sm-capture-parent-marker
-                        (marker-buffer org-sm-capture-parent-marker)
-                        org-sm-capture-parent-marker)))
+      (setq bounds (org-sm--capture-preamble-bounds)
+            body   (string-trim (buffer-substring-no-properties
+                                 (car bounds) (cdr bounds)))
+            marker (org-sm--capture-live-marker)))
     (when (org-string-nw-p body)
       (if marker
-          (with-current-buffer (marker-buffer marker)
-            (save-excursion
-              (goto-char marker)
-              (org-sm--set-body body))
-            (when (buffer-file-name) (let ((save-silently t)) (save-buffer))))
-        ;; `org-sm--capture' internally does a raw `set-buffer' to the target
-        ;; file that outlives this call -- do not rely on `with-current-buffer'
-        ;; to "return" to BUF afterward (it would restore to whatever buffer
-        ;; was current when *it* was entered, i.e. the target file, not BUF);
-        ;; `set-buffer' below re-selects BUF unconditionally instead.
+          (org-sm--capture-at-marker marker (lambda () (org-sm--set-body body)))
         (org-sm--capture 'topic body))
       (set-buffer buf)
       (delete-region (car bounds) (cdr bounds))
       (if marker "refined body" "captured new card"))))
 
 (defun org-sm--capture-commit-cards (buf)
-  "Commit BUF's `**' headings as cards, if there are any.  Return a status
-string, or nil if there were none.  Internal shared core of
-`org-sm-capture-commit'; BUF is left selected as the current buffer either
-way."
+  "Commit BUF's card headings, if there are any.
+They become children of the parent card when BUF has one, else independent
+top-level cards.  Return a status string, or nil when there were none.
+Internal half of `org-sm-capture-commit'; leaves BUF current either way."
   (let (cards marker)
     (with-current-buffer buf
-      (setq cards (cdr (org-sm--capture-split-buffer)))
-      (setq marker (and org-sm-capture-parent-marker
-                        (marker-buffer org-sm-capture-parent-marker)
-                        org-sm-capture-parent-marker)))
+      (setq cards  (cdr (org-sm--capture-split-buffer))
+            marker (org-sm--capture-live-marker)))
     (when cards
       (if marker
-          (with-current-buffer (marker-buffer marker)
-            (save-excursion
-              (goto-char marker)
-              (org-sm--extract-cards cards))
-            (when (buffer-file-name) (let ((save-silently t)) (save-buffer))))
-        ;; Same caveat as above: `org-sm--capture' leaves "the current
-        ;; buffer" pointed at the target file, and a `with-current-buffer'
-        ;; here would just restore to that (its own entry point), not to
-        ;; BUF -- `set-buffer' re-selects BUF directly.
+          (org-sm--capture-at-marker marker (lambda () (org-sm--extract-cards cards)))
         (dolist (c cards) (org-sm--capture 'topic (cdr c) nil nil (car c))))
       (set-buffer buf)
       (org-with-wide-buffer
-       (goto-char (point-min))
-       (when (re-search-forward "^\\*\\* " nil t)
-         (delete-region (match-beginning 0) (point-max))))
+       (delete-region (cdr (org-sm--capture-preamble-bounds)) (point-max)))
       (format "%s %d card%s"
               (if marker "split into" "captured")
               (length cards) (if (= (length cards) 1) "" "s")))))
 
 (defun org-sm-capture-commit ()
-  "Commit this `org-sm-capture-mode' buffer: write back the leading text as
-a card body if present, and turn each `**' heading into a card if present
--- independently, whichever apply; both at once if both are present.
-
-With `org-sm-capture-parent-marker' set (an `org-sm-card-workbench' buffer,
-i.e. refining/splitting an existing card): the leading text replaces that
-card's body in place via `org-sm--set-body' (SRS type, schedule, and id
-are left exactly as they were); each `**' heading becomes a new scheduled
-child topic card via `org-sm--extract-cards', with a back-reference
-appended to the body -- pre-existing children are never touched, only
-appended after.
-
-With no marker (a plain `org-sm-capture' buffer, no card exists yet): the
-leading text becomes a brand-new top-level topic card via `org-sm--capture';
-each `**' heading becomes its own independent top-level topic card, same
-as this command has always done.
-
-Signals a `user-error' only if there is nothing at all to commit.  Closes
-the window once done."
+  "Commit this `org-sm-capture-mode' buffer and close it when empty.
+Writes back both halves independently, whichever are present: the preamble
+as one card body, and each `**' heading as one card -- refining/extending
+the parent card in a workbench, or creating fresh top-level cards in plain
+capture (see `org-sm-capture-parent-marker', `org-sm-capture-mode').
+Signals a `user-error' only when there is nothing at all to commit."
   (interactive)
   (let* ((buf   (current-buffer))
          (body  (org-sm--capture-commit-body buf))
@@ -623,7 +558,8 @@ the window once done."
     (unless (or body cards) (user-error "Nothing to commit"))
     (set-buffer buf)
     (message "org-sm: %s" (string-join (delq nil (list body cards)) ", "))
-    (org-sm--capture-maybe-close)))
+    ;; everything committed was erased above: nothing left means we are done
+    (when (string-blank-p (buffer-string)) (quit-window t))))
 
 (defun org-sm-capture-abort ()
   "Discard the capture buffer without writing anything."
@@ -637,7 +573,8 @@ the window once done."
     (define-key map (kbd "C-c C-k") #'org-sm-capture-abort)
     map)
   "Keymap for `org-sm-capture-mode'.
-The AI extension (`org-sm-gptel') adds \\`C-c C-a' to split/refine via AI.")
+The AI extension (`org-sm-gptel') adds \\`C-c C-a' / \\`C-c C-i', which only
+work in `org-sm-card-workbench' buffers -- plain capture never calls AI.")
 
 (define-derived-mode org-sm-capture-mode org-mode "org-sm-cap"
   "Lightweight capture buffer.  Edit the content, then commit.
@@ -650,21 +587,20 @@ existing card) -- see `org-sm-capture-parent-marker'.
 \\<org-sm-capture-mode-map>\\[org-sm-capture-commit] writes back the
 leading text as a card body (if any) and turns each `**' heading into a
 card (if any); \\[org-sm-capture-abort] discards without writing anything.
-With `org-sm-gptel' loaded, \\[org-sm-gptel-capture-ai] hands the content
-to the AI to split/refine.")
+
+Capture itself never calls AI: it only stores what you grabbed.  AI enters
+later, while reviewing a card, via `org-sm-card-workbench'.")
 
 (defun org-sm--capture-buffer (content &optional name setup)
   "Pop up an `org-sm-capture-mode' buffer named NAME, pre-filled with CONTENT.
 NAME defaults to a shared \"*org-sm capture*\" buffer.  SETUP, when given,
 is called with point in the new buffer after CONTENT is inserted -- use it
-to set `org-sm-capture-parent-marker' / `org-sm-capture-ai-system' /
-`org-sm-capture-card-type' buffer-locally for callers that aren't the
-plain top-level capture flow."
+to set `org-sm-capture-parent-marker' / `org-sm-capture-card-type'
+buffer-locally for callers that aren't the plain top-level capture flow."
   (let ((buf (get-buffer-create (or name "*org-sm capture*"))))
     (with-current-buffer buf
       (unless (derived-mode-p 'org-sm-capture-mode) (org-sm-capture-mode))
       (kill-local-variable 'org-sm-capture-parent-marker)
-      (kill-local-variable 'org-sm-capture-ai-system)
       (kill-local-variable 'org-sm-capture-card-type)
       (erase-buffer)
       (insert content)
@@ -683,9 +619,11 @@ Grabs the region or clipboard (see `org-sm--grab-content') into an
 `org-sm-capture-mode' side buffer so you can see and edit it before
 writing.  \\`C-c C-c' (`org-sm-capture-commit') writes the leading text as
 one new topic card and each `**' heading as its own independent topic
-card, whichever are present.  \\`C-c C-k' discards.  With `org-sm-gptel'
-loaded, \\`C-c C-a' hands the content to the AI to split it into multiple
-clean cards.
+card, whichever are present.  \\`C-c C-k' discards.
+
+No AI here by design -- capture only stores the raw material.  Refining and
+splitting happen later, when you review the card, via
+`org-sm-card-workbench'.
 
 Cards go to `org-sm-capture-file' / `org-sm-capture-olp' (by default an
 \"sm-cards\" heading in sm-cards.org under `org-sm-directory'), created on
@@ -802,32 +740,20 @@ selection, back-references appended at the end of the parent body."
     (unless (bolp) (insert "\n"))
     (nreverse ids)))
 
-(defun org-sm--card-workbench-marker-check (marker)
-  "Signal a user-error if MARKER's source buffer is gone."
-  (unless (marker-buffer marker) (user-error "Source card is gone")))
-
 ;;;###autoload
 (defun org-sm-card-workbench ()
   "Open an editable workbench to refine and/or split the card at point.
 
-Copies the current heading's body into an `org-sm-capture-mode' buffer as
-plain leading text -- nothing changes in the source until you commit.
-One buffer, one visual convention (like `org-sm-capture'): the text above
-any `**' heading IS the card's body; each `**' heading below it becomes a
-child card.
-Edit by hand, or (with `org-sm-gptel' loaded) press \\`C-c C-a' to ask the
-AI to refine the leading text and propose child cards in one call
-\(re-render as leading text + `**' headings); press again to re-run.
-\\`C-c C-i' refines the leading text, or any one `**' card, in place.
+Run it on the card you are reading.  The body is copied into an
+`org-sm-capture-mode' buffer as leading text; nothing changes in the source
+until \\`C-c C-c' (`org-sm-capture-commit'), which writes the leading text
+back as this card's body (type/schedule/id untouched) and turns each `**'
+heading into a new scheduled child with a back-reference, leaving existing
+children alone.  \\`C-c C-k' discards.
 
-\\`C-c C-c' (`org-sm-capture-commit') commits both halves at once, whichever
-are present: the leading text becomes the card's new body in place -- SRS
-type/schedule/id are untouched -- and each `**' heading becomes a new
-scheduled child topic card with a back-reference appended, without
-touching any pre-existing children.  \\`C-c C-k' discards the workbench
-without touching the source.
-
-Run it with point on the card you are reading (e.g. during review)."
+Edit by hand, or with `org-sm-gptel' loaded let the AI do it: \\`C-c C-a'
+refines the body and proposes child cards in one call, \\`C-c C-i' refines
+just the text at point."
   (interactive)
   (when (org-before-first-heading-p) (user-error "Not on an org heading"))
   (org-back-to-heading t)
@@ -837,7 +763,6 @@ Run it with point on the card you are reading (e.g. during review)."
                                 (car bounds) (cdr bounds))))
          (type    (org-sm-type))
          (marker  (point-marker)))
-    (org-sm--card-workbench-marker-check marker)
     (org-sm--capture-buffer
      body
      (format "*org-sm card: %s*"
@@ -846,7 +771,6 @@ Run it with point on the card you are reading (e.g. during review)."
               40 nil nil t))
      (lambda ()
        (setq-local org-sm-capture-parent-marker marker)
-       (setq-local org-sm-capture-ai-system 'card)
        (setq-local org-sm-capture-card-type type)))))
 
 (defun org-sm--ensure-olp (file olp)
@@ -874,7 +798,11 @@ in OLP and fill it with BODY (via `org-sm--insert-child').  Like
 `org-sm--extract' but with no parent and no back-reference; saves nothing.
 FILE/OLP default to `org-sm--capture-target-file'/`org-sm-capture-olp'; the
 file and headings are created if missing.  TITLE, when blank, is derived
-from BODY."
+from BODY.
+
+Contract: leaves the target file's buffer current (deliberately, so callers
+can save it), and that outlives any `with-current-buffer' around the call --
+callers needing their own buffer back must `set-buffer' it explicitly."
   (let* ((body   (org-sm--body-clean (or body "")))
          (id     (org-id-new))
          (prefix (pcase type
@@ -977,11 +905,9 @@ When PRED is non-nil, only entries for which it returns non-nil are visited."
   (org-back-to-heading t)
   (org-narrow-to-subtree)
   (org-fold-hide-subtree)
-  ;; Topics are structured reading material: show the entry body plus child
-  ;; heading lines (bodies stay folded) so the outline is visible.
-  ;; Clozes are atomic leaf cards: show only the entry body.  We never extract
-  ;; sub-headings under a cloze, so hiding branches avoids both leaks and
-  ;; visual noise on the rare occasion one exists.
+  ;; Topics are reading material: also show child heading lines, so the
+  ;; outline is visible.  Clozes are atomic leaves -- keeping branches hidden
+  ;; avoids leaking an answer should one ever have children.
   (org-fold-show-entry)
   (when (eq (org-sm-type) 'topic)
     (org-fold-show-branches))
