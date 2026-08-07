@@ -9,7 +9,7 @@ material — instant, no AI, no judgment.  Every AI action operates on an
 
 #+begin_example
   grab text ──► capture (verbatim) ──► review ──► refine / split (AI, optional)
-                 M-z, C-c C-c                     C-c s A, C-c C-a / C-c C-i
+                 M-z, C-c C-c                     C-c s A, C-c C-a
 #+end_example
 
 * Card Types
@@ -148,36 +148,42 @@ Optional, powered by [[https://github.com/karthink/gptel][gptel]]:
   (define-key org-mode-map (kbd "C-c s ?") #'org-sm-gptel-explain))
 #+end_src
 
-All three commands act on an *existing* card.  The two workbench keys are
-bound in ~org-sm-capture-mode-map~ but refuse to run in a plain capture
-buffer.
+All commands act on an *existing* card.  The workbench key is bound in
+~org-sm-capture-mode-map~ but refuses to run in a plain capture buffer.
 
 | Key       | Command                     | Action                                    |
 |-----------+-----------------------------+-------------------------------------------|
 | ~C-c s ?~ | ~org-sm-gptel-explain~      | Chat that explains this heading *to you*  |
-| ~C-c C-a~ | ~org-sm-gptel-card-ai~      | Workbench: refine body + propose children |
-| ~C-c C-i~ | ~org-sm-gptel-refine-card~  | Workbench: refine just the text at point  |
+| ~C-c C-a~ | ~org-sm-gptel-card-ai~      | Workbench: pick a mode, AI refines/splits |
 
 *explain* — persistent side-window chat, why-before-what: motive and causal
 chain first, definition second; ends by asking which word the sentence can't
 live without.  It never makes cards for you.  Buffer reused on re-invoke.
 
-*card-ai* — ONE call does both jobs: refine the leading text (per the card's
-type) and judge whether anything is worth splitting off (empty result is
-normal, so this also covers pure refine).  Re-renders the buffer as leading
-text + ~**~ headings for you to edit, then ~C-c C-c~.  Async; press again to
-re-run, ~C-u C-c C-a~ to add a one-off instruction.
+*card-ai* — prompts for a mode, then ONE call does that mode's job:
 
-*refine-card* — refines only the text at point (the leading body text, or one
-~**~ card), leaving the rest alone.  Async, no diff: ~undo~ to revert, and
-nothing is committed until ~C-c C-c~ anyway.
+- *refine* — clean up the leading body text only; cards always stay empty.
+- *refine+subcard* — refine, and also judge whether anything is worth
+  splitting off into child cards (empty is normal — most cards don't need
+  any).  This was the previous, only, behaviour of this key.
+- *简化 (simplify)* — cut the body to its essential core, more aggressively
+  than refine; cards always stay empty.
+- *自定义提示词 (custom)* — type your own instruction on the spot; used
+  verbatim as the whole system prompt instead of any preset rule, still
+  returning the same ~{body, cards}~ shape.
+
+Every mode re-renders the buffer as leading text + ~**~ headings for you to
+edit, then ~C-c C-c~ — which behaves identically regardless of mode: the
+leading text always replaces the card's body, and every ~**~ heading always
+becomes a child card.  Async; press ~C-c C-a~ again (any mode) to re-run.
 
 Prompts are chosen by card type: *cloze* enforces the minimum-information
 principle (one ~{{}}~, answer ≤ 5 words, why-type over what-type); *topic*
 cleans prose for incremental reading (strip filler, resolve pronouns, keep
 paragraphs and causal links, flag ~【需补充】~ when a conclusion lacks its
 why).  Customize via ~org-sm-gptel-system-topic~ / ~-cloze~ (refine),
-~-split~ (the child-splitting addendum) and ~-explain~.
+~-split~ (the child-splitting addendum used by refine+subcard),
+~-simplify~ (the simplify prompt) and ~-explain~.
 
 * Web front-end (org-sm-web)
 
