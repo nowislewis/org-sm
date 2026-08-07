@@ -77,6 +77,45 @@ Every prompt also offers *skip* (no change; stays due) and *dismiss*.
 Intervals are computed from the scheduled date, so early/late reviews don't
 distort spacing.
 
+* Mouse / touch review controls (org-sm-buttons)
+
+~org-sm-buttons.el~ is an optional in-Emacs, touch-friendly alternative to
+using the web UI for review.  It opens a persistent bottom side window:
+
+- when idle it provides a mouse-clickable *Start review* button;
+- on a *topic*, it provides *Reschedule*, *Postpone 7d*, *Skip*, *Dismiss*,
+  and *Abort*;
+- on a hidden *cloze*, it provides *Reveal*, then shows *Again*, *Hard*,
+  *Good*, and *Easy* with their live FSRS intervals after revealing it.
+
+All buttons use the same org-sm grading functions as the keyboard and web
+interfaces; the extension only supplies the presentation.  This keeps the
+interaction low-friction on a touchscreen without creating another scheduler
+or a second write path.
+
+#+begin_src elisp
+(require 'org-sm-buttons)
+(org-sm-buttons-mode 1)
+#+end_src
+
+Buttons activate with mouse-1, mouse-2, or ~RET~ after keyboard focus.
+The bar wraps whole buttons to narrow windows and uses
+~fit-window-to-buffer~ to grow only as many rows as necessary.  GUI and
+terminal Emacs use the same padded character-cell targets and a deliberately
+wide non-clickable gap between buttons, so the interface stays predictable and
+reduces touch mis-taps without font scaling.  *Dismiss* deliberately changes
+to *Confirm dismiss* + *Cancel* on the first click.
+
+Useful touch-layout settings (the defaults shown) are:
+
+#+begin_src elisp
+(setq org-sm-buttons-postpone-days 7
+      org-sm-buttons-button-padding 2
+      org-sm-buttons-button-gap 4
+      org-sm-buttons-min-button-width 14
+      org-sm-buttons-max-window-height 8)
+#+end_src
+
 * Capture and card workbench
 
 Both use one buffer type (~org-sm-capture-mode~) with one visual convention
