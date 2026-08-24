@@ -26,8 +26,9 @@
 ;;   org-sm-tree           - foldable aggregated tree; filter + review in place
 ;;   org-sm-set-readpoint  - drop an inline read-point anchor; review jumps here
 ;;   org-sm-goto-source    - grep the vault for this card's source
-;;   org-sm-capture        - capture region/clipboard, commit as topic card(s)
-;;   org-sm-card-workbench - refine and/or split the card at point
+;;   org-sm-capture                  - capture region/clipboard, then confirm with C-c C-c
+;;   org-sm-capture-clipboard-notify - capture clipboard immediately and notify
+;;   org-sm-card-workbench           - refine and/or split the card at point
 ;;
 ;; Minor modes:
 ;;   org-sm-mode             - buffer-local; {{cloze}} font-lock (use via :hook)
@@ -48,6 +49,7 @@
 
 (declare-function org-sm-gptel-explain "org-sm-gptel")
 (declare-function org-sm-gptel-card-ai "org-sm-gptel")
+(declare-function notifications-notify "notifications")
 
 ;;;; ---- Customization -------------------------------------------------------
 
@@ -351,8 +353,8 @@ Return its start position, or nil if no ancestor is a card."
   "Replace the current heading's body text with NEW-BODY.
 Point must be on the heading.  Metadata (planning line, drawer) is
 preserved; only the body region from `org-sm--body-bounds' is replaced.
-Shared by the web front-end (edit) and `org-sm--capture-commit-body'
-\(whether the new body came from manual editing or AI refine)."
+Used by `org-sm--capture-commit-body' for manual or AI-assisted workbench
+edits."
   (let* ((bounds (org-sm--body-bounds))
          (start  (car bounds))
          (end    (cdr bounds)))
@@ -423,6 +425,21 @@ then read the clipboard.  Otherwise read the clipboard directly."
   (substring-no-properties
    (or (ignore-errors (current-kill 0 t)) "")))
 
+(defun org-sm--clipboard-content ()
+  "Return non-blank system clipboard text, or signal a `user-error'.
+Prefer the GUI clipboard selection and fall back to the kill ring, so a
+one-key capture works in both graphical and terminal Emacs.  Kept separate
+from `org-sm--grab-content', whose region-copy behavior belongs only to the
+interactive editable capture flow."
+  (let ((content (string-trim
+                  (or (ignore-errors
+                        (gui-get-selection 'CLIPBOARD 'UTF8_STRING))
+                      (ignore-errors (current-kill 0 t))
+                      ""))))
+    (unless (org-string-nw-p content)
+      (user-error "Clipboard is empty"))
+    content))
+
 (defun org-sm--capture-render-cards (cards)
   "Insert CARDS (list of (TITLE . BODY)) as ** headings at point.
 Inverse of `org-sm--capture-split-buffer'; they share the heading format."
@@ -476,9 +493,8 @@ run without it.  Never reassigned.")
 
 (defvar-local org-sm-capture-card-type nil
   "SRS_TYPE (`topic'/`cloze'/nil) of the source card for `org-sm-card-workbench'.
-Selects the AI refine prompt for the buffer's leading body text (and for
-`org-sm-gptel-refine-card' when point is in that leading text).  nil in
-plain capture buffers, where drafts have no type yet anyway.")
+Selects the AI prompt for the workbench's leading body text.  nil in plain
+capture buffers, where drafts have no type yet anyway.")
 
 (defun org-sm--capture-live-marker ()
   "Return `org-sm-capture-parent-marker' if its buffer is still alive.
@@ -573,8 +589,8 @@ Signals a `user-error' only when there is nothing at all to commit."
     (define-key map (kbd "C-c C-k") #'org-sm-capture-abort)
     map)
   "Keymap for `org-sm-capture-mode'.
-The AI extension (`org-sm-gptel') adds \\`C-c C-a' / \\`C-c C-i', which only
-work in `org-sm-card-workbench' buffers -- plain capture never calls AI.")
+The AI extension (`org-sm-gptel') adds \\`C-c C-a' in
+`org-sm-card-workbench' buffers; plain capture never calls AI.")
 
 (define-derived-mode org-sm-capture-mode org-mode "org-sm-cap"
   "Lightweight capture buffer.  Edit the content, then commit.
@@ -630,6 +646,27 @@ Cards go to `org-sm-capture-file' / `org-sm-capture-olp' (by default an
 demand.  This is a single inbox; refile cards into per-topic files yourself."
   (interactive)
   (org-sm--capture-buffer (org-sm--grab-content)))
+
+;;;###autoload
+(defun org-sm-capture-clipboard-notify ()
+  "Capture clipboard text as a topic card immediately and notify the user.
+
+Unlike `org-sm-capture', this command has no editable confirmation buffer:
+it writes one topic card directly to `org-sm-capture-file' /
+`org-sm-capture-olp', saves its target buffer, and sends a desktop
+notification containing the captured text.  Signal a `user-error' when the
+clipboard is empty."
+  (interactive)
+  (let ((content (org-sm--clipboard-content)))
+    (org-sm--capture 'topic content)
+    (let ((coding-system-for-write 'utf-8-unix))
+      (save-buffer))
+    (message "org-sm: captured clipboard")
+    ;; Notification failure must not make a successfully saved capture look
+    ;; failed; a caller might otherwise retry and create a duplicate card.
+    (when (require 'notifications nil t)
+      (ignore-errors
+        (notifications-notify :title "org-sm 已摘录" :body content :urgency 'normal)))))
 
 ;;;; ---- Mark / Extract ------------------------------------------------------
 
@@ -751,9 +788,8 @@ back as this card's body (type/schedule/id untouched) and turns each `**'
 heading into a new scheduled child with a back-reference, leaving existing
 children alone.  \\`C-c C-k' discards.
 
-Edit by hand, or with `org-sm-gptel' loaded let the AI do it: \\`C-c C-a'
-refines the body and proposes child cards in one call, \\`C-c C-i' refines
-just the text at point."
+Edit by hand, or with `org-sm-gptel' loaded use \\`C-c C-a' to refine the
+body and optionally propose child cards in one call."
   (interactive)
   (when (org-before-first-heading-p) (user-error "Not on an org heading"))
   (org-back-to-heading t)
@@ -1134,6 +1170,17 @@ Point must be on the card heading."
   (org-sm--cleanup-buffer)
   (when (buffer-narrowed-p) (widen))
   (message "org-sm: review aborted"))
+
+(defvar-keymap org-sm-review-repeat-map
+  :doc "Repeat keys available during an org-sm review session."
+  "r" #'org-sm-review-confirm
+  "d" #'org-sm-item-dismiss
+  "a" #'org-sm-review-abort)
+
+(dolist (command '(org-sm-review-start
+                   org-sm-review-confirm
+                   org-sm-item-dismiss))
+  (put command 'repeat-map 'org-sm-review-repeat-map))
 
 ;;;; ---- Tree view -----------------------------------------------------------
 ;; A read-only `org-mode' buffer aggregating cards (optionally filtered by due

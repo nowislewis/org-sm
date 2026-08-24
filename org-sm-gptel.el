@@ -23,8 +23,6 @@
 ;;                                commits whatever is present, turning every
 ;;                                `**' heading into a child card regardless of
 ;;                                mode.  Call again to re-run, any mode.
-;;   org-sm-gptel-rewrite-text  - Synchronous text -> refined text core (web).
-;;   org-sm-gptel-card-text     - Synchronous text -> (body . cards) core (web).
 ;;
 ;; Capture never calls AI: `org-sm-capture' only stores the raw material.
 ;; Every AI action here operates on an existing card, i.e. while you read or
@@ -301,61 +299,6 @@ Applies `org-sm-gptel-agent-preset' so the AI can read book skills and
 
 重点放在②③，①一句带过。不要替我制卡，不要生成总结。"))
 
-;;;; ---- Request cores -------------------------------------------------------
-;;
-;; Two AI transforms, each with exactly one owner: "refine this text"
-;; (`org-sm-gptel--rewrite-request') and "refine + split this card"
-;; (`org-sm-gptel--card-request', further down).  Each has an async flavour
-;; used from Emacs buffers and a synchronous wrapper used by the web
-;; front-end (which must answer an HTTP request); both wrappers share the
-;; polling loop below.
-
-(defun org-sm-gptel--sync (what timeout start)
-  "Call START with a callback, block until it fires, and return its values.
-START is a function of one argument (the callback).  The callback's last
-argument is an error string or nil; the arguments before it are the result
-values, returned here as a list.  WHAT names the operation in error
-messages; TIMEOUT defaults to 60 seconds.  Signals an error on failure or
-timeout, so callers only handle the success path."
-  (let ((done nil) (values nil) (err nil)
-        (deadline (+ (float-time) (or timeout 60))))
-    (funcall start (lambda (&rest args)
-                     (setq err    (car (last args))
-                           values (butlast args)
-                           done   t)))
-    (while (and (not done) (< (float-time) deadline))
-      (accept-process-output nil 0.2))
-    (cond ((not done) (error "AI %s timed out" what))
-          (err        (error "AI %s failed: %s" what err))
-          (t          values))))
-
-(defun org-sm-gptel--rewrite-request (text type callback)
-  "Ask the AI to refine TEXT; call CALLBACK asynchronously with the result.
-TYPE (`cloze' or `topic') selects the system prompt (`org-sm-gptel-system-cloze'
-/ `org-sm-gptel-system-topic').  CALLBACK receives two args: the rewritten
-string (or nil) and an error string (or nil).  The single owner of the
-rewrite request flow, used by `org-sm-gptel-rewrite-text' (sync, for the
-web)."
-  (gptel-request text
-    :system (if (eq type 'cloze) org-sm-gptel-system-cloze org-sm-gptel-system-topic)
-    :callback
-    (lambda (response info)
-      (if (stringp response)
-          (funcall callback (string-trim response) nil)
-        (funcall callback nil (format "%s" (plist-get info :status)))))))
-
-(defun org-sm-gptel-rewrite-text (text &optional type timeout)
-  "Synchronously refine TEXT with the AI and return the rewritten string.
-TYPE (`cloze' or `topic', default topic) selects the system prompt.  Blocks
-up to TIMEOUT seconds (default 60); signals an error on failure, timeout,
-or an empty result.  Wraps `org-sm-gptel--rewrite-request'.  Used by the
-web front-end."
-  (let ((result (car (org-sm-gptel--sync
-                      "refine" timeout
-                      (lambda (cb) (org-sm-gptel--rewrite-request text type cb))))))
-    (unless (org-string-nw-p result) (error "AI refine: empty result"))
-    (string-trim result)))
-
 ;;;; ---- AI card action (refine + optional child split, one call) ------------
 
 (defconst org-sm-gptel--card-schema
@@ -412,24 +355,6 @@ for `org-sm-card-workbench''s AI action."
                 (funcall callback (car parsed) (cdr parsed) nil)
               (funcall callback nil nil "parse failed")))
         (funcall callback nil nil (format "%s" (plist-get info :status)))))))
-
-(defun org-sm-gptel-card-text (text &optional type extra timeout)
-  "Synchronously refine TEXT and split it into child cards; return (BODY . CARDS).
-TYPE (`topic'/`cloze'/nil) selects the refine prompt; EXTRA, when non-empty,
-is appended to TEXT as a one-off instruction.  Always uses the
-`refine+subcard' mode (see `org-sm-gptel--card-system') since the web
-front-end has no mode picker.  Blocks up to TIMEOUT seconds (default 60)
-and signals an error on failure or timeout.  CARDS may be empty when
-nothing is worth splitting off.  Used by the web front-end, which needs a
-synchronous result."
-  (let* ((prompt (if (org-string-nw-p extra)
-                     (concat text "\n\n【额外要求】" (string-trim extra))
-                   text))
-         (res (org-sm-gptel--sync
-               "card action" timeout
-               (lambda (cb)
-                 (org-sm-gptel--card-request prompt type 'refine+subcard nil cb)))))
-    (cons (nth 0 res) (nth 1 res))))
 
 ;;;###autoload
 (defun org-sm-gptel-card-ai ()

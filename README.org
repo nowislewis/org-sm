@@ -46,7 +46,8 @@ Requires Emacs 29.1+, org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
   (define-key org-mode-map (kbd "C-c s q")   #'org-sm-review-abort)
   (define-key org-mode-map (kbd "C-c s t")   #'org-sm-tree)
   (define-key org-mode-map (kbd "C-c s A")   #'org-sm-card-workbench)
-  (define-key global-map   (kbd "C-c s c")   #'org-sm-capture))
+  (define-key global-map   (kbd "C-c s c")   #'org-sm-capture)
+  (repeat-mode 1))
 #+end_src
 
 * Commands
@@ -63,8 +64,9 @@ Requires Emacs 29.1+, org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
 | ~org-sm-tree~           | Foldable aggregated tree of all cards           |
 | ~org-sm-set-readpoint~  | Drop a read-point anchor; review jumps here     |
 | ~org-sm-goto-source~    | Grep the vault for this card's source           |
-| ~org-sm-capture~        | Capture region/clipboard into an editable buffer |
-| ~org-sm-card-workbench~ | Refine and/or split the card at point           |
+| ~org-sm-capture~                  | Capture region/clipboard into an editable buffer |
+| ~org-sm-capture-clipboard-notify~ | Save clipboard immediately and send notification |
+| ~org-sm-card-workbench~           | Refine and/or split the card at point           |
 | ~org-sm-capture-commit~ | Commit a capture/workbench buffer (~C-c C-c~)   |
 
 * Review Flow
@@ -74,47 +76,10 @@ Requires Emacs 29.1+, org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
   ~review-confirm~ (rate).
 
 Every prompt also offers *skip* (no change; stays due) and *dismiss*.
-Intervals are computed from the scheduled date, so early/late reviews don't
-distort spacing.
-
-* Mouse / touch review controls (org-sm-buttons)
-
-~org-sm-buttons.el~ is an optional in-Emacs, touch-friendly alternative to
-using the web UI for review.  It opens a persistent bottom side window:
-
-- when idle it provides a mouse-clickable *Start review* button;
-- on a *topic*, it provides *Reschedule*, *Postpone 7d*, *Skip*, *Dismiss*,
-  and *Abort*;
-- on a hidden *cloze*, it provides *Reveal*, then shows *Again*, *Hard*,
-  *Good*, and *Easy* with their live FSRS intervals after revealing it.
-
-All buttons use the same org-sm grading functions as the keyboard and web
-interfaces; the extension only supplies the presentation.  This keeps the
-interaction low-friction on a touchscreen without creating another scheduler
-or a second write path.
-
-#+begin_src elisp
-(require 'org-sm-buttons)
-(org-sm-buttons-mode 1)
-#+end_src
-
-Buttons activate with mouse-1, mouse-2, or ~RET~ after keyboard focus.
-The bar wraps whole buttons to narrow windows and uses
-~fit-window-to-buffer~ to grow only as many rows as necessary.  GUI and
-terminal Emacs use the same padded character-cell targets and a deliberately
-wide non-clickable gap between buttons, so the interface stays predictable and
-reduces touch mis-taps without font scaling.  *Dismiss* deliberately changes
-to *Confirm dismiss* + *Cancel* on the first click.
-
-Useful touch-layout settings (the defaults shown) are:
-
-#+begin_src elisp
-(setq org-sm-buttons-postpone-days 7
-      org-sm-buttons-button-padding 2
-      org-sm-buttons-button-gap 4
-      org-sm-buttons-min-button-width 14
-      org-sm-buttons-max-window-height 8)
-#+end_src
+With Emacs `repeat-mode' enabled, after starting a review you can repeatedly
+press ~r~ to confirm, ~d~ to dismiss, or ~a~ to abort; ~r~ and ~d~ remain
+available after moving to the next card.  Intervals are computed from the
+scheduled date, so early/late reviews don't distort spacing.
 
 * Capture and card workbench
 
@@ -140,6 +105,13 @@ Refile into per-topic files yourself afterwards.
 *No AI here.*  Capture stores exactly what you grabbed: at capture time you
 don't yet know what the material is worth, the action must stay instant, and a
 card you never revisit doesn't deserve tokens.
+
+** ~org-sm-capture-clipboard-notify~
+
+Saves the system clipboard immediately as one topic card in the same inbox,
+then sends a desktop notification with the captured text.  Unlike
+~org-sm-capture~, it does not open an editable buffer or require ~C-c C-c~;
+use it for one-key popup/menu capture.
 
 ** ~org-sm-card-workbench~ (=C-c s A=)
 
@@ -224,62 +196,26 @@ why).  Customize via ~org-sm-gptel-system-topic~ / ~-cloze~ (refine),
 ~-split~ (the child-splitting addendum used by refine+subcard),
 ~-simplify~ (the simplify prompt) and ~-explain~.
 
-* Web front-end (org-sm-web)
+* Web review (org-sm-web)
 
-Optional HTTP/JSON UI for reviewing from a phone browser; needs
-[[https://github.com/skeeto/emacs-web-server][simple-httpd]].  A thin layer:
-all scheduling and writing goes through the same org-sm functions the Emacs
-commands use.
+Optional phone browser UI for reviewing due cards; needs
+[[https://github.com/skeeto/emacs-web-server][simple-httpd]].  It intentionally
+supports only review: capture, editing, extraction, and AI work stay in the
+Emacs commands, so there is one authoring workflow.
 
 #+begin_src elisp
-(org-sm-web-start)   ; autoloaded; prints the localhost + LAN URLs
+(require 'org-sm-web)
+(setq org-sm-web-bind "0.0.0.0") ; explicit opt-in for a trusted LAN
+(org-sm-web-start)
 #+end_src
 
-| Variable          | Default     | Meaning                                     |
-|-------------------+-------------+---------------------------------------------|
-| ~org-sm-web-port~ | ~8842~      | Listen port                                 |
-| ~org-sm-web-bind~ | ~"0.0.0.0"~ | ~"0.0.0.0"~ = LAN, ~"127.0.0.1"~ = local    |
-| ~org-sm-web-root~ | ~web/~      | Static UI directory (~index.html~)          |
+The server defaults to ~127.0.0.1~ because it has no authentication.  Its
+three endpoints are ~GET /api/queue~, ~GET /api/card/:id~, and
+~POST /api/review/:id~ (cloze ~rating=~; topic ~action=~ with optional
+~days=~).  Do not expose it to an untrusted network.
 
-** Endpoints
-
-| Method + path           | Params                          | Action                     |
-|-------------------------+---------------------------------+----------------------------|
-| ~GET  /api/queue~       | —                               | Due cards                  |
-| ~GET  /api/card/:id~    | —                               | One card + cloze tokens    |
-| ~POST /api/review/:id~  | ~rating=~ / ~action=~ [~days=~] | Grade / postpone / dismiss |
-| ~POST /api/body/:id~    | ~body=~                         | Replace the card body      |
-| ~POST /api/capture~     | ~type= body= [title=]~          | Create a new card          |
-| ~POST /api/extract/:id~ | ~type= selected= start= end=~   | Create a child card        |
-| ~POST /api/refine/:id~  | —                               | AI: rewritten body, *no write* |
-| ~POST /api/card-ai/:id~ | —                               | AI: refine body + write child cards |
-
-The AI endpoints need ~org-sm-gptel~; there is deliberately none on the
-capture path.  ~/api/refine~ is a pure transform (the Edit textarea + ~Save~
-stays the one write path), while ~/api/card-ai~ is the whole Emacs workbench
-round collapsed into one request — hence the browser confirms first.
-~:id~ must be the trailing path component (simple-httpd limitation).
-
-** UI
-
-- *cloze*: ~Show~, then ~Again~ / ~Hard~ / ~Good~ / ~Easy~.
-- *topic*: ~Reschedule~ / ~Postpone~ (default 7 days) / ~Dismiss~.
-- *edit*: ~Edit~ → textarea → ~Save~.  With ~org-sm-gptel~, ~AI Refine~
-  refills the textarea first, so you preview before saving.
-- *AI Refine + Split* (topic): refines the body and splits off child cards in
-  one shot, then reloads the card.  Use ~Edit~ → ~AI Refine~ instead when you
-  want a preview.
-- *extract*: select text → floating ~Extract Topic~ / ~Extract Cloze~ menu.
-  Cloze extraction is topic-cards-only (cloze bodies render as hidden tokens,
-  so there are no raw-body offsets).
-- *capture*: the ~＋~ button opens a sheet (type toggle, optional title, body
-  prefilled from the clipboard when permitted).  One card, exactly as typed.
-
-** Security
-
-No authentication.  ~"0.0.0.0"~ exposes it to the whole LAN — keep it to
-trusted networks, or bind ~"127.0.0.1"~ and tunnel (e.g. Tailscale).  Never
-expose it to the public internet.
+The UI offers *Show* then cloze ratings, or topic *Reschedule*, *Postpone*,
+and *Dismiss*.
 
 * Maintenance
 
