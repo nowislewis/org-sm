@@ -995,10 +995,26 @@ PREV is a string describing the last action, shown in the echo area."
     (org-sm--advance)))
 
 ;;;###autoload
-(defun org-sm-review-start ()
-  "Collect all due SRS items and start a review session."
+(defcustom org-sm-review-light-size 6
+  "Maximum number of cards in a light review session."
+  :type 'integer
+  :group 'org-sm)
+
+(defun org-sm-review-start (&optional limit)
+  "Collect due SRS items and start a review session, optionally limited to LIMIT."
   (interactive)
-  (org-sm--review-markers (org-sm--collect-due-markers) "due"))
+  (let ((markers (org-sm--collect-due-markers)))
+    (org-sm--review-markers (if limit (seq-take markers limit) markers)
+                            (if limit (format "light, max %d" limit) "due"))))
+
+;;;###autoload
+(defun org-sm-review-start-light ()
+  "Start a light review session with `org-sm-review-light-size' cards."
+  (interactive)
+  (unless (and (integerp org-sm-review-light-size)
+               (> org-sm-review-light-size 0))
+    (user-error "org-sm-review-light-size must be a positive integer"))
+  (org-sm-review-start org-sm-review-light-size))
 
 (defun org-sm--review-confirm-topic ()
   "Interactive topic review: reschedule, postpone, explain, or dismiss.
