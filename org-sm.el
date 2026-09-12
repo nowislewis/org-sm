@@ -103,6 +103,14 @@ that `org-schedule' (called internally) would climb to the wrong heading."
 (defvar org-sm--queue nil
   "Active review queue: list of markers consumed by `org-sm--advance'.")
 
+(defvar org-sm--review-total 0
+  "Number of cards selected at the start of the current review.")
+
+(defvar-local org-sm--mode-line nil
+  "Cached review position, displayed only in the current card's buffer.")
+
+(add-to-list 'mode-line-misc-info '(org-sm--mode-line (" " org-sm--mode-line)))
+
 (defvar-local org-sm--cloze-state nil
   "Cloze review state for the current buffer: `hidden' or `revealed'.")
 
@@ -921,9 +929,11 @@ When PRED is non-nil, only entries for which it returns non-nil are visited."
   (org-sm--collect-markers #'org-sm--due-p))
 
 (defun org-sm--cleanup-buffer ()
-  "Clear cloze overlays and state in the previously reviewed buffer."
+  "Clear review progress, cloze overlays and state in the previous buffer."
   (when (buffer-live-p org-sm--current-buffer)
     (with-current-buffer org-sm--current-buffer
+      (setq org-sm--mode-line nil)
+      (force-mode-line-update)
       (when org-sm--cloze-state
         (org-sm-cloze-remove-overlays)
         (setq org-sm--cloze-state nil))))
@@ -965,9 +975,9 @@ When PRED is non-nil, only entries for which it returns non-nil are visited."
   "Show review hint in the echo area, optionally prefixed with PREV result."
   (let ((pre (if prev (format "✓ %s  |  " prev) "")))
     (pcase (org-sm-type)
-      ('cloze (message "org-sm %s[%d left] cloze: %s — M-x review-confirm" pre (length org-sm--queue)
+      ('cloze (message "org-sm %scloze: %s — M-x review-confirm" pre
                        (if (eq org-sm--cloze-state 'hidden) "hidden" "revealed")))
-      ('topic (message "org-sm %s[%d left] topic — M-x review-confirm" pre (length org-sm--queue)))
+      ('topic (message "org-sm %stopic — M-x review-confirm" pre))
       (_      (message "org-sm: not an SRS heading")))))
 
 (defun org-sm--advance (&optional prev)
@@ -982,7 +992,12 @@ PREV is a string describing the last action, shown in the echo area."
                    (when (org-sm-type) (setq found t)))
           (message "org-sm: skipping stale marker"))))
     (if found
-        (org-sm--show-prompt prev)
+        (progn
+          (setq org-sm--mode-line
+                (format "SM %d/%d" (- org-sm--review-total (length org-sm--queue))
+                        org-sm--review-total))
+          (force-mode-line-update)
+          (org-sm--show-prompt prev))
       (org-sm--cleanup-buffer)
       (message "org-sm: done 󱁖 %s" (if prev (format "  (last: %s)" prev) "")))))
 
@@ -991,7 +1006,8 @@ PREV is a string describing the last action, shown in the echo area."
   (org-sm--ensure-scheduler)
   (if (null markers)
       (message "org-sm: nothing to review%s 󱁖" (if what (format " (%s)" what) ""))
-    (setq org-sm--queue markers)
+    (setq org-sm--queue markers
+          org-sm--review-total (length markers))
     (org-sm--advance)))
 
 ;;;###autoload
@@ -1072,7 +1088,8 @@ Rating computation is delegated to `org-sm--cloze-preview' and
   "Confirm topic read or advance cloze state, then move to next item."
   (interactive)
   (org-sm--ensure-scheduler)
-  (unless (or org-sm--queue org-sm--cloze-state)
+  (unless (or org-sm--queue org-sm--cloze-state
+              (buffer-live-p org-sm--current-buffer))
     (user-error "No active review session — call org-sm-review-start"))
   (pcase (or (org-sm-type) (user-error "Not on an SRS heading"))
     ('topic (org-sm--review-confirm-topic))
@@ -1094,7 +1111,7 @@ properties and scheduling data are preserved for `org-sm-item-undismiss'."
   (interactive)
   (org-sm--dismiss)
   ;; Only advance the review queue if a session is active.
-  (if org-sm--queue
+  (if (or org-sm--queue (buffer-live-p org-sm--current-buffer))
       (org-sm--advance "dismissed")
     (message "org-sm: item dismissed")))
 
