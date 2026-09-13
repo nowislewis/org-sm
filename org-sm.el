@@ -164,7 +164,12 @@ that `org-schedule' (called internally) would climb to the wrong heading."
 (defun org-sm--log-review (type &optional rating extra)
   "Log a review entry for TYPE (symbol) with optional RATING and EXTRA string."
   (org-with-wide-buffer
-   (let* ((ts   (format-time-string (org-time-stamp-format 'long 'inactive)))
+   ;; Always log into a drawer, whatever the user's `org-log-into-drawer' is:
+   ;; `org-end-of-meta-data' skips drawers but not bare log lines, so bare
+   ;; entries would land inside `org-sm--body-bounds' and be treated as body
+   ;; text -- which `org-sm--set-body' would then delete.
+   (let* ((org-log-into-drawer t)
+          (ts   (format-time-string (org-time-stamp-format 'long 'inactive)))
           (name (symbol-name type))
           (line (concat "- " name
                         (when rating (format "  %s" rating))
@@ -336,22 +341,36 @@ alist from `org-sm--cloze-preview', reused to avoid recomputing."
 
 (defun org-sm--goto-enclosing-card ()
   "Move point to the nearest enclosing card heading (current or ancestor).
-Return its start position, or nil if no ancestor is a card."
+Return its start position, or nil if no ancestor is a card.
+
+`org-up-heading-safe' leaves point where it is once there is no parent left,
+so the climb must stop on its nil return.  Anything that keeps looping there
+(jumping to `point-min', say) re-tests the very same heading and hangs Emacs
+on a top-level non-card heading."
   (save-match-data
-    (unless (org-at-heading-p) (org-back-to-heading t))
-    (let (pos)
-      (while (and (not pos) (org-at-heading-p))
-        (if (org-sm--card-p)
-            (setq pos (point))
-          (unless (org-up-heading-safe) (goto-char (point-min)))))
-      pos)))
+    ;; Text before the first heading has no enclosing card; report that as nil
+    ;; rather than letting `org-back-to-heading' raise its own user-error,
+    ;; which callers would surface instead of their own message.
+    (when (or (org-at-heading-p) (ignore-errors (org-back-to-heading t) t))
+      (let ((climbing t) pos)
+        (while (and (not pos) climbing)
+          (if (org-sm--card-p)
+              (setq pos (point))
+            (setq climbing (org-up-heading-safe))))
+        pos))))
 
 (defun org-sm--body-bounds ()
-  "Return (start . end) of current heading's body (excluding meta-data)."
+  "Return (start . end) of current heading's body (excluding meta-data).
+The body stops at the first child heading: for a heading with no body of its
+own `org-entry-end-position' reaches past the whole subtree, and callers like
+`org-sm--set-body' would then overwrite the children."
   (save-excursion
     (org-back-to-heading t)
-    (cons (progn (org-end-of-meta-data t) (point))
-          (org-entry-end-position))))
+    ;; Measure the child boundary from the heading itself: with no body,
+    ;; `org-end-of-meta-data' already moves past the first child.
+    (let ((limit (save-excursion (outline-next-heading) (point)))
+          (start (progn (org-end-of-meta-data t) (point))))
+      (cons (min start limit) (min (org-entry-end-position) limit)))))
 
 (defun org-sm--body-clean (raw)
   "Trim surrounding whitespace from RAW."
@@ -818,22 +837,29 @@ body and optionally propose child cards in one call."
        (setq-local org-sm-capture-card-type type)))))
 
 (defun org-sm--ensure-olp (file olp)
-  "Return a marker at OLP in FILE, creating the file and headings as needed."
+  "Return a marker on OLP's deepest heading in FILE, creating what is missing.
+
+The marker must sit *on the heading line*: callers read `org-current-level'
+there to place children (see `org-sm--capture').  Landing on whatever line
+follows the insertion would silently file cards under an unrelated heading
+whenever the target tree is not the last one in the file."
   (let ((buf (find-file-noselect file)))
     (with-current-buffer buf
       (org-with-wide-buffer
        (or (ignore-errors (org-find-olp olp 'this-buffer))
            (let ((level 0))
-             (goto-char (point-max))
              (dolist (head olp (point-marker))
                (setq level (1+ level))
-               (let ((m (ignore-errors
-                          (org-find-olp (seq-take olp level) 'this-buffer))))
-                 (if m
-                     (progn (goto-char m) (set-marker m nil)
-                            (org-end-of-subtree t t))
-                   (unless (bolp) (insert "\n"))
-                   (insert (make-string level ?*) " " head "\n"))))))))))
+               (if-let* ((m (ignore-errors
+                              (org-find-olp (seq-take olp level) 'this-buffer))))
+                   (progn (goto-char m) (set-marker m nil))
+                 ;; Append inside the deepest parent found so far -- or at end
+                 ;; of file for a new top-level heading -- then step back onto
+                 ;; the inserted line so the next round descends from it.
+                 (if (= level 1) (goto-char (point-max)) (org-end-of-subtree t t))
+                 (unless (bolp) (insert "\n"))
+                 (insert (make-string level ?*) " " head "\n")
+                 (forward-line -1)))))))))
 
 (defun org-sm--capture (type body &optional file olp title)
   "Create a new SRS card of TYPE with BODY under FILE / OLP; return its id.
@@ -929,11 +955,15 @@ When PRED is non-nil, only entries for which it returns non-nil are visited."
   (org-sm--collect-markers #'org-sm--due-p))
 
 (defun org-sm--cleanup-buffer ()
-  "Clear review progress, cloze overlays and state in the previous buffer."
+  "Clear review progress, narrowing, cloze overlays and state in the previous buffer.
+Widening belongs here rather than in the caller: a review queue spans files, so
+by the time the next card is shown the previous buffer is no longer current and
+would silently stay narrowed to the card just reviewed."
   (when (buffer-live-p org-sm--current-buffer)
     (with-current-buffer org-sm--current-buffer
       (setq org-sm--mode-line nil)
       (force-mode-line-update)
+      (when (buffer-narrowed-p) (widen))
       (when org-sm--cloze-state
         (org-sm-cloze-remove-overlays)
         (setq org-sm--cloze-state nil))))
@@ -983,7 +1013,6 @@ When PRED is non-nil, only entries for which it returns non-nil are visited."
 (defun org-sm--advance (&optional prev)
   "Advance to the next queued item, or end the session.
 PREV is a string describing the last action, shown in the echo area."
-  (when (buffer-narrowed-p) (widen))
   (let (found)
     (while (and org-sm--queue (not found))
       (let ((marker (pop org-sm--queue)))
@@ -1201,7 +1230,6 @@ Point must be on the card heading."
     (user-error "No active review session"))
   (setq org-sm--queue nil)
   (org-sm--cleanup-buffer)
-  (when (buffer-narrowed-p) (widen))
   (message "org-sm: review aborted"))
 
 (defvar-keymap org-sm-review-repeat-map
