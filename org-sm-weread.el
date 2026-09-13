@@ -6,6 +6,7 @@
 
 ;;; Code:
 (require 'org-sm)
+(require 'cl-lib)
 (require 'json)
 (require 'url)
 (require 'url-http)
@@ -14,6 +15,15 @@
 
 (defvar url-http-response-status)
 (defvar url-http-end-of-headers)
+
+(defcustom org-sm-weread-group 'book+chapter
+  "Where imported notes are filed under `org-sm-capture-olp'.
+Book and chapter headings are created on first use and reused afterwards,
+so they appear in import order rather than in the book's own order."
+  :type '(choice (const :tag "One flat inbox" none)
+                 (const :tag "Per book" book)
+                 (const :tag "Per book and chapter" book+chapter))
+  :group 'org-sm)
 
 (defun org-sm-weread--api-key ()
   "Read the WeRead API key from auth-source."
@@ -110,43 +120,73 @@ Use live buffers so unsaved edits and refiles are respected."
   (replace-regexp-in-string
    "^\\(\\*+ \\|#\\+\\|:[[:alnum:]_]+:\\)" ",\\1" (or text "")))
 
+(defun org-sm-weread--heading (text)
+  "Return TEXT as a single-line Org heading, or nil when it is blank.
+Remote titles may wrap or end in a `:tag:'-shaped run, either of which would
+change the outline structure `org-find-olp' matches against."
+  (org-string-nw-p
+   (replace-regexp-in-string
+    "[ \t:]+\\'" ""
+    (replace-regexp-in-string
+     "\\`[ \t*]+" ""
+     (replace-regexp-in-string "[ \t\n\r]+" " " (or text ""))))))
+
+(defun org-sm-weread--chapter (note chapters)
+  "Return NOTE's chapter title from CHAPTERS, or nil for a book-level note."
+  (let ((chapter (cl-find (alist-get 'chapterUid note) chapters
+                          :key (lambda (c) (alist-get 'chapterUid c))
+                          :test #'equal)))
+    (or (alist-get 'title chapter) (alist-get 'chapterName note))))
+
+(defun org-sm-weread--olp (book chapter)
+  "Return the capture outline path for BOOK and CHAPTER.
+Book-level notes and unusable titles simply yield a shorter path instead of
+an invented placeholder heading."
+  (append org-sm-capture-olp
+          (when (memq org-sm-weread-group '(book book+chapter))
+            (list (or (org-sm-weread--heading (alist-get 'title book)) "未知书籍")))
+          (when (eq org-sm-weread-group 'book+chapter)
+            (when-let* ((title (org-sm-weread--heading chapter))) (list title)))))
+
 (defun org-sm-weread--location-equal-p (mark review)
   "Match a review only when explicit chapter and range are both present."
   (and (alist-get 'chapterUid mark) (org-string-nw-p (alist-get 'range mark))
        (equal (alist-get 'chapterUid mark) (alist-get 'chapterUid review))
        (equal (alist-get 'range mark) (alist-get 'range review))))
 
-(defun org-sm-weread--body (text book book-id note chapters)
-  "Attach source metadata to TEXT using NOTE location and CHAPTERS."
-  (let* ((uid (alist-get 'chapterUid note))
-         (chapter (cl-find uid chapters :key (lambda (c) (alist-get 'chapterUid c))
-                           :test #'equal))
-         (range (alist-get 'range note))
-         (link (format "weread://reading?bId=%s" (url-hexify-string (format "%s" book-id)))))
-    (when uid (setq link (concat link (format "&chapterUid=%s" uid))))
-    (when (and uid (stringp range)
-               (string-match "\\`\\([0-9]+\\)-\\([0-9]+\\)\\'" range))
-      (setq link (format "weread://bestbookmark?bookId=%s&chapterUid=%s&rangeStart=%s&rangeEnd=%s"
-                         book-id uid (match-string 1 range) (match-string 2 range))))
+(defun org-sm-weread--body (text book note chapter)
+  "Attach source metadata to TEXT using NOTE location and CHAPTER title.
+The card keeps its own provenance: review shows one card at a time, without
+the book/chapter headings it is filed under.
+
+A link is emitted only when the API sends a `deepLink': the gateway contract
+forbids hand-built weread:// URLs, and Linux has no handler for them anyway.
+Today neither notes endpoint returns the field, so cards carry no link."
+  (let ((link (or (alist-get 'deepLink note) (alist-get 'deepLink book))))
     (concat (org-sm-weread--text text) "\n\n来源："
             (org-sm-weread--text (alist-get 'title book))
             (when-let* ((author (alist-get 'author book))) (concat " / " author))
-            (when-let* ((title (or (alist-get 'title chapter) (alist-get 'chapterName note))))
-              (concat "\n章节：" (org-sm-weread--text title)))
-            "\n[[" link "][在微信读书中打开]]")))
+            (when chapter (concat "\n章节：" (org-sm-weread--text chapter)))
+            (when (org-string-nw-p link)
+              (concat "\n[[" link "][在微信读书中打开]]")))))
 
-(defun org-sm-weread--create (body key index &optional review-key)
-  "Capture BODY via org-sm and record KEY and optional REVIEW-KEY in INDEX."
+(defun org-sm-weread--create (body key index olp &optional review-key)
+  "Capture BODY under OLP and record KEY and optional REVIEW-KEY in INDEX."
   (save-current-buffer
-    (org-sm--capture 'topic body)
-    ;; Capture leaves point at the end of its new body; escaped remote headings
-    ;; ensure back-to-heading finds the card rather than text inside it.
-    (org-back-to-heading t)
-    (org-entry-put nil "WEREAD_KEY" key)
-    (when review-key (org-entry-put nil "WEREAD_REVIEW_KEY" review-key))
-    (save-buffer)
-    (puthash key (point-marker) index)
-    (when review-key (puthash review-key (point-marker) index))))
+    ;; Locate the card by the id capture returns: capture restores point
+    ;; (`org-with-wide-buffer'), so it does *not* leave it on the new heading.
+    ;; Searching by id instead of moving relative to point is what keeps the
+    ;; key on the card rather than on whatever heading point happened to sit.
+    (let* ((id (org-sm--capture 'topic body nil olp))
+           (pos (or (org-find-entry-with-id id)
+                    (error "org-sm-weread: captured card %s vanished" id))))
+      (org-with-wide-buffer
+       (goto-char pos)
+       (org-entry-put nil "WEREAD_KEY" key)
+       (when review-key (org-entry-put nil "WEREAD_REVIEW_KEY" review-key))
+       (save-buffer)
+       (puthash key (copy-marker pos) index)
+       (when review-key (puthash review-key (copy-marker pos) index))))))
 
 (defun org-sm-weread--append-review (marker text key index)
   "Append unseen thought TEXT at MARKER without resetting the card's schedule."
@@ -169,6 +209,7 @@ Use live buffers so unsaved edits and refiles are respected."
          (book-id (or (alist-get 'bookId entry) (alist-get 'bookId book)))
          (data (org-sm-weread--request "/book/bookmarklist" (cons 'bookId book-id)))
          (marks (alist-get 'updated data))
+         (chapters (alist-get 'chapters data))
          (reviews (mapcar (lambda (r) (alist-get 'review r))
                           (org-sm-weread--pages "/review/list/mine" 'reviews 'synckey
                                                 (cons 'bookid book-id))))
@@ -187,24 +228,25 @@ Use live buffers so unsaved edits and refiles are respected."
                                       (lambda (m) (org-sm-weread--location-equal-p m (car matches))) marks)))
                        (car matches)))
              (rkey (when review (org-sm-weread--key "review" book-id (alist-get 'reviewId review))))
-             (new-review (and rkey (not (gethash rkey index)))))
+             (new-review (and rkey (not (gethash rkey index))))
+             (chapter (org-sm-weread--chapter mark chapters)))
         (if marker
             (when (and new-review
                        (org-sm-weread--append-review marker (alist-get 'content review) rkey index))
               (cl-incf appended))
           (org-sm-weread--create
-           (concat (org-sm-weread--body (alist-get 'markText mark) book book-id mark
-                                       (alist-get 'chapters data))
+           (concat (org-sm-weread--body (alist-get 'markText mark) book mark chapter)
                    (when new-review
                      (concat "\n\n想法：\n\n" (org-sm-weread--text (alist-get 'content review)))))
-           key index (when new-review rkey))
+           key index (org-sm-weread--olp book chapter) (when new-review rkey))
           (cl-incf created))))
     (dolist (review reviews)
-      (let ((key (org-sm-weread--key "review" book-id (alist-get 'reviewId review))))
+      (let ((key (org-sm-weread--key "review" book-id (alist-get 'reviewId review)))
+            (chapter (org-sm-weread--chapter review chapters)))
         (unless (gethash key index)
           (org-sm-weread--create
-           (org-sm-weread--body (alist-get 'content review) book book-id review
-                               (alist-get 'chapters data)) key index)
+           (org-sm-weread--body (alist-get 'content review) book review chapter)
+           key index (org-sm-weread--olp book chapter))
           (cl-incf created))))
     (cons created appended)))
 
