@@ -3,124 +3,942 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#16161e">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>org-sm review</title>
 <style>
-  :root { --bg:#1e1e2e; --fg:#cdd6f4; --dim:#6c7086; --card:#313244;
-           --again:#f38ba8; --hard:#fab387; --good:#a6e3a1; --easy:#94e2d5; }
-  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
-  html, body { margin:0; height:100%; }
-  body { background:var(--bg); color:var(--fg); font:17px/1.6 -apple-system,system-ui,sans-serif;
-         display:flex; flex-direction:column;
-         padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
-  header { padding:12px 16px; font-size:14px; color:var(--dim); border-bottom:1px solid var(--card); }
-  .count { color:var(--good); font-weight:600; }
-  main { flex:1; overflow-y:auto; padding:16px; }
-  .title { font-size:15px; color:var(--dim); margin-bottom:12px; }
-  .body { background:var(--card); border-radius:12px; padding:18px; white-space:pre-wrap;
-          word-break:break-word; font-size:18px; }
-  .cloze-hidden { background:var(--good); color:var(--bg); border-radius:5px; padding:0 8px; font-weight:600; }
-  .cloze-shown { color:var(--good); font-weight:600; }
-  .empty { text-align:center; color:var(--dim); margin-top:40vh; }
-  footer { padding:12px 16px calc(12px + env(safe-area-inset-bottom)); }
-  .btn-row { display:flex; gap:10px; }
-  button { flex:1; border:0; border-radius:12px; padding:16px 0; font:600 17px inherit;
-           color:var(--bg); cursor:pointer; touch-action:manipulation; }
-  button:active { filter:brightness(.85); }
-  button .sub { font-size:12px; font-weight:500; opacity:.75; margin-top:2px; }
-  .again { background:var(--again); } .hard { background:var(--hard); }
-  .good { background:var(--good); } .easy { background:var(--easy); }
-  .plain { background:var(--card); color:var(--fg); }
+  :root {
+    --bg: #16161e;
+    --surface: #1f2335;
+    --card: #24283b;
+    --border: #2f354f;
+    --text: #c0caf5;
+    --dim: #787c99;
+    --accent: #7aa2f7;
+    --again: #f7768e;
+    --hard: #ff9e64;
+    --good: #9ece6a;
+    --easy: #7dcfff;
+    --radius: 14px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f5f6fa;
+      --surface: #ffffff;
+      --card: #ffffff;
+      --border: #e2e4ed;
+      --text: #24283b;
+      --dim: #787c99;
+      --accent: #3d59a1;
+      --again: #d94a52;
+      --hard: #c96a1e;
+      --good: #2f8f3e;
+      --easy: #1a72c9;
+    }
+  }
+
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; padding: 0;
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.7 -apple-system, "PingFang SC", "Segoe UI", system-ui, sans-serif;
+    overflow: hidden;
+  }
+
+  body {
+    display: flex;
+    flex-direction: column;
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+
+  /* Header Bar */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-none: none;
+    font-size: 13px;
+  }
+  .progress-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .badge-count {
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .header-actions button {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 5px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    cursor: pointer;
+  }
+
+  #prog-bar {
+    height: 3px;
+    background: var(--accent);
+    width: 0%;
+    transition: width 0.2s ease;
+  }
+
+  /* Card Container */
+  main {
+    flex: 1;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .meta-info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--dim);
+    margin-bottom: 12px;
+  }
+  .tag-overdue {
+    color: var(--hard);
+    font-weight: 600;
+  }
+  .tag-book {
+    max-width: 60vw;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .card-box {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 18px 20px;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 180px;
+  }
+
+  .card-title {
+    font-size: 14px;
+    color: var(--dim);
+    font-weight: 600;
+    margin-bottom: 14px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .card-body {
+    font-size: 18px;
+    line-height: 1.85;
+    white-space: pre-wrap;
+    word-break: break-word;
+    flex: 1;
+  }
+
+  /* Cloze markers */
+  .cloze-hide {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+    color: var(--accent);
+    border: 1px solid var(--accent);
+    border-radius: 6px;
+    padding: 1px 8px;
+    font-weight: 700;
+    cursor: pointer;
+    user-select: none;
+  }
+  .cloze-show {
+    color: var(--good);
+    font-weight: 700;
+    border-bottom: 2px solid var(--good);
+    padding: 0 4px;
+  }
+
+  /* Footer Controls */
+  footer {
+    padding: 12px 16px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    flex-none: none;
+  }
+
+  .btn-row {
+    display: flex;
+    gap: 10px;
+  }
+  .btn-row + .btn-row {
+    margin-top: 10px;
+  }
+
+  .btn {
+    flex: 1;
+    border: 0;
+    border-radius: var(--radius);
+    padding: 12px 6px;
+    font-size: 16px;
+    font-weight: 600;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 52px;
+    touch-action: manipulation;
+  }
+  .btn:active { filter: brightness(0.85); }
+  .btn .sub {
+    font-size: 11px;
+    font-weight: 500;
+    opacity: 0.8;
+    margin-top: 2px;
+  }
+
+  .btn-good { background: var(--good); color: #16161e; }
+  .btn-again { background: var(--again); color: #16161e; }
+  .btn-hard { background: var(--hard); color: #16161e; }
+  .btn-easy { background: var(--easy); color: #16161e; }
+  .btn-ghost {
+    background: var(--card);
+    color: var(--text);
+    border: 1px solid var(--border);
+  }
+
+  /* Edit & Sync Modal Sheets */
+  #edit-modal, #sync-modal {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--bg);
+    z-index: 100;
+    display: none;
+    flex-direction: column;
+    padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
+  }
+  #edit-modal.active, #sync-modal.active {
+    display: flex;
+  }
+
+  .edit-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .edit-header h3 {
+    margin: 0;
+    font-size: 17px;
+  }
+  .edit-header button {
+    background: transparent;
+    border: 0;
+    font-size: 16px;
+    color: var(--accent);
+    cursor: pointer;
+    font-weight: 600;
+  }
+  .edit-header button.cancel {
+    color: var(--dim);
+    font-weight: 400;
+  }
+
+  .edit-fields {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px 0;
+    overflow-y: auto;
+  }
+  .edit-fields label {
+    font-size: 12px;
+    color: var(--dim);
+    font-weight: 600;
+  }
+  .edit-title-input {
+    width: 100%;
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 10px 14px;
+    border-radius: 10px;
+    font-size: 16px;
+    outline: none;
+  }
+  .edit-body-textarea {
+    width: 100%;
+    flex: 1;
+    min-height: 220px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 14px;
+    border-radius: 10px;
+    font: 16px/1.7 ui-monospace, Menlo, -apple-system, sans-serif;
+    outline: none;
+    resize: none;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .edit-toolbar {
+    display: flex;
+    gap: 10px;
+    padding: 10px 0;
+    border-top: 1px solid var(--border);
+  }
+  .edit-toolbar button {
+    flex: 1;
+    padding: 10px;
+    border-radius: 10px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  /* Empty state */
+  .empty-state {
+    margin: auto;
+    text-align: center;
+    color: var(--dim);
+  }
+  .empty-icon { font-size: 48px; margin-bottom: 12px; }
+
+  /* Toast Notification */
+  #toast {
+    position: fixed;
+    top: calc(env(safe-area-inset-top) + 60px);
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(36, 40, 59, 0.95);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 8px 18px;
+    border-radius: 20px;
+    font-size: 14px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    z-index: 200;
+  }
+  #toast.show { opacity: 1; }
 </style>
 </head>
 <body>
-<header>org-sm · <span class="count" id="count">–</span> due</header>
-<main id="main"><div class="empty" id="empty">Loading…</div></main>
-<footer id="footer"></footer>
-<script>
-const $ = id => document.getElementById(id);
-let queue = [], card = null, revealed = false;
 
-async function api(path, options) {
-  const response = await fetch(path, options);
-  const result = JSON.parse(await response.text());
-  if (result.error) throw new Error(result.error);
-  return result;
+<header>
+  <div class="progress-wrap">
+    <span>待复习: <span class="badge-count" id="count-left">-</span></span>
+  </div>
+  <div class="header-actions">
+    <button id="btn-open-sync">🔄 同步</button>
+    <button id="btn-open-edit">✎ 编辑卡片</button>
+  </div>
+</header>
+<div id="prog-bar"></div>
+
+<main id="main">
+  <div class="empty-state">
+    <div class="empty-icon">⏳</div>
+    <div>正在载入复习队列…</div>
+  </div>
+</main>
+
+<footer id="footer"></footer>
+
+<!-- Sync Modal Sheet -->
+<div id="sync-modal">
+  <div class="edit-header">
+    <button class="cancel" id="btn-sync-close">关闭</button>
+    <h3>Git 知识库同步</h3>
+    <button id="btn-sync-pull">拉取最新 (Pull)</button>
+  </div>
+  <div class="edit-fields" style="gap: 14px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <label>本地变更摘要 (Status & Stat)</label>
+      <button id="btn-sync-refresh" style="background:transparent;border:0;color:var(--accent);font-size:13px;cursor:pointer">刷新 ⟳</button>
+    </div>
+    <div id="sync-stat" style="font-size:12px;color:var(--dim);white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:8px;">正在检查...</div>
+
+    <label>变更详情 (Diff 预览)</label>
+    <div id="sync-diff-container" style="flex:1;min-height:220px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;overflow:auto;font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre;-webkit-overflow-scrolling:touch;">无变更</div>
+  </div>
+  <div style="padding:12px 0;border-top:1px solid var(--border);">
+    <button id="btn-sync-push" class="btn btn-good" style="width:100%">✓ 确认变更并提交推送 (Push)</button>
+  </div>
+</div>
+
+<!-- Edit Modal Sheet -->
+<div id="edit-modal">
+  <div class="edit-header">
+    <button class="cancel" id="btn-edit-cancel">取消</button>
+    <h3>修改卡片</h3>
+    <button id="btn-edit-save">保存</button>
+  </div>
+  <div class="edit-fields">
+    <label>标题 (Title)</label>
+    <input type="text" id="edit-title" class="edit-title-input" autocorrect="off">
+
+    <label>正文 (Org-mode 源码)</label>
+    <textarea id="edit-body" class="edit-body-textarea" spellcheck="false"></textarea>
+  </div>
+  <div class="edit-toolbar">
+    <button id="btn-tool-cloze">选区 {{挖空}}</button>
+    <button id="btn-tool-extract-topic">选区 → 新阅读卡</button>
+    <button id="btn-tool-extract-cloze">选区 → 新填空卡</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+
+const $ = id => document.getElementById(id);
+
+const API = {
+  token: new URLSearchParams(location.search).get("t")
+         || sessionStorage.getItem("org_sm_token") || "",
+  async call(path, params) {
+    let url = path;
+    if (this.token) {
+      url += (path.includes("?") ? "&" : "?") + "t=" + encodeURIComponent(this.token);
+    }
+    const opt = params ? {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams(params).toString()
+    } : {};
+    const res = await fetch(url, opt);
+    if (res.status === 401) throw new Error("令牌无效或已过期");
+    if (res.status === 409) throw new Error("卡片已被修改或评分，请刷新队列后重试");
+    const json = JSON.parse(await res.text() || "{}");
+    if (!res.ok || json.error) throw new Error(json.error || ("HTTP " + res.status));
+    return json;
+  }
+};
+
+const State = {
+  queue: [],
+  index: 0,
+  revealed: false,
+  totalInitial: 0,
+  busy: false,
+  get current() {
+    return this.queue[this.index] || null;
+  }
+};
+
+function toast(msg) {
+  const el = $("toast");
+  el.textContent = msg;
+  el.classList.add("show");
+  clearTimeout(el._timer);
+  el._timer = setTimeout(() => el.classList.remove("show"), 2000);
 }
-function post(path, params) {
-  return api(path, {method:'POST', headers:{'Content-Type':'application/x-www-form-urlencoded'},
-                    body:new URLSearchParams(params).toString()});
+
+function parseCloze(text) {
+  const parts = [];
+  const re = /\{\{([^}\n]+)\}\}/g;
+  let last = 0, m;
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) parts.push({ text: text.slice(last, m.index) });
+    parts.push({ cloze: m[1] });
+    last = re.lastIndex;
+  }
+  if (last < text.length) parts.push({ text: text.slice(last) });
+  return parts;
 }
-async function loadQueue() {
-  queue = await api('/api/queue');
-  $('count').textContent = queue.length;
-  if (queue.length) await showCard(queue[0].id); else done();
-}
-async function showCard(id) {
-  card = await api('/api/card/' + encodeURIComponent(id));
-  revealed = false;
-  render();
-}
-function done() {
-  card = null;
-  $('main').innerHTML = '<div class="empty">🎉 Done — nothing due</div>';
-  $('footer').innerHTML = '';
-}
-function renderCloze(tokens) {
-  return tokens.map(token => {
-    if ('text' in token) return document.createTextNode(token.text);
-    const span = document.createElement('span');
-    span.className = revealed ? 'cloze-shown' : 'cloze-hidden';
-    span.textContent = revealed ? '[' + token.cloze + ']' : '[___]';
-    return span;
-  });
-}
-function button(label, interval, className, action) {
-  const element = document.createElement('button');
-  element.className = className;
-  element.onclick = action;
-  element.innerHTML = '<div>' + label + '</div><div class="sub">' + (interval || '&nbsp;') + '</div>';
-  return element;
-}
-function row(...buttons) {
-  const element = document.createElement('div');
-  element.className = 'btn-row'; element.append(...buttons); return element;
-}
+
 function render() {
-  const main = $('main'); main.innerHTML = '';
-  const title = document.createElement('div'); title.className = 'title'; title.textContent = card.title;
-  const body = document.createElement('div'); body.className = 'body';
-  if (card.type === 'cloze') body.append(...renderCloze(card.clozes)); else body.textContent = card.body;
-  main.append(title, body);
-  const footer = $('footer'); footer.innerHTML = '';
-  if (card.type === 'cloze' && !revealed) {
-    footer.append(row(button('Show', null, 'good', () => { revealed = true; render(); })));
-  } else if (card.type === 'cloze') {
-    const intervals = card.intervals || {};
-    footer.append(row(button('Again', intervals.again, 'again', () => review({rating:'again'})),
-                      button('Hard', intervals.hard, 'hard', () => review({rating:'hard'})),
-                      button('Good', intervals.good, 'good', () => review({rating:'good'})),
-                      button('Easy', intervals.easy, 'easy', () => review({rating:'easy'}))));
+  const c = State.current;
+  const main = $("main");
+  const footer = $("footer");
+
+  $("btn-open-edit").style.display = c ? "inline-block" : "none";
+  updateProgress();
+
+  if (!c) {
+    main.innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">🎉</div>
+        <div style="font-size:18px;font-weight:600;margin-bottom:6px">已完成全部复习</div>
+        <div>没有待复习的卡片了</div>
+      </div>`;
+    footer.innerHTML = "";
+    return;
+  }
+
+  // Render meta info & card
+  main.innerHTML = "";
+
+  const meta = document.createElement("div");
+  meta.className = "meta-info";
+  const overdue = document.createElement("span");
+  overdue.className = "tag-overdue";
+  overdue.textContent = c.overdue > 0 ? `逾期 ${c.overdue} 天` : "今日到期";
+  const book = document.createElement("span");
+  book.className = "tag-book";
+  book.textContent = c.book ? `《${c.book}》` : "";
+  const spacer = document.createElement("span");
+  spacer.style.flex = "1";
+  const type = document.createElement("span");
+  type.textContent = c.type === "cloze" ? "填空卡" : "阅读卡";
+  meta.append(overdue, book, spacer, type);
+  main.appendChild(meta);
+
+  const box = document.createElement("div");
+  box.className = "card-box";
+
+  const title = document.createElement("div");
+  title.className = "card-title";
+  title.textContent = c.title || "（无标题）";
+  box.appendChild(title);
+
+  const body = document.createElement("div");
+  body.className = "card-body";
+
+  if (c.type === "cloze") {
+    const tokens = parseCloze(c.body || "");
+    tokens.forEach(tok => {
+      if (tok.text !== undefined) {
+        body.appendChild(document.createTextNode(tok.text));
+      } else {
+        const span = document.createElement("span");
+        if (State.revealed) {
+          span.className = "cloze-show";
+          span.textContent = tok.cloze;
+        } else {
+          span.className = "cloze-hide";
+          span.textContent = "[___]";
+          span.onclick = (e) => {
+            e.stopPropagation();
+            State.revealed = true;
+            render();
+          };
+        }
+        body.appendChild(span);
+      }
+    });
   } else {
-    const intervals = card.intervals || {};
-    footer.append(row(button('Reschedule', intervals.reschedule, 'good', () => review({action:'reschedule'})),
-                      button('Postpone', null, 'hard', postpone),
-                      button('Dismiss', null, 'plain', () => review({action:'dismiss'}))));
+    body.textContent = c.body || "";
+  }
+
+  box.appendChild(body);
+  main.appendChild(box);
+
+  // Render action footer
+  renderButtons(footer, c);
+  footer.querySelectorAll("button").forEach(btn => { btn.disabled = State.busy; });
+}
+
+function renderButtons(footer, c) {
+  footer.innerHTML = "";
+  const iv = c.intervals || {};
+
+  if (c.type === "cloze" && !State.revealed) {
+    const row = document.createElement("div");
+    row.className = "btn-row";
+    row.innerHTML = `<button class="btn btn-good" id="btn-show-cloze">显示答案 (空格)</button>`;
+    footer.appendChild(row);
+    $("btn-show-cloze").onclick = () => {
+      State.revealed = true;
+      render();
+    };
+    return;
+  }
+
+  if (c.type === "cloze" && State.revealed) {
+    const row = document.createElement("div");
+    row.className = "btn-row";
+    row.innerHTML = `
+      <button class="btn btn-again" data-rating="again">重来<span class="sub">${iv.again || "10m"}</span></button>
+      <button class="btn btn-hard" data-rating="hard">困难<span class="sub">${iv.hard || "1d"}</span></button>
+      <button class="btn btn-good" data-rating="good">良好<span class="sub">${iv.good || "3d"}</span></button>
+      <button class="btn btn-easy" data-rating="easy">简单<span class="sub">${iv.easy || "7d"}</span></button>
+    `;
+    footer.appendChild(row);
+    row.querySelectorAll("button").forEach(btn => {
+      btn.onclick = () => reviewCloze(btn.dataset.rating);
+    });
+    return;
+  }
+
+  // Topic card controls
+  const r1 = document.createElement("div");
+  r1.className = "btn-row";
+  r1.innerHTML = `
+    <button class="btn btn-good" id="btn-topic-rsch">已读确认<span class="sub">间隔 ${iv.reschedule || "自动"}</span></button>
+    <button class="btn btn-hard" id="btn-topic-postpone">稍后<span class="sub">推迟几天</span></button>
+  `;
+  footer.appendChild(r1);
+
+  const r2 = document.createElement("div");
+  r2.className = "btn-row";
+  r2.innerHTML = `
+    <button class="btn btn-ghost" id="btn-topic-skip">跳过本卡</button>
+    <button class="btn btn-ghost" id="btn-topic-dismiss">不再复习</button>
+  `;
+  footer.appendChild(r2);
+
+  $("btn-topic-rsch").onclick = () => reviewTopic("reschedule");
+  $("btn-topic-postpone").onclick = promptPostpone;
+  $("btn-topic-skip").onclick = skipCurrent;
+  $("btn-topic-dismiss").onclick = () => reviewTopic("dismiss");
+}
+
+function updateProgress() {
+  const left = State.queue.length;
+  $("count-left").textContent = left;
+  const done = Math.max(0, State.totalInitial - left);
+  const pct = State.totalInitial ? (done / State.totalInitial * 100) : 0;
+  $("prog-bar").style.width = pct + "%";
+}
+
+async function sendReview(params, successMessage) {
+  const c = State.current;
+  if (!c || State.busy) return;
+  State.busy = true;
+  render();
+  try {
+    const result = await API.call(`/api/review/${encodeURIComponent(c.id)}`,
+                                  { ...params, revision: c.revision });
+    toast(successMessage(result, c));
+    advanceQueue();
+  } catch (e) {
+    toast("操作失败: " + e.message);
+  } finally {
+    State.busy = false;
+    render();
   }
 }
-async function postpone() {
-  const input = prompt('Postpone days:', '7');
-  if (input === null) return;
-  const days = Number.parseInt(input, 10);
-  if (!Number.isFinite(days) || days < 1) return;
-  await review({action:'postpone', days});
+
+function reviewCloze(rating) {
+  return sendReview({ rating }, (_result, c) =>
+    rating + " (下次: " + ((c.intervals || {})[rating] || "已排程") + ")");
 }
-async function review(params) {
-  await post('/api/review/' + encodeURIComponent(card.id), params);
-  queue.shift(); $('count').textContent = queue.length;
-  if (queue.length) await showCard(queue[0].id); else done();
+
+function reviewTopic(action, days) {
+  const params = { action };
+  if (days) params.days = days;
+  return sendReview(params, result => {
+    if (action === "dismiss") return "已移出复习队列";
+    if (action === "postpone") return `已推迟 ${days} 天`;
+    return "已读确认 (下次: " + (result["interval-days"] ?
+      result["interval-days"] + "天" : "已排程") + ")";
+  });
 }
-loadQueue().catch(error => { $('empty').textContent = 'Error: ' + error.message; });
+
+function promptPostpone() {
+  const val = prompt("推迟几天后再读？", "7");
+  if (!val) return;
+  const days = Number(val);
+  if (!Number.isInteger(days) || days < 1 || days > 3650) {
+    toast("请输入 1–3650 之间的整数天数");
+    return;
+  }
+  reviewTopic("postpone", days);
+}
+
+function skipCurrent() {
+  if (State.busy || State.queue.length <= 1) return;
+  const cur = State.queue.splice(State.index, 1)[0];
+  State.queue.push(cur);
+  State.revealed = false;
+  render();
+  toast("已移至队列末尾");
+}
+
+function advanceQueue() {
+  State.queue.splice(State.index, 1);
+  if (State.index >= State.queue.length) {
+    State.index = 0;
+  }
+  State.revealed = false;
+  render();
+}
+
+/* ---------------------- Native iOS Editing Sheet ---------------------- */
+
+function openEditSheet() {
+  const c = State.current;
+  if (!c || State.busy) return;
+  $("edit-title").value = c.title || "";
+  $("edit-body").value = c.body || "";
+  $("edit-modal").classList.add("active");
+  $("edit-body").focus();
+}
+
+function closeEditSheet() {
+  $("edit-modal").classList.remove("active");
+}
+
+async function saveEditSheet() {
+  const c = State.current;
+  if (!c) return false;
+  const newTitle = $("edit-title").value.trim();
+  const newBody = $("edit-body").value;
+  if (newTitle === c.title && newBody === c.body) {
+    closeEditSheet();
+    return true;
+  }
+  try {
+    const res = await API.call(`/api/patch/${encodeURIComponent(c.id)}`, {
+      title: newTitle, body: newBody, revision: c.revision
+    });
+    c.body = res.body;
+    c.title = res.title;
+    c.revision = res.revision;
+    toast("保存成功");
+    closeEditSheet();
+    render();
+    return true;
+  } catch (e) {
+    alert("保存失败: " + e.message);
+    return false;
+  }
+}
+
+// Wrap selected text in textarea with {{...}}
+function toolWrapCloze() {
+  const area = $("edit-body");
+  const s = area.selectionStart;
+  const e = area.selectionEnd;
+  if (s === e) {
+    toast("请先用手指选中要挖空的文字");
+    return;
+  }
+  const val = area.value;
+  const selText = val.slice(s, e);
+  area.value = val.slice(0, s) + "{{" + selText + "}}" + val.slice(e);
+  area.selectionStart = s;
+  area.selectionEnd = e + 4;
+  area.focus();
+}
+
+async function toolExtract(type) {
+  const c = State.current;
+  if (!c || State.busy) return;
+  const area = $("edit-body");
+  const raw = area.value;
+  const s = area.selectionStart;
+  const e = area.selectionEnd;
+  if (s === e) {
+    toast("请先选中要摘录的文本区域");
+    return;
+  }
+  State.busy = true;
+  try {
+    // Save first, but never extract if saving failed or changed the selection.
+    if (!await saveEditSheet()) return;
+    const leading = raw.length - raw.trimStart().length;
+    if (raw.trim() !== c.body || s < leading || e > raw.length - (raw.length - raw.trimEnd().length)) {
+      openEditSheetAfterExtractFailure(c);
+      alert("正文已规范化，请重新选择要提取的文字");
+      return;
+    }
+    // textarea offsets are UTF-16 code units; Emacs buffer offsets count characters.
+    const start = Array.from(raw.slice(leading, s)).length;
+    const end = Array.from(raw.slice(leading, e)).length;
+    const res = await API.call(`/api/extract/${encodeURIComponent(c.id)}`, {
+      start: String(start), end: String(end), type, revision: c.revision
+    });
+    toast(type === "cloze" ? "已创建填空子卡" : "已创建阅读子卡");
+    c.body = res.parent.body;
+    c.title = res.parent.title;
+    c.revision = res.parent.revision;
+    render();
+  } catch (err) {
+    openEditSheetAfterExtractFailure(c);
+    alert("提取子卡失败: " + err.message);
+  } finally {
+    State.busy = false;
+    render();
+  }
+}
+
+function openEditSheetAfterExtractFailure(c) {
+  $("edit-title").value = c.title || "";
+  $("edit-body").value = c.body || "";
+  $("edit-modal").classList.add("active");
+}
+
+/* ---------------------- Git Sync Sheet ---------------------- */
+
+function renderDiff(text) {
+  if (!text || !text.trim()) {
+    return '<span style="color:var(--dim)">无已跟踪文件的差异（未跟踪文件内容不在此显示）</span>';
+  }
+  return text.split("\n").map(line => {
+    const esc = line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    if (line.startsWith("+") && !line.startsWith("+++")) {
+      return `<div style="color:var(--good);background:color-mix(in srgb, var(--good) 12%, transparent);">${esc}</div>`;
+    } else if (line.startsWith("-") && !line.startsWith("---")) {
+      return `<div style="color:var(--again);background:color-mix(in srgb, var(--again) 12%, transparent);">${esc}</div>`;
+    } else if (line.startsWith("@@")) {
+      return `<div style="color:var(--accent);font-weight:700;margin:4px 0;">${esc}</div>`;
+    } else if (line.startsWith("diff ") || line.startsWith("index ")) {
+      return `<div style="color:var(--dim);font-weight:600;">${esc}</div>`;
+    }
+    return `<div>${esc}</div>`;
+  }).join("");
+}
+
+async function loadGitDiff() {
+  $("sync-stat").textContent = "正在检查 Git 状态...";
+  $("sync-diff-container").innerHTML = "正在拉取变动...";
+  const pushBtn = $("btn-sync-push");
+  pushBtn.disabled = true;
+
+  try {
+    const res = await API.call("/api/git/diff");
+    if (!res.ok) throw new Error(res.error || "获取 Diff 失败");
+    $("sync-stat").textContent = (res.status || "无本地变更") +
+      (res.stat ? ("\n\n" + res.stat) : "") +
+      (res.outgoing ? `\n\n已有 ${res.outgoing} 个本地提交待推送（涉及整个 Git 分支）` : "");
+    $("sync-diff-container").innerHTML = renderDiff(res.diff) +
+      (res.status.includes("??") ? "<p>⚠ 未跟踪文件只列出名称，内容未预览。</p>" : "");
+
+    if (res.hasChanges || res.outgoing) {
+      pushBtn.disabled = false;
+      pushBtn.className = "btn btn-good";
+      pushBtn.textContent = res.hasChanges ? "✓ 确认变更并提交推送 (Push)" : "重试推送现有提交 (Push)";
+    } else {
+      pushBtn.disabled = true;
+      pushBtn.className = "btn btn-ghost";
+      pushBtn.textContent = "无本地变更或待推送提交";
+    }
+  } catch (e) {
+    $("sync-stat").textContent = "检查失败: " + e.message;
+    $("sync-diff-container").textContent = "无法获取 diff: " + e.message;
+  }
+}
+
+function openSyncModal() {
+  if (State.busy) return;
+  $("sync-modal").classList.add("active");
+  loadGitDiff();
+}
+
+function closeSyncModal() {
+  $("sync-modal").classList.remove("active");
+}
+
+async function syncPull() {
+  const pullBtn = $("btn-sync-pull");
+  pullBtn.disabled = true;
+  pullBtn.textContent = "拉取中...";
+  try {
+    const res = await API.call("/api/git/sync", { action: "pull" });
+    toast(res.output ? ("拉取完成:\n" + res.output.slice(0, 40)) : "拉取完成");
+    await init();
+    await loadGitDiff();
+  } catch (e) {
+    alert("Git Pull 失败: " + e.message);
+  } finally {
+    pullBtn.disabled = false;
+    pullBtn.textContent = "拉取最新 (Pull)";
+  }
+}
+
+async function syncPush() {
+  const pushBtn = $("btn-sync-push");
+  if (!confirm("确认提交卡片目录的变更并推送整个 Git 分支？未跟踪文件内容未在预览中显示。")) return;
+  pushBtn.disabled = true;
+  pushBtn.textContent = "正在提交并推送...";
+  try {
+    const res = await API.call("/api/git/sync", { action: "push" });
+    toast(res.commit || "提交并推送成功");
+    await loadGitDiff();
+    setTimeout(() => {
+      closeSyncModal();
+    }, 1200);
+  } catch (e) {
+    alert("Git Push 失败: " + e.message);
+    pushBtn.disabled = false;
+    pushBtn.textContent = "重试提交推送 (Push)";
+  }
+}
+
+/* ---------------------- Keyboard & Boot ---------------------- */
+
+window.addEventListener("keydown", (e) => {
+  if ($("edit-modal").classList.contains("active") || State.busy) return;
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+
+  const c = State.current;
+  if (!c) return;
+
+  if (e.code === "Space") {
+    e.preventDefault();
+    if (c.type === "cloze" && !State.revealed) {
+      State.revealed = true;
+      render();
+    } else if (c.type === "topic") {
+      reviewTopic("reschedule");
+    }
+  } else if (c.type === "cloze" && State.revealed) {
+    if (e.key === "1") reviewCloze("again");
+    else if (e.key === "2") reviewCloze("hard");
+    else if (e.key === "3") reviewCloze("good");
+    else if (e.key === "4") reviewCloze("easy");
+  }
+});
+
+$("btn-open-edit").onclick = openEditSheet;
+$("btn-edit-cancel").onclick = closeEditSheet;
+$("btn-edit-save").onclick = async () => {
+  if (State.busy) return;
+  State.busy = true;
+  try { await saveEditSheet(); } finally { State.busy = false; render(); }
+};
+$("btn-tool-cloze").onclick = toolWrapCloze;
+$("btn-tool-extract-topic").onclick = () => toolExtract("topic");
+$("btn-tool-extract-cloze").onclick = () => toolExtract("cloze");
+
+$("btn-open-sync").onclick = openSyncModal;
+$("btn-sync-close").onclick = closeSyncModal;
+$("btn-sync-refresh").onclick = loadGitDiff;
+$("btn-sync-pull").onclick = syncPull;
+$("btn-sync-push").onclick = syncPush;
+
+async function init() {
+  if (API.token) {
+    sessionStorage.setItem("org_sm_token", API.token);
+  }
+  try {
+    const list = await API.call("/api/session");
+    State.queue = list;
+    State.totalInitial = list.length;
+    State.index = 0;
+    render();
+  } catch (e) {
+    $("main").innerHTML = `
+      <div class="empty-state">
+        <div class="empty-icon">${e.message.includes("令牌") ? "🔑" : "⚠️"}</div>
+        <div style="font-size:16px;font-weight:600;margin-bottom:6px">${e.message.includes("令牌") ? "需要访问令牌" : "载入失败"}</div>
+        <div>${e.message}</div>
+      </div>`;
+  }
+}
+
+init();
 </script>
 </body>
 </html>

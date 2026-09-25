@@ -196,26 +196,39 @@ why).  Customize via ~org-sm-gptel-system-topic~ / ~-cloze~ (refine),
 ~-split~ (the child-splitting addendum used by refine+subcard),
 ~-simplify~ (the simplify prompt) and ~-explain~.
 
-* Web review (org-sm-web)
+* Web review & mobile editing (org-sm-web)
 
-Optional phone browser UI for reviewing due cards; needs
-[[https://github.com/skeeto/emacs-web-server][simple-httpd]].  It intentionally
-supports only review: capture, editing, extraction, and AI work stay in the
-Emacs commands, so there is one authoring workflow.
+Phone browser UI for reviewing and editing due cards over a local network; needs
+[[https://github.com/skeeto/emacs-web-server][simple-httpd]].  It supports Anki-style review, one-click cloze reveal, rating,
+topic rescheduling, and a native iOS-optimized editing sheet with text selection,
+cloze creation (~{{...}}~), and child card extraction.
 
 #+begin_src elisp
 (require 'org-sm-web)
-(setq org-sm-web-bind "0.0.0.0") ; explicit opt-in for a trusted LAN
-(org-sm-web-start)
+(org-sm-web-start) ; prints http://LAN-IP:8842/ for your phone
 #+end_src
 
-The server defaults to ~127.0.0.1~ because it has no authentication.  Its
-three endpoints are ~GET /api/queue~, ~GET /api/card/:id~, and
-~POST /api/review/:id~ (cloze ~rating=~; topic ~action=~ with optional
-~days=~).  Do not expose it to an untrusted network.
+On startup the server listens on ~0.0.0.0~ and prints a URL such as
+~http://192.168.31.17:8842/~.  Open it from a phone on the same *trusted*
+LAN.  This default is not authenticated; do not expose the HTTP port to the
+Internet.  For SSH-only access, set ~org-sm-web-bind~ to ~"127.0.0.1"~ before
+starting, forward phone port 8842 over SSH to ~127.0.0.1:8842~, then open
+~http://localhost:8842/~.  ~org-sm-web-token~ can add a ~?t=TOKEN~ check but
+does not encrypt HTTP traffic.  If the displayed LAN URL is unreachable,
+check the phone's Wi-Fi network and the host firewall.  The snapshot carries
+a revision for each card; stale writes are rejected rather than silently
+replacing concurrent edits or reviews.
 
-The UI offers *Show* then cloze ratings, or topic *Reschedule*, *Postpone*,
-and *Dismiss*.
+Its core endpoints are:
+- ~GET /api/session~: Preloads the entire due queue (~90KB JSON) in a single request.
+- ~POST /api/review/:id~: Rates or reschedules a card (~rating=~ or ~action=~).
+- ~POST /api/patch/:id~: Saves edits to card title and body.
+- ~POST /api/extract/:id~: Extracts a selected text region into a new child card.
+- ~GET /api/git/diff~: Shows notes status and tracked changes (staged and unstaged).
+  Untracked file *names*, but not their contents, appear in the preview.
+- ~POST /api/git/sync~: Pulls (only with saved notes buffers), or commits only
+  paths under ~org-sm-directory~ and pushes.  These synchronous Git commands
+  block Emacs until they finish; do not use this endpoint with untrusted repos.
 
 * Maintenance
 

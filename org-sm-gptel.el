@@ -301,6 +301,9 @@ Applies `org-sm-gptel-agent-preset' so the AI can read book skills and
 
 ;;;; ---- AI card action (refine + optional child split, one call) ------------
 
+(defvar-local org-sm-gptel--request-serial 0
+  "Generation of the latest AI request in this workbench buffer.")
+
 (defconst org-sm-gptel--card-schema
   '(:type "object"
     :properties
@@ -384,7 +387,9 @@ regardless of which mode produced them.  Workbench only, see
          (label  (completing-read "AI 动作：" (mapcar #'car org-sm-gptel--card-modes)
                                   nil t))
          (mode   (or (cdr (assoc label org-sm-gptel--card-modes)) 'custom))
-         (custom (and (eq mode 'custom) (read-string "提示词："))))
+         (custom (and (eq mode 'custom) (read-string "提示词：")))
+         (tick   (buffer-chars-modified-tick))
+         (serial (cl-incf org-sm-gptel--request-serial)))
     (when (string-empty-p raw) (user-error "Buffer is empty"))
     (when (and (eq mode 'custom) (string-empty-p (string-trim (or custom ""))))
       (user-error "Custom mode needs a prompt"))
@@ -395,6 +400,10 @@ regardless of which mode produced them.  Workbench only, see
        (cond
         (err (message "org-sm AI failed: %s" err))
         ((not (buffer-live-p buf)) (message "org-sm AI: buffer gone"))
+        ((with-current-buffer buf
+           (or (/= serial org-sm-gptel--request-serial)
+               (/= tick (buffer-chars-modified-tick))))
+         (message "org-sm AI: draft changed or newer request exists; result ignored"))
         (t
          (with-current-buffer buf (org-sm-capture-fill-body-and-cards body cards))
          (message "org-sm: AI %s done%s — edit, then C-c C-c" label

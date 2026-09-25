@@ -640,7 +640,13 @@ NAME defaults to a shared \"*org-sm capture*\" buffer.  SETUP, when given,
 is called with point in the new buffer after CONTENT is inserted -- use it
 to set `org-sm-capture-parent-marker' / `org-sm-capture-card-type'
 buffer-locally for callers that aren't the plain top-level capture flow."
-  (let ((buf (get-buffer-create (or name "*org-sm capture*"))))
+  (let* ((name (or name "*org-sm capture*"))
+         (existing (get-buffer name))
+         (buf (or existing (get-buffer-create name))))
+    ;; Reusing a draft name must not silently erase text typed in a prior sheet.
+    (when (and existing (with-current-buffer existing
+                          (not (string-blank-p (buffer-string)))))
+      (user-error "Finish or abort the existing draft in %s first" name))
     (with-current-buffer buf
       (unless (derived-mode-p 'org-sm-capture-mode) (org-sm-capture-mode))
       (kill-local-variable 'org-sm-capture-parent-marker)
