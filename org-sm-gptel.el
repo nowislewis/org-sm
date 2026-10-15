@@ -13,6 +13,9 @@
 ;; Commands:
 ;;   org-sm-gptel-explain       - AI explains a heading TO you (why-before-what,
 ;;                                3 layers).  Persistent side-window chat.
+;;   org-sm-gptel-pick          - While reviewing a topic (x): AI picks ONE passage
+;;                                to extract as a child card, with a one-line
+;;                                reason; never rewrites the source body.
 ;;   org-sm-gptel-card-ai       - In an `org-sm-card-workbench' buffer (C-c C-a):
 ;;                                prompts for a mode (refine / refine+subcard /
 ;;                                simplify / custom instruction), then ONE AI
@@ -166,6 +169,33 @@ just noise.  Never combined with `org-sm-gptel-system-split' -- simplify
 never proposes child cards."
   :type 'string :group 'org-sm-gptel)
 
+(defcustom org-sm-gptel-system-pick
+  "你是 SuperMemo 渐进阅读专家。用户正在复习一张较长的 topic 卡，不知道该先提取什么。
+任务：只挑出【一段】最值得单独提取成子 topic 的内容。一次只做一步，剩下的内容留在原卡，下次再挑。
+
+挑选优先级：
+1. 作者的核心主张 / 结论。
+2. 关键定义。
+3. 关键因果链（为什么）。
+细节、例子、铺垫不挑。
+
+子卡要求：
+- 正文从原文摘取（提取是复制），保持原意和因果连接词；只做最小改动：把代词替换为具体名词、
+  删掉与本段无关的半句，使它脱离原文仍能读懂。不扩写、不总结、不引入新事实。
+- 标题用一句完整论断（可被其他卡引用），不含 [T] 前缀。
+- 只挑一段，宁缺毋滥。
+
+如果原文已经足够短、或没有值得单独提取的内容，cards 返回空数组，
+并在理由里建议「直接推后」或「可以 dismiss」。
+
+只输出结构化结果：{body: 一句话理由（为什么挑这段，或为什么不挑）, cards: 至多一个子卡}。"
+  "System prompt for `org-sm-gptel-pick' (the `pick' mode).
+Unlike the refine modes, BODY in the response is a one-line reason, not a
+refined body: the source card's text is never rewritten.  Answers the
+review-time question \"what do I extract from this long topic?\" one step at
+a time, so the user never has to plan a whole card's split up front."
+  :type 'string :group 'org-sm-gptel)
+
 (defconst org-sm-gptel--card-modes
   '(("refine"         . refine)
     ("refine+subcard" . refine+subcard)
@@ -192,12 +222,15 @@ requested through the same `org-sm-gptel--card-schema'.  Used by
 `org-sm-gptel-card-ai' for `org-sm-card-workbench' buffers."
   (let ((refine (if (eq type 'cloze) org-sm-gptel-system-cloze org-sm-gptel-system-topic))
         (contract "\n\n只输出结构化结果：{body: 优化后的正文, cards: 子卡数组（可为空）}。"))
-    (concat (pcase mode
-              ('refine         refine)
-              ('refine+subcard (concat refine org-sm-gptel-system-split))
-              ('simplify       org-sm-gptel-system-simplify)
-              ('custom         (string-trim custom)))
-            contract)))
+    (pcase mode
+      ;; pick carries its own contract: BODY is a reason, not a body.
+      ('pick org-sm-gptel-system-pick)
+      (_ (concat (pcase mode
+                   ('refine         refine)
+                   ('refine+subcard (concat refine org-sm-gptel-system-split))
+                   ('simplify       org-sm-gptel-system-simplify)
+                   ('custom         (string-trim custom)))
+                 contract)))))
 
 ;;;; ---- Internal helpers ----------------------------------------------------
 
@@ -380,19 +413,27 @@ regardless of which mode produced them.  Workbench only, see
 `org-sm-gptel--workbench-only'."
   (interactive)
   (org-sm-gptel--workbench-only)
+  (let* ((label  (completing-read "AI 动作：" (mapcar #'car org-sm-gptel--card-modes)
+                                  nil t))
+         (mode   (or (cdr (assoc label org-sm-gptel--card-modes)) 'custom))
+         (custom (and (eq mode 'custom) (read-string "提示词："))))
+    (when (and (eq mode 'custom) (string-empty-p (string-trim (or custom ""))))
+      (user-error "Custom mode needs a prompt"))
+    (org-sm-gptel--card-run mode label custom)))
+
+(defun org-sm-gptel--card-run (mode label custom)
+  "Send this workbench's text to the AI in MODE and render the result.
+LABEL names the mode in messages; CUSTOM is the prompt for `custom'.
+Shared by `org-sm-gptel-card-ai' and `org-sm-gptel-pick'.  Discards a
+response if the buffer was edited or a newer request was sent meanwhile,
+so an async reply never clobbers manual edits."
   (let* ((raw    (string-trim (buffer-substring-no-properties
                                (point-min) (point-max))))
          (type   org-sm-capture-card-type)
          (buf    (current-buffer))
-         (label  (completing-read "AI 动作：" (mapcar #'car org-sm-gptel--card-modes)
-                                  nil t))
-         (mode   (or (cdr (assoc label org-sm-gptel--card-modes)) 'custom))
-         (custom (and (eq mode 'custom) (read-string "提示词：")))
          (tick   (buffer-chars-modified-tick))
          (serial (cl-incf org-sm-gptel--request-serial)))
     (when (string-empty-p raw) (user-error "Buffer is empty"))
-    (when (and (eq mode 'custom) (string-empty-p (string-trim (or custom ""))))
-      (user-error "Custom mode needs a prompt"))
     (message "org-sm: asking AI (%s)..." label)
     (org-sm-gptel--card-request
      raw type mode custom
@@ -404,6 +445,8 @@ regardless of which mode produced them.  Workbench only, see
            (or (/= serial org-sm-gptel--request-serial)
                (/= tick (buffer-chars-modified-tick))))
          (message "org-sm AI: draft changed or newer request exists; result ignored"))
+        ((eq mode 'pick)
+         (with-current-buffer buf (org-sm-gptel--render-pick body cards)))
         (t
          (with-current-buffer buf (org-sm-capture-fill-body-and-cards body cards))
          (message "org-sm: AI %s done%s — edit, then C-c C-c" label
@@ -411,6 +454,31 @@ regardless of which mode produced them.  Workbench only, see
                       (format " + %d card%s"
                               (length cards) (if (= (length cards) 1) "" "s"))
                     ""))))))))
+
+(defun org-sm-gptel--render-pick (reason cards)
+  "Render a `pick' result: at most one card, REASON in the header line.
+The preamble is left empty, so \\`C-c C-c' only adds the child card and
+never rewrites the source card's body.  REASON stays out of the buffer
+text for the same reason: header-line text is never committed."
+  (org-sm-capture-fill-body-and-cards "" (seq-take cards 1))
+  (setq-local header-line-format (concat " 💡 " reason))
+  (message (if cards
+               "org-sm: 挑了一段 — 可以改，C-c C-c 提交，C-c C-k 放弃"
+             "org-sm: 没有值得提取的 — C-c C-k 返回")))
+
+;;;###autoload
+(defun org-sm-gptel-pick ()
+  "Ask the AI to pick ONE passage of the topic at point to extract.
+Opens `org-sm-card-workbench' on the card and requests the `pick' mode:
+the result is at most one child card plus a one-line reason (header line).
+Edit it freely; \\`C-c C-c' adds it as a child card, leaving the source
+body untouched, and returns you to the card -- continue the review
+yourself.  \\`C-c C-k' discards.  One step per review: what is not picked
+now stays in the card for next time."
+  (interactive)
+  (unless (eq (org-sm-type) 'topic) (user-error "Pick works on topic cards"))
+  (with-current-buffer (org-sm-card-workbench)
+    (org-sm-gptel--card-run 'pick "挑一段" nil)))
 
 ;; Wire the AI action into the core capture workbench when gptel is present.
 (with-eval-after-load 'org-sm

@@ -72,6 +72,8 @@ Requires Emacs 29.1+, org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
 * Review Flow
 
 - *topic:* ~review-start~ → read → ~review-confirm~ (reschedules, next item).
+  Press ~x~ instead of ~r~ to have the AI pick one passage to extract into a
+  child card (optional, needs ~org-sm-gptel~); it does not advance the queue.
 - *cloze:* ~review-start~ (hidden) → ~review-confirm~ (reveals) →
   ~review-confirm~ (rate).
 
@@ -166,6 +168,7 @@ All commands act on an *existing* card.  The workbench key is bound in
 |-----------+-----------------------------+-------------------------------------------|
 | ~C-c s ?~ | ~org-sm-gptel-explain~      | Chat that explains this heading *to you*  |
 | ~C-c C-a~ | ~org-sm-gptel-card-ai~      | Workbench: pick a mode, AI refines/splits |
+| ~x~       | ~org-sm-gptel-pick~         | Review: extract ONE passage from this topic |
 
 *explain* — persistent side-window chat, why-before-what: motive and causal
 chain first, definition second; ends by asking which word the sentence can't
@@ -194,7 +197,24 @@ cleans prose for incremental reading (strip filler, resolve pronouns, keep
 paragraphs and causal links, flag ~【需补充】~ when a conclusion lacks its
 why).  Customize via ~org-sm-gptel-system-topic~ / ~-cloze~ (refine),
 ~-split~ (the child-splitting addendum used by refine+subcard),
-~-simplify~ (the simplify prompt) and ~-explain~.
+~-simplify~ (the simplify prompt), ~-pick~ and ~-explain~.
+
+** ~org-sm-gptel-pick~ (=x= while reviewing a topic)
+
+The answer to "this topic is long and I don't know what to extract".  Press
+~x~ in the topic review menu instead of ~r~; it opens the workbench and
+asks the AI for *one* passage worth pulling out, plus a one-line reason
+shown in the header line.
+
+- The source card's body is *never* rewritten — the reason lives only in the
+  header line, which is never committed.
+- At most one candidate.  Everything it did not pick stays in the card for
+  next time, so the whole split never has to be planned up front.
+- It may answer "nothing worth extracting", in which case postpone or
+  dismiss by hand.
+- Edit the candidate, then ~C-c C-c~ adds it as a child card.  You stay on
+the card: rate it with ~r~, pick another passage, or postpone.  Nothing
+advances the queue for you.
 
 * Web review & mobile editing (org-sm-web)
 

@@ -48,6 +48,7 @@
 (require 'fsrs)
 
 (declare-function org-sm-gptel-explain "org-sm-gptel")
+(declare-function org-sm-gptel-pick "org-sm-gptel")
 (declare-function org-sm-gptel-card-ai "org-sm-gptel")
 (declare-function notifications-notify "notifications")
 
@@ -1074,7 +1075,8 @@ collects the user's choice and advances the queue."
   (let* ((auto-ivl (org-sm--topic-read (org-sm--topic-afactor)))
          (choices  `((?r ,(format "rsch(%dd)" auto-ivl))
                      (?p "postpone")
-                     (?e "explain"))))
+                     (?e "explain")
+                     ,@(when (fboundp 'org-sm-gptel-pick) '((?x "pick"))))))
     (org-sm--prompt-choice "Topic: " choices
       (lambda (key)
         (pcase key
@@ -1085,7 +1087,10 @@ collects the user's choice and advances the queue."
           (?e (if (fboundp 'org-sm-gptel-explain)
                   (progn (org-sm--log-review 'topic nil "explain")
                          (org-sm-gptel-explain))
-                (user-error "org-sm-gptel not loaded"))))))))
+                (user-error "org-sm-gptel not loaded")))
+          ;; Pick does not advance: the user may still edit the draft, then
+          ;; continues the review with `r' themselves.
+          (?x (org-sm-gptel-pick)))))))
 
 (defun org-sm--cloze-rating-label (rating secs)
   "Format a menu LABEL for RATING with interval SECS."
