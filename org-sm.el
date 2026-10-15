@@ -107,6 +107,15 @@ that `org-schedule' (called internally) would climb to the wrong heading."
 (defvar org-sm--review-total 0
   "Number of cards selected at the start of the current review.")
 
+(defvar org-sm--session-stats nil
+  "Plist (:reviewed N :dismissed N :promoted ((STAGE-LABEL . TITLE) ...))
+accumulated during the current review session for the bonfire summary.")
+
+(defvar org-sm-after-review-functions nil
+  "Abnormal hook run after a review action (topic grade, cloze grade, dismiss).
+Each function receives one argument: a plist with `:type', `:old-days',
+`:new-days', and optional `:rating'.")
+
 (defvar-local org-sm--mode-line nil
   "Cached review position, displayed only in the current card's buffer.")
 
@@ -225,14 +234,101 @@ the interval between them so A-Factor calculation is unaffected."
 ;; Single source of truth for "what a review does": update scheduling, log it,
 ;; return a result plist.  Shared by the interactive command and other front-ends.
 
+(defconst org-sm--stages
+  '((0   7   "🌱 幼苗")
+    (7   30  "🌿 成株")
+    (30  90  "🌲 常青")
+    (90  180 "🗿 古树")
+    (180 nil "⛰️ 远古"))
+  "Stage thresholds (MIN-DAYS MAX-DAYS LABEL) for interval progression.")
+
+(defun org-sm--stage-index (days)
+  "Return 0..4 stage index for DAYS, or nil when DAYS is nil."
+  (when days
+    (cl-loop for (_min max _label) in org-sm--stages
+             for idx from 0
+             when (or (null max) (< days max)) return idx)))
+
+(defun org-sm--stage-label (days)
+  "Return human stage label for DAYS, or nil."
+  (when-let* ((idx (org-sm--stage-index days)))
+    (nth 2 (nth idx org-sm--stages))))
+
+(defun org-sm--current-interval-days ()
+  "Return current card's interval in days (SCHEDULED - SRS_LAST), or nil."
+  (let ((sched (org-get-scheduled-time nil))
+        (last  (org-entry-get nil "SRS_LAST")))
+    (when (and sched last)
+      (max 0 (floor (/ (float-time
+                        (time-subtract sched (parse-iso8601-time-string last)))
+                       86400.0))))))
+
+(defun org-sm--record-review-event (type old-days new-days &optional rating)
+  "Update `org-sm--session-stats', run `org-sm-after-review-functions',
+and return a human feedback string for the echo area."
+  (let* ((old-idx (org-sm--stage-index old-days))
+         (new-idx (org-sm--stage-index new-days))
+         (promoted (and new-idx (> new-idx (or old-idx 0))))
+         (new-stage (org-sm--stage-label new-days))
+         (old-stage (or (org-sm--stage-label old-days) "🌱 幼苗")))
+    (when org-sm--session-stats
+      (if (eq type 'dismissed)
+          (cl-incf (plist-get org-sm--session-stats :dismissed))
+        (cl-incf (plist-get org-sm--session-stats :reviewed))
+        (when promoted
+          (push (cons new-stage (org-get-heading t t t t))
+                (plist-get org-sm--session-stats :promoted)))))
+    (run-hook-with-args 'org-sm-after-review-functions
+                        (list :type type :old-days old-days
+                              :new-days new-days :rating rating))
+    (cond
+     ((eq type 'dismissed)
+      "已筛选 (计入处理量)")
+     (promoted
+      (format "%s%s · %dd → %dd (%s → %s)"
+              type (if rating (format " %s" rating) "")
+              (or old-days 0) new-days old-stage new-stage))
+     ((and old-days new-days (> new-days 0))
+      (format "%s%s · %dd → %dd"
+              type (if rating (format " %s" rating) "")
+              old-days new-days))
+     (new-days
+      (format "%s%s → %dd"
+              type (if rating (format " %s" rating) "") new-days))
+     (t
+      (format "%s%s" type (if rating (format " %s" rating) ""))))))
+
+(defun org-sm--bonfire-summary (&optional prev)
+  "Return the end-of-session / stop summary string.
+Never reports remaining due cards: stopping is a valid endpoint."
+  (let* ((rev  (or (plist-get org-sm--session-stats :reviewed) 0))
+         (dis  (or (plist-get org-sm--session-stats :dismissed) 0))
+         (prom (plist-get org-sm--session-stats :promoted))
+         (tot  (+ rev dis)))
+    (if (= tot 0)
+        "🔥 篝火小憩 · 随时停下，进度已保存"
+      (let (parts)
+        (when (> rev 0) (push (format "复习 %d" rev) parts))
+        (when (> dis 0) (push (format "已筛选 %d" dis) parts))
+        (concat
+         (format "🔥 篝火小结 · 本次处理 %d 张（%s）"
+                 tot (string-join (nreverse parts) " · "))
+         (if prom
+             (format " · 升阶 %s"
+                     (mapconcat #'car (nreverse prom) " "))
+           "")
+         (if prev (format "  [last: %s]" prev) ""))))))
+
 (defun org-sm--topic-grade ()
   "Reschedule current topic by its A-Factor and log the repetition.
-Return plist (:interval-days N :afactor A)."
-  (let* ((a   (org-sm--topic-afactor))
+Return plist (:interval-days N :afactor A :feedback STR)."
+  (let* ((old (org-sm--current-interval-days))
+         (a   (org-sm--topic-afactor))
          (ivl (org-sm--topic-read a)))
     (org-sm--topic-write ivl)
     (org-sm--log-review 'topic nil (format "a=%.1f  %2dd" a ivl))
-    (list :interval-days ivl :afactor a)))
+    (list :interval-days ivl :afactor a
+          :feedback (org-sm--record-review-event 'topic old ivl))))
 
 (defun org-sm--topic-postpone-grade (days)
   "Postpone current topic by DAYS (not a repetition) and log it.
@@ -319,16 +415,21 @@ and SECS the resulting interval.  Pure: reads properties, writes nothing."
 (defun org-sm--cloze-grade (rating &optional preview)
   "Apply RATING (a symbol in `org-sm-cloze-ratings') to the current cloze.
 Write the new FSRS card, log the review, and return a plist
-(:rating R :interval-secs SECS :due ISO).  PREVIEW, if given, is the
-alist from `org-sm--cloze-preview', reused to avoid recomputing."
-  (let* ((entry (or (cdr (assq rating (or preview (org-sm--cloze-preview))))
+(:rating R :interval-secs SECS :due ISO :feedback STR).  PREVIEW, if given,
+is the alist from `org-sm--cloze-preview', reused to avoid recomputing."
+  (let* ((old   (org-sm--current-interval-days))
+         (entry (or (cdr (assq rating (or preview (org-sm--cloze-preview))))
                     (error "Unknown cloze rating: %S" rating)))
          (card  (plist-get entry :card))
          (secs  (plist-get entry :interval-secs))
-         (extra (format "%s  %s" rating (org-sm--secs-label secs))))
+         (days  (floor (/ secs 86400.0)))
+         (label (org-sm--secs-label secs))
+         (extra (format "%s  %s" rating label)))
     (org-sm--cloze-write card)
     (org-sm--log-review 'cloze nil extra)
-    (list :rating rating :interval-secs secs :due (fsrs-card-due card))))
+    (let ((fb (org-sm--record-review-event 'cloze old days rating)))
+      (list :rating rating :interval-secs secs :due (fsrs-card-due card)
+            :feedback (if (> days 0) fb (format "cloze %s → %s" rating label))))))
 
 ;;;; ---- Heading helpers -----------------------------------------------------
 
@@ -1035,7 +1136,7 @@ PREV is a string describing the last action, shown in the echo area."
           (force-mode-line-update)
           (org-sm--show-prompt prev))
       (org-sm--cleanup-buffer)
-      (message "org-sm: done 󱁖 %s" (if prev (format "  (last: %s)" prev) "")))))
+      (message "%s" (org-sm--bonfire-summary prev)))))
 
 (defun org-sm--review-markers (markers &optional what)
   "Start a review session over MARKERS (a list).  WHAT names them in messages."
@@ -1043,7 +1144,8 @@ PREV is a string describing the last action, shown in the echo area."
   (if (null markers)
       (message "org-sm: nothing to review%s 󱁖" (if what (format " (%s)" what) ""))
     (setq org-sm--queue markers
-          org-sm--review-total (length markers))
+          org-sm--review-total (length markers)
+          org-sm--session-stats (list :reviewed 0 :dismissed 0 :promoted nil))
     (org-sm--advance)))
 
 ;;;###autoload
@@ -1081,7 +1183,7 @@ collects the user's choice and advances the queue."
       (lambda (key)
         (pcase key
           (?r (let ((r (org-sm--topic-grade)))
-                (org-sm--advance (format "topic → %d days" (plist-get r :interval-days)))))
+                (org-sm--advance (plist-get r :feedback))))
           (?p (let ((r (org-sm--topic-postpone-grade (read-number "Postpone days: " 7))))
                 (org-sm--advance (format "topic postpone → %d days" (plist-get r :interval-days)))))
           (?e (if (fboundp 'org-sm-gptel-explain)
@@ -1118,10 +1220,8 @@ Rating computation is delegated to `org-sm--cloze-preview' and
        (org-sm--prompt-choice "Rate: " choices
          (lambda (key)
            (let* ((rating (cdr (assq key keymap)))
-                  (r      (org-sm--cloze-grade rating preview))
-                  (due    (format-time-string
-                           "%F %H:%M" (parse-iso8601-time-string (plist-get r :due)))))
-             (org-sm--advance (format "cloze %s → %s" rating due)))))))))
+                  (r      (org-sm--cloze-grade rating preview)))
+             (org-sm--advance (plist-get r :feedback)))))))))
 
 ;;;###autoload
 (defun org-sm-review-confirm ()
@@ -1143,17 +1243,18 @@ properties and scheduling data are preserved for `org-sm-item-undismiss'."
   (unless (org-sm-type) (user-error "Not on an SRS heading"))
   (when (org-sm--dismissed-p) (user-error "Already dismissed"))
   (org-toggle-tag "dismissed" 'on)
-  (org-sm--log-review 'dismissed))
+  (org-sm--log-review 'dismissed)
+  (org-sm--record-review-event 'dismissed (org-sm--current-interval-days) nil))
 
 ;;;###autoload
 (defun org-sm-item-dismiss ()
   "Dismiss current SRS item, advancing the queue if a session is active."
   (interactive)
-  (org-sm--dismiss)
-  ;; Only advance the review queue if a session is active.
-  (if (or org-sm--queue (buffer-live-p org-sm--current-buffer))
-      (org-sm--advance "dismissed")
-    (message "org-sm: item dismissed")))
+  (let ((fb (org-sm--dismiss)))
+    ;; Only advance the review queue if a session is active.
+    (if (or org-sm--queue (buffer-live-p org-sm--current-buffer))
+        (org-sm--advance fb)
+      (message "org-sm: %s" fb))))
 
 (defun org-sm--prompt-choice (prompt choices action-fn)
   "Prompt user with CHOICES, appending built-in skip and dismiss options.
@@ -1235,13 +1336,13 @@ Point must be on the card heading."
 
 ;;;###autoload
 (defun org-sm-review-abort ()
-  "Abort the current review session, cleaning up state and overlays."
+  "Stop the current review session at a bonfire (a valid endpoint)."
   (interactive)
   (unless (or org-sm--queue (buffer-live-p org-sm--current-buffer))
     (user-error "No active review session"))
   (setq org-sm--queue nil)
   (org-sm--cleanup-buffer)
-  (message "org-sm: review aborted"))
+  (message "%s" (org-sm--bonfire-summary)))
 
 (defvar-keymap org-sm-review-repeat-map
   :doc "Repeat keys available during an org-sm review session."

@@ -53,5 +53,23 @@
     (should (string-blank-p (buffer-string)))
     (should (null (cdr (org-sm--capture-split-buffer))))))
 
+(ert-deftest org-sm-test-stage-promotion-and-bonfire ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* [C] Test Card\n")
+    (goto-char (point-min))
+    (let ((org-sm--session-stats (list :reviewed 0 :dismissed 0 :promoted nil))
+          (events nil))
+      (let ((org-sm-after-review-functions (list (lambda (ev) (push ev events)))))
+        (should (equal (org-sm--record-review-event 'cloze 14 21 :good)
+                       "cloze :good · 14d → 21d"))
+        (should (equal (org-sm--record-review-event 'cloze 25 42 :good)
+                       "cloze :good · 25d → 42d (🌿 成株 → 🌲 常青)"))
+        (should (equal (org-sm--record-review-event 'dismissed 5 nil)
+                       "已筛选 (计入处理量)"))
+        (should (= (length events) 3))
+        (should (equal (org-sm--bonfire-summary)
+                       "🔥 篝火小结 · 本次处理 3 张（复习 2 · 已筛选 1） · 升阶 🌲 常青"))))))
+
 (provide 'org-sm-gptel-test)
 ;;; org-sm-gptel-test.el ends here
