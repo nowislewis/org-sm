@@ -1045,21 +1045,24 @@ When PRED is non-nil, only entries for which it returns non-nil are visited."
              nil
              (org-sm-files))))
 
-(defun org-sm--collect-markers (&optional pred)
+(defun org-sm--collect-markers (&optional pred shuffle)
   "Return priority-sorted markers for SRS cards satisfying PRED (all if nil).
-Within the same priority, Cloze cards precede Topic cards."
+When SHUFFLE is non-nil, cards of equal priority are randomly shuffled;
+otherwise Cloze cards precede Topic cards."
   (mapcar #'cdr
           (seq-sort-by #'car (lambda (a b) (value< b a))
                        (org-sm-map-items
                         (lambda ()
                           (cons (list (org-get-priority (org-get-heading t t t t))
-                                      (if (eq (org-sm-type) 'cloze) 1 0))
+                                      (if shuffle
+                                          (random)
+                                        (if (eq (org-sm-type) 'cloze) 1 0)))
                                 (point-marker)))
                         pred))))
 
-(defun org-sm--collect-due-markers ()
+(defun org-sm--collect-due-markers (&optional shuffle)
   "Return priority-sorted markers for all due SRS cards."
-  (org-sm--collect-markers #'org-sm-due-p))
+  (org-sm--collect-markers #'org-sm-due-p shuffle))
 
 (defun org-sm--cleanup-buffer ()
   "Clear review progress, narrowing, cloze overlays and state in the previous buffer.
@@ -1168,9 +1171,10 @@ PREV is a string describing the last action."
   :group 'org-sm)
 
 (defun org-sm-review-start (&optional limit)
-  "Collect due SRS items and start a review session, optionally limited to LIMIT."
+  "Collect due SRS items and start a review session, optionally limited to LIMIT.
+When LIMIT is given, equal-priority due cards are randomly sampled."
   (interactive)
-  (let ((markers (org-sm--collect-due-markers)))
+  (let ((markers (org-sm--collect-due-markers (and limit t))))
     (org-sm--review-markers (if limit (seq-take markers limit) markers)
                             (if limit (format "light, max %d" limit) "due"))))
 
