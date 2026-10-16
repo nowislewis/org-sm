@@ -1063,13 +1063,14 @@ When PRED is non-nil, only entries for which it returns non-nil are visited."
   (org-sm--collect-markers #'org-sm-due-p))
 
 (defun org-sm--cleanup-buffer ()
-  "Clear review progress, narrowing, cloze overlays and state in the previous buffer.
+  "Clear review progress, header-line, narrowing, and cloze state in previous buffer.
 Widening belongs here rather than in the caller: a review queue spans files, so
 by the time the next card is shown the previous buffer is no longer current and
 would silently stay narrowed to the card just reviewed."
   (when (buffer-live-p org-sm--current-buffer)
     (with-current-buffer org-sm--current-buffer
       (setq org-sm--mode-line nil)
+      (kill-local-variable 'header-line-format)
       (force-mode-line-update)
       (when (buffer-narrowed-p) (widen))
       (when org-sm--cloze-state
@@ -1112,16 +1113,25 @@ would silently stay narrowed to the card just reviewed."
     (org-fold-show-context 'org-goto)
     (recenter)))
 
+(defun org-sm--update-header ()
+  "Update `header-line-format' for the active review card."
+  (let* ((pos    (or org-sm--mode-line "SM"))
+         (type   (pcase (org-sm-type)
+                   ('cloze (format "cloze (%s)"
+                                   (if (eq org-sm--cloze-state 'hidden)
+                                       "hidden" "revealed")))
+                   ('topic "topic")
+                   (other  (format "%s" other))))
+         (banner (funcall org-sm-banner-function (org-sm-card-at-point))))
+    (setq-local header-line-format
+                (concat " " pos " · " type
+                        (if banner (concat " · " banner) "")))))
+
 (defun org-sm--show-prompt (&optional prev)
-  "Show review hint in the echo area, optionally prefixed with PREV result."
-  (let* ((pre (if prev (format "✓ %s  |  " prev) ""))
-         (banner (funcall org-sm-banner-function (org-sm-card-at-point)))
-         (prefix (if banner (format "%s — " banner) "")))
-    (pcase (org-sm-type)
-      ('cloze (message "org-sm %s%scloze: %s — M-x review-confirm" pre prefix
-                       (if (eq org-sm--cloze-state 'hidden) "hidden" "revealed")))
-      ('topic (message "org-sm %s%stopic — M-x review-confirm" pre prefix))
-      (_      (message "org-sm: not an SRS heading")))))
+  "Update the card header-line and echo only PREV result in the minibuffer."
+  (org-sm--update-header)
+  (when prev
+    (message "✓ %s" prev)))
 
 (defun org-sm--advance (&optional prev)
   "Advance to the next queued item, or end the session.
@@ -1177,16 +1187,14 @@ PREV is a string describing the last action, shown in the echo area."
 
 (defun org-sm--review-confirm-topic ()
   "Interactive topic review: reschedule, postpone, explain, or dismiss.
-Computation is delegated to the pure grading functions; this only
-collects the user's choice and advances the queue."
+Computation is delegated to the grading functions; this only collects
+the user's choice and advances the queue."
   (let* ((auto-ivl (org-sm-topic-interval (org-sm-topic-afactor)))
-         (banner (funcall org-sm-banner-function (org-sm-card-at-point)))
-         (prompt (if banner (format "%s · Topic: " banner) "Topic: "))
          (choices  `((?r ,(format "rsch(%dd)" auto-ivl))
                      (?p "postpone")
                      (?e "explain")
                      ,@(when (fboundp 'org-sm-gptel-pick) '((?x "pick"))))))
-    (org-sm--prompt-choice prompt choices
+    (org-sm--prompt-choice "Topic: " choices
       (lambda (key)
         (pcase key
           (?r (org-sm--advance (funcall org-sm-feedback-function (org-sm-grade-topic))))
@@ -1213,7 +1221,7 @@ Rating computation is delegated to `org-sm-preview-cloze' and
     ('hidden
      (org-sm-cloze-reveal-overlays)
      (setq org-sm--cloze-state 'revealed)
-     (message "org-sm: cloze revealed — edit if needed, M-x review-confirm to rate"))
+     (org-sm--update-header))
     ('revealed
      (org-sm-cloze-remove-overlays)
      (let* ((preview (org-sm-preview-cloze))
