@@ -1399,25 +1399,34 @@ Point must be on the card heading."
   "Review the subtree at point, or with prefix ALL, every card in the tree."
   (interactive "P")
   (let ((beg (if all (point-min) (line-beginning-position)))
-        (end (if all (point-max) (save-excursion (org-end-of-subtree t t) (point)))))
+        (end (if all (point-max)
+               (save-excursion
+                 (if (outline-on-heading-p t)
+                     (progn (outline-end-of-subtree) (min (point-max) (1+ (point))))
+                   (line-end-position 2))))))
     (org-sm--review-markers (org-sm--tree-markers beg end) "tree")))
 
 (defvar org-sm-tree-mode-map
   (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
     (define-key map (kbd "RET") #'org-sm-tree-goto)
+    (define-key map (kbd "TAB") #'outline-cycle)
+    (define-key map (kbd "<backtab>") #'outline-cycle-buffer)
     (define-key map "r" #'org-sm-tree-review)
     (define-key map "g" #'org-sm-tree-revert)
     map)
-  "Keymap for `org-sm-tree-mode' (native org folding keys still apply).")
+  "Keymap for `org-sm-tree-mode'.")
 
-(define-derived-mode org-sm-tree-mode org-mode "org-sm-tree"
-  "Read-only aggregated tree of all SRS cards; RET jumps, r/C-u r review."
-  (setq buffer-read-only t
-        truncate-lines t
-        header-line-format
-        " [r] 复习当前子树  [C-u r] 复习全部  [RET] 跳转原文  [TAB] 折叠  [g] 刷新")
-  (when (fboundp 'org-indent-mode)
-    (org-indent-mode 1)))
+(define-derived-mode org-sm-tree-mode special-mode "org-sm-tree"
+  "Clean tree view of SRS cards; TAB folds, RET jumps, r/C-u r reviews."
+  (setq-local truncate-lines t
+              outline-regexp "\\(?:▸\\| +├─\\)"
+              outline-level (lambda ()
+                              (if (looking-at "▸") 1
+                                (1+ (/ (- (match-end 0) (match-beginning 0)) 2))))
+              header-line-format
+              " [r] 复习当前项/书  [C-u r] 复习全部  [TAB] 折叠  [RET] 跳转原文  [g] 刷新")
+  (outline-minor-mode 1))
 
 (defvar-local org-sm--tree-pred nil "Filter predicate for the current tree, or nil for all.")
 
@@ -1431,9 +1440,12 @@ Point must be on the card heading."
   (let ((buf (get-buffer-create "*org-sm tree*"))
         (rows (org-sm-map-items
                (lambda ()
-                 (let ((card (org-sm-card-at-point)))
-                   (list (make-string (org-outline-level) ?*)
-                         (truncate-string-to-width (plist-get card :title) 46 nil nil "…")
+                 (let* ((card  (org-sm-card-at-point))
+                        (clean (replace-regexp-in-string
+                                "\\`\\[[TC]\\][ \t]*" ""
+                                (or (plist-get card :title) ""))))
+                   (list (max 1 (1- (org-outline-level)))
+                         (truncate-string-to-width clean 44 nil nil "…")
                          (plist-get card :type)
                          (plist-get card :interval-days)
                          (plist-get card :reviews)
@@ -1445,32 +1457,40 @@ Point must be on the card heading."
       (setq org-sm--tree-pred pred)
       (let ((inhibit-read-only t) (file nil))
         (erase-buffer)
-        (pcase-dolist (`(,stars ,title ,type ,ivl ,rev ,delta ,m) rows)
+        (pcase-dolist (`(,depth ,title ,type ,ivl ,rev ,delta ,m) rows)
           (let ((f (buffer-file-name (marker-buffer m))))
             (unless (equal f file)
+              (when file (insert "\n"))
               (setq file f)
-              (insert (format "* 📖 %s\n" (or (org-sm-book-label f)
-                                              (file-name-nondirectory f))))))
-          (let* ((stat (if (eq type 'cloze)
-                           (propertize (if ivl (format "%4dd" ivl) "  new")
-                                       'face '(:foreground "#66D9EF"))
-                         (propertize (format "  ×%-2d" (or rev 0))
-                                     'face (if (>= (or rev 0) 5)
-                                               '(:foreground "#F92672" :weight bold)
-                                             'shadow))))
-                 (due  (pcase delta
-                         (`nil "")
-                         (0 (propertize "due" 'face 'warning))
-                         ((pred (> 0)) (propertize (format "%+dd" delta) 'face 'warning))
-                         (_ (propertize (format "%+dd" delta) 'face 'shadow))))
-                 (line (concat "*" stars " " title
-                               (propertize " " 'display '(space :align-to 58))
-                               stat
-                               (propertize " " 'display '(space :align-to 65))
-                               due "\n")))
+              (insert (propertize (format "▸ %s\n"
+                                          (or (org-sm-book-label f)
+                                              (file-name-nondirectory f)))
+                                  'face '(:weight bold :foreground "#E6DB74")))))
+          (let* ((indent (concat (make-string (* depth 2) ?\s) "├─ "))
+                 (badge  (if (eq type 'cloze)
+                             (propertize "[C] " 'face '(:foreground "#66D9EF" :weight bold))
+                           (propertize "[T] " 'face '(:foreground "#A6E22E" :weight bold))))
+                 (stat   (if (eq type 'cloze)
+                             (propertize (if ivl (format "%4dd" ivl) "  new")
+                                         'face '(:foreground "#66D9EF"))
+                           (propertize (format "  ×%-2d" (or rev 0))
+                                       'face (if (>= (or rev 0) 5)
+                                                 '(:foreground "#F92672" :weight bold)
+                                               'shadow))))
+                 (due    (pcase delta
+                           (`nil "")
+                           (0 (propertize "due" 'face 'warning))
+                           ((pred (> 0)) (propertize (format "%+dd" delta) 'face 'warning))
+                           (_ (propertize (format "%+dd" delta) 'face 'shadow))))
+                 (line   (concat (propertize indent 'face 'shadow)
+                                 badge
+                                 title
+                                 (propertize " " 'display '(space :align-to 60))
+                                 stat
+                                 (propertize " " 'display '(space :align-to 68))
+                                 due "\n")))
             (insert (propertize line 'org-sm-marker m))))
-        (goto-char (point-min))
-        (org-fold-show-all)))
+        (goto-char (point-min))))
     (pop-to-buffer buf)))
 
 (defun org-sm--tree-filter (days keyword)
