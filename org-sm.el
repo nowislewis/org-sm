@@ -97,14 +97,15 @@ that `org-schedule' (called internally) would climb to the wrong heading."
 Keys include `:action', `:card', `:old-days', `:new-days' and
 optional action-specific fields such as `:rating'.")
 
-(defvar org-sm-banner-function #'ignore
-  "Function receiving card metadata and returning a banner string or nil.")
+(defvar org-sm-prompt-function #'org-sm-default-prompt
+  "Function receiving review state plist to present the active card prompt.
+Keys: `:card', `:position', `:cloze-state', `:prev'.")
 
 (defvar org-sm-feedback-function #'org-sm-default-feedback
-  "Function receiving a review event and returning echo-area feedback.")
+  "Function receiving a review event and returning action feedback.")
 
 (defvar org-sm-finish-function #'org-sm-default-finish
-  "Function receiving PREV and ABORTED to format session-end feedback.")
+  "Function receiving PREV and ABORTED to present session-end feedback.")
 
 (defvar-local org-sm--mode-line nil
   "Cached review position, displayed only in the current card's buffer.")
@@ -1063,14 +1064,13 @@ When PRED is non-nil, only entries for which it returns non-nil are visited."
   (org-sm--collect-markers #'org-sm-due-p))
 
 (defun org-sm--cleanup-buffer ()
-  "Clear review progress, header-line, narrowing, and cloze state in previous buffer.
+  "Clear review progress, narrowing, cloze overlays and state in the previous buffer.
 Widening belongs here rather than in the caller: a review queue spans files, so
 by the time the next card is shown the previous buffer is no longer current and
 would silently stay narrowed to the card just reviewed."
   (when (buffer-live-p org-sm--current-buffer)
     (with-current-buffer org-sm--current-buffer
       (setq org-sm--mode-line nil)
-      (kill-local-variable 'header-line-format)
       (force-mode-line-update)
       (when (buffer-narrowed-p) (widen))
       (when org-sm--cloze-state
@@ -1113,29 +1113,28 @@ would silently stay narrowed to the card just reviewed."
     (org-fold-show-context 'org-goto)
     (recenter)))
 
-(defun org-sm--update-header ()
-  "Update `header-line-format' for the active review card."
-  (let* ((pos    (or org-sm--mode-line "SM"))
-         (type   (pcase (org-sm-type)
-                   ('cloze (format "cloze (%s)"
-                                   (if (eq org-sm--cloze-state 'hidden)
-                                       "hidden" "revealed")))
-                   ('topic "topic")
-                   (other  (format "%s" other))))
-         (banner (funcall org-sm-banner-function (org-sm-card-at-point))))
-    (setq-local header-line-format
-                (concat " " pos " · " type
-                        (if banner (concat " · " banner) "")))))
+(defun org-sm-default-prompt (state)
+  "Show default review hint in the echo area for STATE plist."
+  (let* ((prev   (plist-get state :prev))
+         (pre    (if prev (format "✓ %s  |  " prev) ""))
+         (cstate (plist-get state :cloze-state)))
+    (pcase (plist-get (plist-get state :card) :type)
+      ('cloze (message "org-sm %scloze: %s — M-x review-confirm" pre
+                       (if (eq cstate 'hidden) "hidden" "revealed")))
+      ('topic (message "org-sm %stopic — M-x review-confirm" pre))
+      (_      (message "org-sm: not an SRS heading")))))
 
 (defun org-sm--show-prompt (&optional prev)
-  "Update the card header-line and echo only PREV result in the minibuffer."
-  (org-sm--update-header)
-  (when prev
-    (message "✓ %s" prev)))
+  "Present the active card prompt via `org-sm-prompt-function'."
+  (funcall org-sm-prompt-function
+           (list :card (org-sm-card-at-point)
+                 :position org-sm--mode-line
+                 :cloze-state org-sm--cloze-state
+                 :prev prev)))
 
 (defun org-sm--advance (&optional prev)
   "Advance to the next queued item, or end the session.
-PREV is a string describing the last action, shown in the echo area."
+PREV is a string describing the last action."
   (let (found)
     (while (and org-sm--queue (not found))
       (let ((marker (pop org-sm--queue)))
@@ -1151,7 +1150,8 @@ PREV is a string describing the last action, shown in the echo area."
           (force-mode-line-update)
           (org-sm--show-prompt prev))
       (org-sm--cleanup-buffer)
-      (message "%s" (funcall org-sm-finish-function prev nil)))))
+      (when-let* ((msg (funcall org-sm-finish-function prev nil)))
+        (message "%s" msg)))))
 
 (defun org-sm--review-markers (markers &optional what)
   "Start a review session over MARKERS (a list).  WHAT names them in messages."
@@ -1221,7 +1221,7 @@ Rating computation is delegated to `org-sm-preview-cloze' and
     ('hidden
      (org-sm-cloze-reveal-overlays)
      (setq org-sm--cloze-state 'revealed)
-     (org-sm--update-header))
+     (org-sm--show-prompt))
     ('revealed
      (org-sm-cloze-remove-overlays)
      (let* ((preview (org-sm-preview-cloze))
@@ -1363,7 +1363,8 @@ Point must be on the card heading."
     (user-error "No active review session"))
   (setq org-sm--queue nil)
   (org-sm--cleanup-buffer)
-  (message "%s" (funcall org-sm-finish-function nil t)))
+  (when-let* ((msg (funcall org-sm-finish-function nil t)))
+    (message "%s" msg)))
 
 (defvar-keymap org-sm-review-repeat-map
   :doc "Repeat keys available during an org-sm review session."
