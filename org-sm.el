@@ -1418,7 +1418,9 @@ Point must be on the card heading."
 
 (define-derived-mode org-sm-tree-mode org-mode "org-sm-tree"
   "Read-only aggregated tree of all SRS cards; RET jumps, r/C-u r review."
-  (setq buffer-read-only t))
+  (setq buffer-read-only t
+        header-line-format
+        " [r] 复习当前子树  [C-u r] 复习全部  [RET] 跳转原文  [g] 刷新"))
 
 (defvar-local org-sm--tree-pred nil "Filter predicate for the current tree, or nil for all.")
 
@@ -1460,27 +1462,41 @@ Point must be on the card heading."
 (defun org-sm--tree-filter (days keyword)
   "Return a card predicate combining DAYS and KEYWORD (each optional).
 DAYS keeps cards due within that many days (overdue always included);
-KEYWORD is `@cloze', `@topic', `@boss', or a regexp matched on the title."
+KEYWORD supports `@cloze', `@topic', forest stages (`@seedling', `@plant',
+`@evergreen', `@ancient', `@elder'), monster tiers (`@mob', `@elite',
+`@boss', `@demon'), or a regexp matched on the title."
   (lambda ()
     (and (or (not days)
              (when-let* ((d (org-sm-sched-day-delta))) (<= d days)))
-         (pcase keyword
-           (`nil t)
-           ("@cloze" (eq (org-sm-type) 'cloze))
-           ("@topic" (eq (org-sm-type) 'topic))
-           ("@boss"  (and (eq (org-sm-type) 'topic)
-                          (>= (or (plist-get (org-sm-card-at-point) :reviews) 0) 5)))
-           (_ (string-match-p keyword (org-get-heading t t t t)))))))
+         (if (null keyword)
+             t
+           (let* ((card (org-sm-card-at-point))
+                  (type (plist-get card :type))
+                  (ivl  (plist-get card :interval-days))
+                  (rev  (or (plist-get card :reviews) 0)))
+             (pcase keyword
+               ("@cloze"     (eq type 'cloze))
+               ("@topic"     (eq type 'topic))
+               ("@seedling"  (and (eq type 'cloze) (or (null ivl) (< ivl 7))))
+               ("@plant"     (and (eq type 'cloze) ivl (<= 7 ivl 29)))
+               ("@evergreen" (and (eq type 'cloze) ivl (<= 30 ivl 89)))
+               ("@ancient"   (and (eq type 'cloze) ivl (<= 90 ivl 179)))
+               ("@elder"     (and (eq type 'cloze) ivl (>= ivl 180)))
+               ("@mob"       (and (eq type 'topic) (<= rev 1)))
+               ("@elite"     (and (eq type 'topic) (<= 2 rev 4)))
+               ("@boss"      (and (eq type 'topic) (<= 5 rev 7)))
+               ("@demon"     (and (eq type 'topic) (>= rev 8)))
+               (_ (string-match-p keyword (or (plist-get card :title) "")))))))))
 
 ;;;###autoload
 (defun org-sm-tree (days keyword)
   "Show cards as a foldable tree grouped by file, with optional filters.
 Prompts for DAYS (blank = all; N = due within N days, overdue included) and
-KEYWORD (blank = any; `@boss', `@cloze', `@topic', or a title regexp)."
+KEYWORD (blank = any; `@seedling'..`@elder', `@mob'..`@demon', or title regexp)."
   (interactive
    (list (let ((s (read-string "Due within N days (blank = all): ")))
            (unless (string-empty-p s) (string-to-number s)))
-         (let ((s (read-string "Filter (@boss, @cloze, @topic, or title regexp): ")))
+         (let ((s (read-string "Filter (@seedling..@elder, @mob..@demon, or regexp): ")))
            (unless (string-empty-p s) s))))
   (org-sm--tree-render
    (when (or days keyword) (org-sm--tree-filter days keyword))))
