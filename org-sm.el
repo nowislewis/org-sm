@@ -864,8 +864,10 @@ child's id.  Pure buffer logic: no region, no prompt, no overlay/UI.
                                         (format "{{%s}}" selected)
                                         (substring body-raw sel-end)))))))
     ;; Insert a back-reference after the selection; parent text stays intact.
-    (goto-char (+ (car bounds) sel-end))
-    (insert (format "[[id:%s][%s]]" id (pcase type ('topic "<T>") ('cloze "<C>"))))
+    (save-excursion
+      (goto-char (+ (car bounds) sel-end))
+      (insert (format "[[id:%s][%s]]" id (pcase type ('topic "<T>") ('cloze "<C>"))))
+      (when (looking-at-p "\\*+ ") (insert "\n")))
     ;; Append child heading at end of current subtree.
     (save-excursion
       (org-sm--insert-child level type title child-body id))
@@ -897,9 +899,10 @@ selection, back-references appended at the end of the parent body."
     ;; Append all back-references at the end of the (original) parent body,
     ;; keeping a trailing newline so the first child heading stays on its
     ;; own line.
-    (goto-char end)
-    (insert " " (string-join (nreverse links) " "))
-    (unless (bolp) (insert "\n"))
+    (save-excursion
+      (goto-char end)
+      (insert " " (string-join (nreverse links) " "))
+      (unless (bolp) (insert "\n")))
     (org-sm--card-changed 'extract)
     (nreverse ids)))
 
@@ -1043,12 +1046,15 @@ When PRED is non-nil, only entries for which it returns non-nil are visited."
              (org-sm-files))))
 
 (defun org-sm--collect-markers (&optional pred)
-  "Return priority-sorted markers for SRS cards satisfying PRED (all if nil)."
+  "Return priority-sorted markers for SRS cards satisfying PRED (all if nil).
+Within the same priority, Cloze cards precede Topic cards."
   (mapcar #'cdr
-          (seq-sort-by #'car #'>
+          (seq-sort-by #'car (lambda (a b) (value< b a))
                        (org-sm-map-items
-                        (lambda () (cons (org-get-priority (org-get-heading t t t t))
-                                         (point-marker)))
+                        (lambda ()
+                          (cons (list (org-get-priority (org-get-heading t t t t))
+                                      (if (eq (org-sm-type) 'cloze) 1 0))
+                                (point-marker)))
                         pred))))
 
 (defun org-sm--collect-due-markers ()
@@ -1454,22 +1460,27 @@ Point must be on the card heading."
 (defun org-sm--tree-filter (days keyword)
   "Return a card predicate combining DAYS and KEYWORD (each optional).
 DAYS keeps cards due within that many days (overdue always included);
-KEYWORD is a regexp matched against the title."
+KEYWORD is `@cloze', `@topic', `@boss', or a regexp matched on the title."
   (lambda ()
     (and (or (not days)
              (when-let* ((d (org-sm-sched-day-delta))) (<= d days)))
-         (or (not keyword)
-             (string-match-p keyword (org-get-heading t t t t))))))
+         (pcase keyword
+           (`nil t)
+           ("@cloze" (eq (org-sm-type) 'cloze))
+           ("@topic" (eq (org-sm-type) 'topic))
+           ("@boss"  (and (eq (org-sm-type) 'topic)
+                          (>= (or (plist-get (org-sm-card-at-point) :reviews) 0) 5)))
+           (_ (string-match-p keyword (org-get-heading t t t t)))))))
 
 ;;;###autoload
 (defun org-sm-tree (days keyword)
   "Show cards as a foldable tree grouped by file, with optional filters.
 Prompts for DAYS (blank = all; N = due within N days, overdue included) and
-KEYWORD (blank = any; a regexp on the title)."
+KEYWORD (blank = any; `@boss', `@cloze', `@topic', or a title regexp)."
   (interactive
    (list (let ((s (read-string "Due within N days (blank = all): ")))
            (unless (string-empty-p s) (string-to-number s)))
-         (let ((s (read-string "Title keyword regexp (blank = any): ")))
+         (let ((s (read-string "Filter (@boss, @cloze, @topic, or title regexp): ")))
            (unless (string-empty-p s) s))))
   (org-sm--tree-render
    (when (or days keyword) (org-sm--tree-filter days keyword))))
