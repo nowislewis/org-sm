@@ -1413,8 +1413,11 @@ Point must be on the card heading."
 (define-derived-mode org-sm-tree-mode org-mode "org-sm-tree"
   "Read-only aggregated tree of all SRS cards; RET jumps, r/C-u r review."
   (setq buffer-read-only t
+        truncate-lines t
         header-line-format
-        " [r] 复习当前子树  [C-u r] 复习全部  [RET] 跳转原文  [g] 刷新"))
+        " [r] 复习当前子树  [C-u r] 复习全部  [RET] 跳转原文  [TAB] 折叠  [g] 刷新")
+  (when (fboundp 'org-indent-mode)
+    (org-indent-mode 1)))
 
 (defvar-local org-sm--tree-pred nil "Filter predicate for the current tree, or nil for all.")
 
@@ -1428,27 +1431,44 @@ Point must be on the card heading."
   (let ((buf (get-buffer-create "*org-sm tree*"))
         (rows (org-sm-map-items
                (lambda ()
-                 (list (make-string (org-outline-level) ?*)
-                       (org-get-heading t t t t)
-                       (org-sm-sched-day-delta)
-                       (org-entry-get nil "PRIORITY")
-                       (point-marker)))
+                 (let ((card (org-sm-card-at-point)))
+                   (list (make-string (org-outline-level) ?*)
+                         (truncate-string-to-width (plist-get card :title) 46 nil nil "…")
+                         (plist-get card :type)
+                         (plist-get card :interval-days)
+                         (plist-get card :reviews)
+                         (org-sm-sched-day-delta)
+                         (point-marker))))
                pred)))
     (with-current-buffer buf
       (unless (derived-mode-p 'org-sm-tree-mode) (org-sm-tree-mode))
       (setq org-sm--tree-pred pred)
       (let ((inhibit-read-only t) (file nil))
         (erase-buffer)
-        (pcase-dolist (`(,stars ,title ,delta ,prio ,m) rows)
+        (pcase-dolist (`(,stars ,title ,type ,ivl ,rev ,delta ,m) rows)
           (let ((f (buffer-file-name (marker-buffer m))))
             (unless (equal f file)
               (setq file f)
-              (insert (format "* %s\n" (file-name-nondirectory f)))))
-          (insert (propertize
-                   (format "*%s %s%s%s\n" stars title
-                           (if prio (format " [#%s]" prio) "")
-                           (pcase delta (`nil "") (0 " [today]") (_ (format " [%+dd]" delta))))
-                   'org-sm-marker m)))
+              (insert (format "* 📖 %s\n" (or (org-sm-book-label f)
+                                              (file-name-nondirectory f))))))
+          (let* ((stat (if (eq type 'cloze)
+                           (propertize (if ivl (format "%4dd" ivl) "  new")
+                                       'face '(:foreground "#66D9EF"))
+                         (propertize (format "  ×%-2d" (or rev 0))
+                                     'face (if (>= (or rev 0) 5)
+                                               '(:foreground "#F92672" :weight bold)
+                                             'shadow))))
+                 (due  (pcase delta
+                         (`nil "")
+                         (0 (propertize "due" 'face 'warning))
+                         ((pred (> 0)) (propertize (format "%+dd" delta) 'face 'warning))
+                         (_ (propertize (format "%+dd" delta) 'face 'shadow))))
+                 (line (concat "*" stars " " title
+                               (propertize " " 'display '(space :align-to 58))
+                               stat
+                               (propertize " " 'display '(space :align-to 65))
+                               due "\n")))
+            (insert (propertize line 'org-sm-marker m))))
         (goto-char (point-min))
         (org-fold-show-all)))
     (pop-to-buffer buf)))

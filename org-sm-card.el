@@ -35,6 +35,15 @@ Rescanned live on each call, so the result never goes stale."
   "Return elapsed fractional days from START to END (Emacs time values)."
   (/ (float-time (time-subtract end start)) 86400.0))
 
+(defun org-sm-book-label (&optional file)
+  "Return a clean book/topic title for FILE (or `buffer-file-name'), stripping Denote metadata."
+  (when-let* ((path (or file (buffer-file-name)))
+              (name (file-name-nondirectory path)))
+    (replace-regexp-in-string
+     "\\`[0-9T:=-]+" ""
+     (file-name-sans-extension
+      (replace-regexp-in-string "__.*" "" name)))))
+
 (defun org-sm-card--entry ()
   "Read current entry metadata without traversing descendants."
   ;; Non-card headings need no scheduling or ID reads.

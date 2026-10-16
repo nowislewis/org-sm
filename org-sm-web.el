@@ -113,17 +113,7 @@ this unauthenticated server under an attacker-controlled hostname."
     ('topic (list :reschedule
                   (format "%dd" (org-sm-topic-interval (org-sm-topic-afactor)))))))
 
-(defun org-sm-web--book-label ()
-  "Return a short shelf label for the current card's file.
-`20221201T203741--minto-2019-金字塔原理…__bib_srs.org' becomes
-`minto-2019-金字塔原理…', which is what a phone screen can actually show as a
-group heading.  Returns nil for the first file's worth of cards until the
-basename is known."
-  (when-let* ((name (file-name-nondirectory (or (buffer-file-name) ""))))
-    (replace-regexp-in-string
-     "\\`[0-9T:=-]+" ""
-     (file-name-sans-extension
-      (replace-regexp-in-string "__.*" "" name)))))
+(defalias 'org-sm-web--book-label #'org-sm-book-label)
 
 (defun org-sm-web--card-at-point ()
   "Serialize the current org-sm card for the browser, or nil if it has no ID.
