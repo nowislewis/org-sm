@@ -256,11 +256,7 @@ is what tells the two apart."
   "Return heading line and body text, excluding metadata and child headings."
   (save-excursion
     (org-back-to-heading t)
-    (let ((heading (org-get-heading t t t t))
-          (bounds  (org-sm-body-bounds)))
-      (concat heading "\n"
-              (string-trim (buffer-substring-no-properties
-                            (car bounds) (cdr bounds)))))))
+    (concat (org-get-heading t t t t) "\n" (org-sm-body-text))))
 
 (defun org-sm-gptel--open-chat (kind system intro)
   "Open or reuse a persistent gptel chat buffer for KIND on the current heading.

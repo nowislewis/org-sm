@@ -132,20 +132,16 @@ overdue card that has never been opened in Emacs must not gain a property
 drawer just because a phone asked for the queue.  A card with no ID cannot be
 addressed back by the review endpoint, so it is skipped instead."
   (when-let* ((id (org-id-get)))
-    (let* ((type (org-sm-type))
-           (bounds (org-sm-body-bounds))
-           (body (org-sm-body-clean
-                  (buffer-substring-no-properties (car bounds) (cdr bounds)))))
-      (list :id id
-            :type (symbol-name type)
-            :title (org-get-heading t t t t)
-            :body body
-            :book (org-sm-web--book-label)
-            ;; `org-sm-sched-day-delta' is negative for overdue cards, so
-            ;; negate it: days late is a positive number here.
-            :overdue (max 0 (- (or (org-sm-sched-day-delta) 0)))
-            :intervals (org-sm-web--intervals)
-            :revision (org-sm-web--revision)))))
+    (list :id id
+          :type (symbol-name (org-sm-type))
+          :title (org-get-heading t t t t)
+          :body (org-sm-body-text)
+          :book (org-sm-web--book-label)
+          ;; `org-sm-sched-day-delta' is negative for overdue cards, so
+          ;; negate it: days late is a positive number here.
+          :overdue (max 0 (- (or (org-sm-sched-day-delta) 0)))
+          :intervals (org-sm-web--intervals)
+          :revision (org-sm-web--revision))))
 
 (defun org-sm-web--revision ()
   "Fingerprint this card's text and scheduling state to reject stale writes."
@@ -282,12 +278,10 @@ extract on such a card would silently mark the wrong span."
      (body (org-sm-set-body body))
      (title (org-sm-web--set-title title)))
     (org-sm-web--save!)
-    (let ((bd (org-sm-body-bounds)))
-      (list :ok t
-            :body (org-sm-body-clean
-                   (buffer-substring-no-properties (car bd) (cdr bd)))
-            :title (org-get-heading t t t t)
-            :revision (org-sm-web--revision)))))
+    (list :ok t
+          :body (org-sm-body-text)
+          :title (org-get-heading t t t t)
+          :revision (org-sm-web--revision))))
 
 (org-sm-web--json-servlet api/extract/:id (start end type revision)
   ;; Extract the browser's selection from card :id into a child card.

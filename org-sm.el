@@ -413,10 +413,6 @@ avoid recomputing."
   "Return SRS_TYPE of current heading as a symbol, or nil."
   (when-let* ((v (org-entry-get nil "SRS_TYPE"))) (intern v)))
 
-(defun org-sm--card-p ()
-  "Return non-nil if the current heading is an SRS card."
-  (org-entry-get nil "SRS_TYPE"))
-
 (defun org-sm--goto-enclosing-card ()
   "Move point to the nearest enclosing card heading (current or ancestor).
 Return its start position, or nil if no ancestor is a card.
@@ -432,7 +428,7 @@ on a top-level non-card heading."
     (when (or (org-at-heading-p) (ignore-errors (org-back-to-heading t) t))
       (let ((climbing t) pos)
         (while (and (not pos) climbing)
-          (if (org-sm--card-p)
+          (if (org-sm-type)
               (setq pos (point))
             (setq climbing (org-up-heading-safe))))
         pos))))
@@ -923,9 +919,7 @@ body and optionally propose child cards in one call."
   (when (org-before-first-heading-p) (user-error "Not on an org heading"))
   (org-back-to-heading t)
   (let* ((heading (org-get-heading t t t t))
-         (bounds  (org-sm-body-bounds))
-         (body    (string-trim (buffer-substring-no-properties
-                                (car bounds) (cdr bounds))))
+         (body    (org-sm-body-text))
          (type    (org-sm-type))
          (marker  (point-marker)))
     (org-sm--capture-buffer
@@ -1060,10 +1054,6 @@ otherwise Cloze cards precede Topic cards."
                                 (point-marker)))
                         pred))))
 
-(defun org-sm--collect-due-markers (&optional shuffle)
-  "Return priority-sorted markers for all due SRS cards."
-  (org-sm--collect-markers #'org-sm-due-p shuffle))
-
 (defun org-sm--cleanup-buffer ()
   "Clear review progress, narrowing, cloze overlays and state in the previous buffer.
 Widening belongs here rather than in the caller: a review queue spans files, so
@@ -1174,7 +1164,7 @@ PREV is a string describing the last action."
   "Collect due SRS items and start a review session, optionally limited to LIMIT.
 When LIMIT is given, equal-priority due cards are randomly sampled."
   (interactive)
-  (let ((markers (org-sm--collect-due-markers (and limit t))))
+  (let ((markers (org-sm--collect-markers #'org-sm-due-p (and limit t))))
     (org-sm--review-markers (if limit (seq-take markers limit) markers)
                             (if limit (format "light, max %d" limit) "due"))))
 
