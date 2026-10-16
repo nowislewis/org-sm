@@ -235,13 +235,6 @@ the interval between them so A-Factor calculation is unaffected."
 ;; Single source of truth for "what a review does": update scheduling, log it,
 ;; return a result plist.  Shared by the interactive command and other front-ends.
 
-(defun org-sm--current-interval-days ()
-  "Return current card's interval in days (SCHEDULED - SRS_LAST), or nil."
-  (let ((sched (org-get-scheduled-time nil))
-        (last  (org-entry-get nil "SRS_LAST")))
-    (when (and sched last)
-      (max 0 (floor (org-sm-elapsed-days (parse-iso8601-time-string last) sched))))))
-
 (defvar org-sm-after-card-change-functions nil
   "Hook receiving an event after a successful card mutation.
 Unlike review events, this includes creation, editing and restoration.")
@@ -314,7 +307,7 @@ Return a review event distinguishing shift duration from card interval."
   (let ((card (org-sm-card-at-point)))
     (org-sm--topic-postpone days)
     (org-sm--log-review 'postpone nil (format "%2dd" days))
-    (let ((interval (org-sm--current-interval-days)))
+    (let ((interval (plist-get (org-sm-card-at-point) :interval-days)))
       (org-sm--commit-action 'postpone card :postpone-days days
                              :old-days (plist-get card :interval-days)
                              :new-days interval :interval-days interval))))
@@ -462,9 +455,8 @@ own `org-entry-end-position' reaches past the whole subtree, and callers like
   (let ((bounds (org-sm-body-bounds)))
     (string-trim (buffer-substring-no-properties (car bounds) (cdr bounds)))))
 
-(defun org-sm-body-clean (raw)
-  "Trim surrounding whitespace from RAW."
-  (string-trim raw))
+(defalias 'org-sm-body-clean #'string-trim
+  "Trim surrounding whitespace from RAW.")
 
 (defun org-sm-set-title (title)
   "Replace the current card title, preserving Org metadata, and notify observers."
