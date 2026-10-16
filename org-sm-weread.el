@@ -101,7 +101,7 @@ so they appear in import order rather than in the book's own order."
 Use live buffers so unsaved edits and refiles are respected."
   (let ((index (make-hash-table :test #'equal))
         (files (delete-dups
-                (cons (org-sm--capture-target-file)
+                (cons (org-sm-capture-target-file)
                       (when (and org-sm-directory (file-directory-p org-sm-directory))
                         (directory-files-recursively org-sm-directory "\\.org\\'"))))))
     (dolist (file files)
@@ -177,7 +177,7 @@ Today neither notes endpoint returns the field, so cards carry no link."
     ;; (`org-with-wide-buffer'), so it does *not* leave it on the new heading.
     ;; Searching by id instead of moving relative to point is what keeps the
     ;; key on the card rather than on whatever heading point happened to sit.
-    (let* ((id (org-sm--capture 'topic body nil olp))
+    (let* ((id (org-sm-capture-card 'topic body nil olp))
            (pos (or (org-find-entry-with-id id)
                     (error "org-sm-weread: captured card %s vanished" id))))
       (org-with-wide-buffer
@@ -194,7 +194,7 @@ Today neither notes endpoint returns the field, so cards carry no link."
     (org-with-wide-buffer
      (goto-char marker)
      (unless (org-entry-get nil "WEREAD_REVIEW_KEY")
-       (let ((end (cdr (org-sm--body-bounds))))
+       (let ((end (cdr (org-sm-body-bounds))))
          (goto-char end)
          (insert "\n想法：\n\n" (org-sm-weread--text text) "\n"))
        (goto-char marker)

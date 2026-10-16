@@ -107,11 +107,11 @@ this unauthenticated server under an attacker-controlled hostname."
   (pcase (org-sm-type)
     ('cloze
      (let (out)
-       (dolist (entry (org-sm--cloze-preview) (nreverse out))
+       (dolist (entry (org-sm-preview-cloze) (nreverse out))
          (push (car entry) out)
-         (push (org-sm--secs-label (plist-get (cdr entry) :interval-secs)) out))))
+         (push (org-sm-interval-label (plist-get (cdr entry) :interval-secs)) out))))
     ('topic (list :reschedule
-                  (format "%dd" (org-sm--topic-read (org-sm--topic-afactor)))))))
+                  (format "%dd" (org-sm-topic-interval (org-sm-topic-afactor)))))))
 
 (defun org-sm-web--book-label ()
   "Return a short shelf label for the current card's file.
@@ -133,23 +133,23 @@ drawer just because a phone asked for the queue.  A card with no ID cannot be
 addressed back by the review endpoint, so it is skipped instead."
   (when-let* ((id (org-id-get)))
     (let* ((type (org-sm-type))
-           (bounds (org-sm--body-bounds))
-           (body (org-sm--body-clean
+           (bounds (org-sm-body-bounds))
+           (body (org-sm-body-clean
                   (buffer-substring-no-properties (car bounds) (cdr bounds)))))
       (list :id id
             :type (symbol-name type)
             :title (org-get-heading t t t t)
             :body body
             :book (org-sm-web--book-label)
-            ;; `org-sm--sched-day-delta' is negative for overdue cards, so
+            ;; `org-sm-sched-day-delta' is negative for overdue cards, so
             ;; negate it: days late is a positive number here.
-            :overdue (max 0 (- (or (org-sm--sched-day-delta) 0)))
+            :overdue (max 0 (- (or (org-sm-sched-day-delta) 0)))
             :intervals (org-sm-web--intervals)
             :revision (org-sm-web--revision)))))
 
 (defun org-sm-web--revision ()
   "Fingerprint this card's text and scheduling state to reject stale writes."
-  (let ((bounds (org-sm--body-bounds)))
+  (let ((bounds (org-sm-body-bounds)))
     (secure-hash
      'sha256
      (prin1-to-string
@@ -172,9 +172,9 @@ Ships body text and precomputed intervals for every due card in one reply,
 so switching cards needs no GET; each write still awaits its POST response."
   (apply #'vector
          (seq-sort-by (lambda (c) (plist-get c :overdue)) #'>
-                      (delq nil (org-sm--map-items
+                      (delq nil (org-sm-map-items
                                  #'org-sm-web--card-at-point
-                                 #'org-sm--due-p)))))
+                                 #'org-sm-due-p)))))
 
 (defmacro org-sm-web--json-servlet (endpoint args &rest body)
   "Define token-gated JSON ENDPOINT whose BODY returns an encodable object.
@@ -229,11 +229,11 @@ on a LAN-facing server it leaks absolute filesystem paths."
 (defun org-sm-web--apply-review (rating action days)
   "Apply the browser's review decision to the card at point."
   (pcase (org-sm-type)
-    ('cloze (org-sm--cloze-grade (org-sm-web--rating rating)))
+    ('cloze (org-sm-grade-cloze (org-sm-web--rating rating)))
     ('topic (pcase action
-              ("reschedule" (org-sm--topic-grade))
-              ("postpone" (org-sm--topic-postpone-grade (org-sm-web--positive-days days)))
-              ("dismiss" (org-sm--dismiss))
+              ("reschedule" (org-sm-grade-topic))
+              ("postpone" (org-sm-grade-postpone (org-sm-web--positive-days days)))
+              ("dismiss" (org-sm-dismiss))
               (_ (user-error "Unknown topic action: %s" action))))
     (_ (user-error "Not an SRS card"))))
 
@@ -250,13 +250,13 @@ on a LAN-facing server it leaks absolute filesystem paths."
 ;; forward text to the same primitives `org-sm-card-workbench' uses.
 
 (defun org-sm-web--leading-delta ()
-  "Return how many chars `org-sm--body-clean' strips from the START of the body.
-Every body in a real vault carries trailing whitespace, and `org-sm--extract'
+  "Return how many chars `org-sm-body-clean' strips from the START of the body.
+Every body in a real vault carries trailing whitespace, and `org-sm-extract'
 interprets its offsets against the RAW region while the snapshot ships the
 CLEANED text.  Trailing whitespace cannot shift a start offset, but leading can
 -- usually by one newline -- so callers must translate.  Without this, an
 extract on such a card would silently mark the wrong span."
-  (let* ((bd (org-sm--body-bounds))
+  (let* ((bd (org-sm-body-bounds))
          (raw (buffer-substring-no-properties (car bd) (cdr bd))))
     (- (length raw) (length (string-trim-left raw)))))
 
@@ -268,7 +268,7 @@ extract on such a card would silently mark the wrong span."
 (defun org-sm-web--set-title (title)
   "Replace current heading's title with TITLE, preserving TODO/priority/tags."
   (unless (org-at-heading-p) (user-error "Not on a heading"))
-  (org-edit-headline (string-trim title)))
+  (org-sm-set-title title))
 
 (org-sm-web--json-servlet api/patch/:id (body title revision)
   ;; Reject changes to either the title, body or schedule since the snapshot.
@@ -278,13 +278,13 @@ extract on such a card would silently mark the wrong span."
      ((and body title)
       ;; `org-edit-headline' may move point: set it before the body write.
       (org-sm-web--set-title title)
-      (org-sm--set-body body))
-     (body (org-sm--set-body body))
+      (org-sm-set-body body))
+     (body (org-sm-set-body body))
      (title (org-sm-web--set-title title)))
     (org-sm-web--save!)
-    (let ((bd (org-sm--body-bounds)))
+    (let ((bd (org-sm-body-bounds)))
       (list :ok t
-            :body (org-sm--body-clean
+            :body (org-sm-body-clean
                    (buffer-substring-no-properties (car bd) (cdr bd)))
             :title (org-get-heading t t t t)
             :revision (org-sm-web--revision)))))
@@ -304,7 +304,7 @@ extract on such a card would silently mark the wrong span."
                  (string-match-p "\\`[0-9]+\\'" end))
       (user-error "Invalid selection"))
     (let* ((delta (org-sm-web--leading-delta))
-           (bd (org-sm--body-bounds))
+           (bd (org-sm-body-bounds))
            (raw-len (- (cdr bd) (car bd)))
            (s (+ delta (string-to-number start)))
            (e (+ delta (string-to-number end))))
@@ -313,8 +313,8 @@ extract on such a card would silently mark the wrong span."
       (let ((selected (buffer-substring-no-properties (+ (car bd) s) (+ (car bd) e))))
         (when (string-empty-p (string-trim selected))
         (user-error "empty selection"))
-      (let ((child (org-sm--extract (intern type) selected s e)))
-        ;; `org-sm--extract' appends a [[id:CHILD][<T>]] back-reference to THIS
+      (let ((child (org-sm-extract (intern type) selected s e)))
+        ;; `org-sm-extract' appends a [[id:CHILD][<T>]] back-reference to THIS
         ;; card, so the parent's body just changed on disk.  Echo it back, or
         ;; the phone's next patch would report a phantom conflict against text
         ;; it never saw.
@@ -460,7 +460,6 @@ If the server is already running, it restarts cleanly."
         httpd-host org-sm-web-bind
         httpd-port org-sm-web-port
         httpd-root org-sm-web-root)
-  (org-sm--ensure-scheduler)
   (httpd-start)
   (message "org-sm-web: phone URL http://%s:%d/%s%s"
            (org-sm-web--display-host)

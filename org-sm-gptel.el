@@ -38,8 +38,8 @@
 
 (declare-function gptel-request "gptel")
 (declare-function gptel-context-add-file "gptel-context")
-(declare-function org-sm--set-body "org-sm")
-(declare-function org-sm--capture-preamble-bounds "org-sm")
+(declare-function org-sm-set-body "org-sm")
+(declare-function org-sm-capture-preamble-bounds "org-sm")
 (declare-function org-sm-capture-fill-body-and-cards "org-sm")
 (declare-function gptel--apply-preset "gptel")
 (declare-function gptel-get-preset "gptel")
@@ -257,7 +257,7 @@ is what tells the two apart."
   (save-excursion
     (org-back-to-heading t)
     (let ((heading (org-get-heading t t t t))
-          (bounds  (org-sm--body-bounds)))
+          (bounds  (org-sm-body-bounds)))
       (concat heading "\n"
               (string-trim (buffer-substring-no-properties
                             (car bounds) (cdr bounds)))))))
@@ -354,7 +354,7 @@ refine+split action used by `org-sm-card-workbench'.")
 
 (defun org-sm-gptel--parse-card-response (response)
   "Parse RESPONSE JSON into (BODY . CARDS); nil on failure or missing BODY.
-CARDS is a list of (TITLE . BODY), the format `org-sm--capture-render-cards'
+CARDS is a list of (TITLE . BODY), the format `org-sm-capture-render-cards'
 consumes."
   (when (stringp response)
     (let* ((data  (ignore-errors

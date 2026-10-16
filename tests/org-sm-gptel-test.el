@@ -42,8 +42,8 @@
     (should-not (string-match-p "核心主张" (buffer-string)))
     (should-not (string-match-p "多余" (buffer-string)))
     (should (string-blank-p (buffer-substring-no-properties
-                             (car (org-sm--capture-preamble-bounds))
-                             (cdr (org-sm--capture-preamble-bounds)))))
+                             (car (org-sm-capture-preamble-bounds))
+                             (cdr (org-sm-capture-preamble-bounds)))))
     (should (= 1 (length (cdr (org-sm--capture-split-buffer)))))))
 
 (ert-deftest org-sm-gptel-test-pick-empty-result ()
@@ -53,23 +53,36 @@
     (should (string-blank-p (buffer-string)))
     (should (null (cdr (org-sm--capture-split-buffer))))))
 
-(ert-deftest org-sm-test-stage-promotion-and-bonfire ()
+(ert-deftest org-sm-test-card-at-point-and-actions ()
   (with-temp-buffer
     (org-mode)
-    (insert "* [C] Test Card\n")
+    (insert "* [T] Parent Topic\n"
+            ":PROPERTIES:\n:SRS_TYPE: topic\n:END:\n"
+            ":LOGBOOK:\n"
+            "- topic  a=1.5  10d  [2026-10-01 Thu 10:00]\n"
+            "- topic  a=1.5  15d  [2026-10-10 Sat 10:00]\n"
+            ":END:\n"
+            "** [C] Child Cloze\n"
+            ":PROPERTIES:\n:SRS_TYPE: cloze\n:END:\n")
     (goto-char (point-min))
-    (let ((org-sm--session-stats (list :reviewed 0 :dismissed 0 :promoted nil))
+    (let ((card (org-sm-card-at-point))
           (events nil))
+      (should (eq (plist-get card :type) 'topic))
+      (should (= (plist-get card :reviews) 2))
+      (should (= (plist-get card :child-topics) 0))
+      (should (= (plist-get card :child-clozes) 1))
       (let ((org-sm-after-review-functions (list (lambda (ev) (push ev events)))))
-        (should (equal (org-sm--record-review-event 'cloze 14 21 :good)
-                       "cloze :good · 14d → 21d"))
-        (should (equal (org-sm--record-review-event 'cloze 25 42 :good)
-                       "cloze :good · 25d → 42d (🌿 成株 → 🌲 常青)"))
-        (should (equal (org-sm--record-review-event 'dismissed 5 nil)
-                       "已筛选 (计入处理量)"))
-        (should (= (length events) 3))
-        (should (equal (org-sm--bonfire-summary)
-                       "🔥 篝火小结 · 本次处理 3 张（复习 2 · 已筛选 1） · 升阶 🌲 常青"))))))
+        (let ((ev1 (org-sm--commit-action 'cloze card
+                                          :rating :good :old-days 14 :new-days 21))
+              (ev2 (org-sm--commit-action 'dismiss card :old-days 5)))
+          (should (equal (org-sm-default-feedback ev1)
+                         "cloze :good · 14d → 21d"))
+          (should (equal (org-sm-default-feedback ev2) "dismissed"))
+          (should (= (length events) 2))
+          (should (equal (org-sm-default-finish "dismissed" nil)
+                         "org-sm: done 󱁖  (last: dismissed)"))
+          (should (equal (org-sm-default-finish nil t)
+                         "org-sm: review aborted")))))))
 
 (provide 'org-sm-gptel-test)
 ;;; org-sm-gptel-test.el ends here

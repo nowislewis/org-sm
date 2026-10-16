@@ -46,6 +46,7 @@
 (require 'org-id)
 (require 'org-macs)
 (require 'fsrs)
+(require 'org-sm-card)
 
 (declare-function org-sm-gptel-explain "org-sm-gptel")
 (declare-function org-sm-gptel-pick "org-sm-gptel")
@@ -107,14 +108,22 @@ that `org-schedule' (called internally) would climb to the wrong heading."
 (defvar org-sm--review-total 0
   "Number of cards selected at the start of the current review.")
 
-(defvar org-sm--session-stats nil
-  "Plist (:reviewed N :dismissed N :promoted ((STAGE-LABEL . TITLE) ...))
-accumulated during the current review session for the bonfire summary.")
+(defvar org-sm-review-start-hook nil
+  "Normal hook run when an `org-sm' review session starts.")
 
 (defvar org-sm-after-review-functions nil
-  "Abnormal hook run after a review action (topic grade, cloze grade, dismiss).
-Each function receives one argument: a plist with `:type', `:old-days',
-`:new-days', and optional `:rating'.")
+  "Abnormal hook receiving a review event plist after an action.
+Keys include `:action', `:card', `:old-days', `:new-days' and
+optional action-specific fields such as `:rating'.")
+
+(defvar org-sm-banner-function #'ignore
+  "Function receiving card metadata and returning a banner string or nil.")
+
+(defvar org-sm-feedback-function #'org-sm-default-feedback
+  "Function receiving a review event and returning echo-area feedback.")
+
+(defvar org-sm-finish-function #'org-sm-default-finish
+  "Function receiving PREV and ABORTED to format session-end feedback.")
 
 (defvar-local org-sm--mode-line nil
   "Cached review position, displayed only in the current card's buffer.")
@@ -123,6 +132,17 @@ Each function receives one argument: a plist with `:type', `:old-days',
 
 (defvar-local org-sm--cloze-state nil
   "Cloze review state for the current buffer: `hidden' or `revealed'.")
+
+(defvar org-sm--current-card-marker nil
+  "Marker identifying the exact card currently presented for review.")
+
+(defun org-sm--current-review-card-p ()
+  "Return non-nil when point belongs to the card presented by the session."
+  (and (markerp org-sm--current-card-marker)
+       (eq (marker-buffer org-sm--current-card-marker) (current-buffer))
+       (save-excursion
+         (org-back-to-heading t)
+         (= (point) (marker-position org-sm--current-card-marker)))))
 
 (defvar org-sm--current-buffer nil
   "Buffer holding the card currently being reviewed, for state cleanup.")
@@ -176,8 +196,8 @@ Each function receives one argument: a plist with `:type', `:old-days',
   (org-with-wide-buffer
    ;; Always log into a drawer, whatever the user's `org-log-into-drawer' is:
    ;; `org-end-of-meta-data' skips drawers but not bare log lines, so bare
-   ;; entries would land inside `org-sm--body-bounds' and be treated as body
-   ;; text -- which `org-sm--set-body' would then delete.
+   ;; entries would land inside `org-sm-body-bounds' and be treated as body
+   ;; text -- which `org-sm-set-body' would then delete.
    (let* ((org-log-into-drawer t)
           (ts   (format-time-string (org-time-stamp-format 'long 'inactive)))
           (name (symbol-name type))
@@ -190,7 +210,7 @@ Each function receives one argument: a plist with `:type', `:old-days',
 
 ;;;; ---- Topic scheduling ----------------------------------------------------
 
-(defun org-sm--topic-afactor ()
+(defun org-sm-topic-afactor ()
   "Return A-Factor for current heading derived from org priority.
 [#A] → 1.2 (slow growth, review frequently)
 [#B] → 1.5
@@ -198,15 +218,14 @@ Each function receives one argument: a plist with `:type', `:old-days',
   (pcase (org-entry-get nil "PRIORITY")
     ("A" 1.2) ("B" 1.5) (_ 1.8)))
 
-(defun org-sm--topic-read (a)
+(defun org-sm-topic-interval (a)
   "Return the next interval in days for the current topic, given A-Factor A.
-Pure: reads org properties, writes nothing.  Measured from SCHEDULED, not
+Read-only: reads org properties, writes nothing.  Measured from SCHEDULED, not
 now, so early/late reviews don't distort spacing."
   (let* ((last (org-entry-get nil "SRS_LAST"))
          (ref  (or (org-get-scheduled-time nil) (current-time))))
     (max 1 (round (* a (if last
-                           (max 1 (/ (float-time (time-subtract ref (parse-iso8601-time-string last)))
-                                     86400.0))
+                           (max 1 (org-sm-elapsed-days (parse-iso8601-time-string last) ref))
                          1))))))
 
 (defun org-sm--topic-write (ivl)
@@ -230,112 +249,93 @@ the interval between them so A-Factor calculation is unaffected."
     (org-entry-put nil "SRS_LAST"
                    (format-time-string "%FT%TZ" new-last "UTC0"))))
 
-;;;; ---- Grading (pure business layer, no UI) --------------------------------
+;;;; ---- Grading (buffer mutations, no UI) --------------------------------
 ;; Single source of truth for "what a review does": update scheduling, log it,
 ;; return a result plist.  Shared by the interactive command and other front-ends.
-
-(defconst org-sm--stages
-  '((0   7   "🌱 幼苗")
-    (7   30  "🌿 成株")
-    (30  90  "🌲 常青")
-    (90  180 "🗿 古树")
-    (180 nil "⛰️ 远古"))
-  "Stage thresholds (MIN-DAYS MAX-DAYS LABEL) for interval progression.")
-
-(defun org-sm--stage-index (days)
-  "Return 0..4 stage index for DAYS, or nil when DAYS is nil."
-  (when days
-    (cl-loop for (_min max _label) in org-sm--stages
-             for idx from 0
-             when (or (null max) (< days max)) return idx)))
-
-(defun org-sm--stage-label (days)
-  "Return human stage label for DAYS, or nil."
-  (when-let* ((idx (org-sm--stage-index days)))
-    (nth 2 (nth idx org-sm--stages))))
 
 (defun org-sm--current-interval-days ()
   "Return current card's interval in days (SCHEDULED - SRS_LAST), or nil."
   (let ((sched (org-get-scheduled-time nil))
         (last  (org-entry-get nil "SRS_LAST")))
     (when (and sched last)
-      (max 0 (floor (/ (float-time
-                        (time-subtract sched (parse-iso8601-time-string last)))
-                       86400.0))))))
+      (max 0 (floor (org-sm-elapsed-days (parse-iso8601-time-string last) sched))))))
 
-(defun org-sm--record-review-event (type old-days new-days &optional rating)
-  "Update `org-sm--session-stats', run `org-sm-after-review-functions',
-and return a human feedback string for the echo area."
-  (let* ((old-idx (org-sm--stage-index old-days))
-         (new-idx (org-sm--stage-index new-days))
-         (promoted (and new-idx (> new-idx (or old-idx 0))))
-         (new-stage (org-sm--stage-label new-days))
-         (old-stage (or (org-sm--stage-label old-days) "🌱 幼苗")))
-    (when org-sm--session-stats
-      (if (eq type 'dismissed)
-          (cl-incf (plist-get org-sm--session-stats :dismissed))
-        (cl-incf (plist-get org-sm--session-stats :reviewed))
-        (when promoted
-          (push (cons new-stage (org-get-heading t t t t))
-                (plist-get org-sm--session-stats :promoted)))))
-    (run-hook-with-args 'org-sm-after-review-functions
-                        (list :type type :old-days old-days
-                              :new-days new-days :rating rating))
-    (cond
-     ((eq type 'dismissed)
-      "已筛选 (计入处理量)")
-     (promoted
-      (format "%s%s · %dd → %dd (%s → %s)"
-              type (if rating (format " %s" rating) "")
-              (or old-days 0) new-days old-stage new-stage))
-     ((and old-days new-days (> new-days 0))
-      (format "%s%s · %dd → %dd"
-              type (if rating (format " %s" rating) "")
-              old-days new-days))
-     (new-days
-      (format "%s%s → %dd"
-              type (if rating (format " %s" rating) "") new-days))
-     (t
-      (format "%s%s" type (if rating (format " %s" rating) ""))))))
+(defvar org-sm-after-card-change-functions nil
+  "Hook receiving an event after a successful card mutation.
+Unlike review events, this includes creation, editing and restoration.")
 
-(defun org-sm--bonfire-summary (&optional prev)
-  "Return the end-of-session / stop summary string.
-Never reports remaining due cards: stopping is a valid endpoint."
-  (let* ((rev  (or (plist-get org-sm--session-stats :reviewed) 0))
-         (dis  (or (plist-get org-sm--session-stats :dismissed) 0))
-         (prom (plist-get org-sm--session-stats :promoted))
-         (tot  (+ rev dis)))
-    (if (= tot 0)
-        "🔥 篝火小憩 · 随时停下，进度已保存"
-      (let (parts)
-        (when (> rev 0) (push (format "复习 %d" rev) parts))
-        (when (> dis 0) (push (format "已筛选 %d" dis) parts))
-        (concat
-         (format "🔥 篝火小结 · 本次处理 %d 张（%s）"
-                 tot (string-join (nreverse parts) " · "))
-         (if prom
-             (format " · 升阶 %s"
-                     (mapconcat #'car (nreverse prom) " "))
-           "")
-         (if prev (format "  [last: %s]" prev) ""))))))
+(defun org-sm--notify (hook event)
+  "Run HOOK observers without making a completed write appear to fail."
+  (run-hook-wrapped hook
+                    (lambda (fn)
+                      (condition-case err
+                          (funcall fn event)
+                        (error (message "org-sm observer %S: %s" fn
+                                        (error-message-string err))))
+                      nil)))
 
-(defun org-sm--topic-grade ()
+(defun org-sm--card-changed (action &optional card)
+  "Notify observers of completed ACTION on CARD (or current metadata)."
+  (org-sm--notify 'org-sm-after-card-change-functions
+                  (list :action action :card (or card (org-sm-card-at-point)))))
+
+(defun org-sm--commit-action (action card &rest props)
+  "Publish a review event for ACTION on pre-action CARD and return it."
+  (let ((event (append (list :action action :card card
+                             :session (and (org-sm--current-review-card-p) t))
+                       props)))
+    (org-sm--notify 'org-sm-after-card-change-functions event)
+    (org-sm--notify 'org-sm-after-review-functions event)
+    event))
+
+(defun org-sm-default-feedback (event)
+  "Format default echo-area feedback for EVENT."
+  (let ((action (plist-get event :action))
+        (rating (plist-get event :rating))
+        (old (plist-get event :old-days))
+        (new (plist-get event :new-days))
+        (label (plist-get event :interval-label)))
+    (pcase action
+      ('dismiss "dismissed")
+      ('postpone (format "topic postpone → %dd" (plist-get event :postpone-days)))
+      ('cloze (if (and new (> new 0))
+                  (if (and old (> old 0))
+                      (format "cloze %s · %dd → %dd" rating old new)
+                    (format "cloze %s → %dd" rating new))
+                (format "cloze %s → %s" rating (or label ""))))
+      ('topic (if (and old (> old 0))
+                  (format "topic · %dd → %dd" old new)
+                (format "topic → %dd" new)))
+      (_ (format "%s" action)))))
+
+(defun org-sm-default-finish (&optional prev aborted)
+  "Format completion or abort feedback, including optional PREV."
+  (if aborted "org-sm: review aborted"
+    (format "org-sm: done 󱁖%s" (if prev (format "  (last: %s)" prev) ""))))
+
+(defun org-sm-grade-topic ()
   "Reschedule current topic by its A-Factor and log the repetition.
-Return plist (:interval-days N :afactor A :feedback STR)."
-  (let* ((old (org-sm--current-interval-days))
-         (a   (org-sm--topic-afactor))
-         (ivl (org-sm--topic-read a)))
+Return a review event plist; presentation is handled by the caller."
+  (let* ((card (org-sm-card-at-point))
+         (a (org-sm-topic-afactor))
+         (ivl (org-sm-topic-interval a)))
     (org-sm--topic-write ivl)
     (org-sm--log-review 'topic nil (format "a=%.1f  %2dd" a ivl))
-    (list :interval-days ivl :afactor a
-          :feedback (org-sm--record-review-event 'topic old ivl))))
+    (org-sm--commit-action 'topic card
+                           :old-days (plist-get card :interval-days)
+                           :new-days ivl :interval-days ivl :afactor a)))
 
-(defun org-sm--topic-postpone-grade (days)
-  "Postpone current topic by DAYS (not a repetition) and log it.
-Return plist (:interval-days DAYS)."
-  (org-sm--topic-postpone days)
-  (org-sm--log-review 'topic nil (format "postpone  %2dd" days))
-  (list :interval-days days))
+(defun org-sm-grade-postpone (days)
+  "Postpone current topic by positive DAYS without counting a repetition.
+Return a review event distinguishing shift duration from card interval."
+  (unless (and (integerp days) (> days 0)) (user-error "Days must be a positive integer"))
+  (let ((card (org-sm-card-at-point)))
+    (org-sm--topic-postpone days)
+    (org-sm--log-review 'postpone nil (format "%2dd" days))
+    (let ((interval (org-sm--current-interval-days)))
+      (org-sm--commit-action 'postpone card :postpone-days days
+                             :old-days (plist-get card :interval-days)
+                             :new-days interval :interval-days interval))))
 
 ;;;; ---- Cloze overlays ------------------------------------------------------
 
@@ -383,7 +383,7 @@ Return plist (:interval-days DAYS)."
 
 ;;;; ---- Cloze grading (pure, no UI) -----------------------------------------
 
-(defun org-sm--secs-label (secs)
+(defun org-sm-interval-label (secs)
   "Format SECS as a short human interval label like \"10m\", \"2h\", \"3d\", \"5mo\".
 Single source of truth for interval labels across review menus and the web UI."
   (let ((days (/ secs 86400.0)))
@@ -396,11 +396,11 @@ Single source of truth for interval labels across review menus and the web UI."
 (defconst org-sm-cloze-ratings '(:again :hard :good :easy)
   "Ordered list of FSRS ratings offered for cloze review.")
 
-(defun org-sm--cloze-preview ()
+(defun org-sm-preview-cloze ()
   "Preview every rating for the current cloze without modifying anything.
 Return an alist mapping each rating symbol to a plist
 (:card CARD :interval-secs SECS), where CARD is the hypothetical FSRS card
-and SECS the resulting interval.  Pure: reads properties, writes nothing."
+and SECS the resulting interval.  Reads properties without modifying the card."
   (org-sm--ensure-scheduler)
   (let ((card (org-sm--cloze-read))
         (now  (fsrs-now)))
@@ -412,24 +412,25 @@ and SECS the resulting interval.  Pure: reads properties, writes nothing."
          (cons rating (list :card c :interval-secs secs))))
      org-sm-cloze-ratings)))
 
-(defun org-sm--cloze-grade (rating &optional preview)
+(defun org-sm-grade-cloze (rating &optional preview)
   "Apply RATING (a symbol in `org-sm-cloze-ratings') to the current cloze.
-Write the new FSRS card, log the review, and return a plist
-(:rating R :interval-secs SECS :due ISO :feedback STR).  PREVIEW, if given,
-is the alist from `org-sm--cloze-preview', reused to avoid recomputing."
-  (let* ((old   (org-sm--current-interval-days))
-         (entry (or (cdr (assq rating (or preview (org-sm--cloze-preview))))
+Write the new FSRS card, log the review, and return a review event plist.
+PREVIEW, if given, is the alist from `org-sm-preview-cloze', reused to
+avoid recomputing."
+  (let* ((card-info (org-sm-card-at-point))
+         (entry (or (cdr (assq rating (or preview (org-sm-preview-cloze))))
                     (error "Unknown cloze rating: %S" rating)))
          (card  (plist-get entry :card))
          (secs  (plist-get entry :interval-secs))
          (days  (floor (/ secs 86400.0)))
-         (label (org-sm--secs-label secs))
+         (label (org-sm-interval-label secs))
          (extra (format "%s  %s" rating label)))
     (org-sm--cloze-write card)
     (org-sm--log-review 'cloze nil extra)
-    (let ((fb (org-sm--record-review-event 'cloze old days rating)))
-      (list :rating rating :interval-secs secs :due (fsrs-card-due card)
-            :feedback (if (> days 0) fb (format "cloze %s → %s" rating label))))))
+    (org-sm--commit-action 'cloze card-info :rating rating
+                           :old-days (plist-get card-info :interval-days)
+                           :new-days days :interval-secs secs
+                           :interval-label label :due (fsrs-card-due card))))
 
 ;;;; ---- Heading helpers -----------------------------------------------------
 
@@ -461,11 +462,11 @@ on a top-level non-card heading."
             (setq climbing (org-up-heading-safe))))
         pos))))
 
-(defun org-sm--body-bounds ()
+(defun org-sm-body-bounds ()
   "Return (start . end) of current heading's body (excluding meta-data).
 The body stops at the first child heading: for a heading with no body of its
 own `org-entry-end-position' reaches past the whole subtree, and callers like
-`org-sm--set-body' would then overwrite the children."
+`org-sm-set-body' would then overwrite the children."
   (save-excursion
     (org-back-to-heading t)
     ;; Measure the child boundary from the heading itself: with no body,
@@ -474,28 +475,40 @@ own `org-entry-end-position' reaches past the whole subtree, and callers like
           (start (progn (org-end-of-meta-data t) (point))))
       (cons (min start limit) (min (org-entry-end-position) limit)))))
 
-(defun org-sm--body-clean (raw)
+(defun org-sm-body-text ()
+  "Return the current entry's trimmed body, excluding metadata and descendants."
+  (let ((bounds (org-sm-body-bounds)))
+    (string-trim (buffer-substring-no-properties (car bounds) (cdr bounds)))))
+
+(defun org-sm-body-clean (raw)
   "Trim surrounding whitespace from RAW."
   (string-trim raw))
 
-(defun org-sm--set-body (new-body)
+(defun org-sm-set-title (title)
+  "Replace the current card title, preserving Org metadata, and notify observers."
+  (org-back-to-heading t)
+  (org-edit-headline (string-trim title))
+  (org-sm--card-changed 'edit))
+
+(defun org-sm-set-body (new-body)
   "Replace the current heading's body text with NEW-BODY.
 Point must be on the heading.  Metadata (planning line, drawer) is
-preserved; only the body region from `org-sm--body-bounds' is replaced.
+preserved; only the body region from `org-sm-body-bounds' is replaced.
 Used by `org-sm--capture-commit-body' for manual or AI-assisted workbench
 edits."
-  (let* ((bounds (org-sm--body-bounds))
+  (let* ((bounds (org-sm-body-bounds))
          (start  (car bounds))
          (end    (cdr bounds)))
     (goto-char start)
     (delete-region start end)
-    (insert (org-sm--body-clean new-body))
+    (insert (org-sm-body-clean new-body))
     ;; keep a trailing newline so the subtree stays well-formed
-    (unless (bolp) (insert "\n"))))
+    (unless (bolp) (insert "\n"))
+    (org-sm--card-changed 'edit)))
 
 (defun org-sm--cloze-markers-p ()
   "Return non-nil if current heading body contains {{cloze}} markers."
-  (let ((bounds (org-sm--body-bounds)))
+  (let ((bounds (org-sm-body-bounds)))
     (string-match-p org-sm--cloze-regexp
                     (buffer-substring-no-properties (car bounds) (cdr bounds)))))
 
@@ -538,7 +551,7 @@ is created if missing.  Example: \\='(\"Topics\" \"Physics\")"
   :type '(repeat string)
   :group 'org-sm)
 
-(defun org-sm--capture-target-file ()
+(defun org-sm-capture-target-file ()
   "Return the capture file, defaulting to sm-cards.org under `org-sm-directory'."
   (expand-file-name
    (or org-sm-capture-file
@@ -569,7 +582,7 @@ interactive editable capture flow."
       (user-error "Clipboard is empty"))
     content))
 
-(defun org-sm--capture-render-cards (cards)
+(defun org-sm-capture-render-cards (cards)
   "Insert CARDS (list of (TITLE . BODY)) as ** headings at point.
 Inverse of `org-sm--capture-split-buffer'; they share the heading format."
   (cl-loop for (title . body) in cards
@@ -581,7 +594,7 @@ Inverse of `org-sm--capture-split-buffer'; they share the heading format."
 (defconst org-sm--capture-card-rx "^\\*\\* "
   "Regexp matching a card heading in an `org-sm-capture-mode' buffer.")
 
-(defun org-sm--capture-preamble-bounds ()
+(defun org-sm-capture-preamble-bounds ()
   "Return (START . END) of the buffer's preamble.
 The preamble is the text before the first card heading, or the whole buffer
 if there is none.  The one place that locates that heading."
@@ -594,16 +607,16 @@ if there is none.  The one place that locates that heading."
 
 (defun org-sm--capture-split-buffer ()
   "Split the current capture buffer into (PREAMBLE . CARDS).
-PREAMBLE is the trimmed preamble text (see `org-sm--capture-preamble-bounds');
+PREAMBLE is the trimmed preamble text (see `org-sm-capture-preamble-bounds');
 CARDS is a list of (TITLE . BODY), one per card heading, nil when there are
-none.  Inverse of `org-sm--capture-render-cards'."
+none.  Inverse of `org-sm-capture-render-cards'."
   (org-with-wide-buffer
-   (let ((end (cdr (org-sm--capture-preamble-bounds)))
+   (let ((end (cdr (org-sm-capture-preamble-bounds)))
          cards)
      (goto-char end)
      (while (re-search-forward org-sm--capture-card-rx nil t)
        (let* ((title  (org-get-heading t t t t))
-              (bounds (org-sm--body-bounds))
+              (bounds (org-sm-body-bounds))
               (body   (string-trim (buffer-substring-no-properties
                                     (car bounds) (cdr bounds)))))
          (when (org-string-nw-p body)
@@ -645,7 +658,7 @@ Used by `org-sm-card-workbench' buffers after an AI refine+split round;
 the inverse read is `org-sm--capture-split-buffer'."
   (erase-buffer)
   (insert (string-trim body) (if cards "\n\n" "\n"))
-  (when cards (org-sm--capture-render-cards cards))
+  (when cards (org-sm-capture-render-cards cards))
   (goto-char (point-min))
   (org-fold-show-all))
 
@@ -654,17 +667,17 @@ the inverse read is `org-sm--capture-split-buffer'."
 Refine the parent card in place when BUF has one, else create a new card.
 Return a status string, or nil when there was nothing to commit.  Internal
 half of `org-sm-capture-commit'; leaves BUF current either way (see
-`org-sm--capture', which strands the target buffer)."
+`org-sm-capture-card', which strands the target buffer)."
   (let (bounds body marker)
     (with-current-buffer buf
-      (setq bounds (org-sm--capture-preamble-bounds)
+      (setq bounds (org-sm-capture-preamble-bounds)
             body   (string-trim (buffer-substring-no-properties
                                  (car bounds) (cdr bounds)))
             marker (org-sm--capture-live-marker)))
     (when (org-string-nw-p body)
       (if marker
-          (org-sm--capture-at-marker marker (lambda () (org-sm--set-body body)))
-        (org-sm--capture 'topic body))
+          (org-sm--capture-at-marker marker (lambda () (org-sm-set-body body)))
+        (org-sm-capture-card 'topic body))
       (set-buffer buf)
       (delete-region (car bounds) (cdr bounds))
       (if marker "refined body" "captured new card"))))
@@ -681,10 +694,10 @@ Internal half of `org-sm-capture-commit'; leaves BUF current either way."
     (when cards
       (if marker
           (org-sm--capture-at-marker marker (lambda () (org-sm--extract-cards cards)))
-        (dolist (c cards) (org-sm--capture 'topic (cdr c) nil nil (car c))))
+        (dolist (c cards) (org-sm-capture-card 'topic (cdr c) nil nil (car c))))
       (set-buffer buf)
       (org-with-wide-buffer
-       (delete-region (cdr (org-sm--capture-preamble-bounds)) (point-max)))
+       (delete-region (cdr (org-sm-capture-preamble-bounds)) (point-max)))
       (format "%s %d card%s"
               (if marker "split into" "captured")
               (length cards) (if (= (length cards) 1) "" "s")))))
@@ -793,7 +806,7 @@ notification containing the captured text.  Signal a `user-error' when the
 clipboard is empty."
   (interactive)
   (let ((content (org-sm--clipboard-content)))
-    (org-sm--capture 'topic content)
+    (org-sm-capture-card 'topic content)
     (let ((coding-system-for-write 'utf-8-unix))
       (save-buffer))
     (message "org-sm: captured clipboard")
@@ -822,6 +835,7 @@ TYPE is a symbol (`topic' or `cloze'); when nil, prompt interactively."
     (org-sm--schedule (time-add (current-time) (days-to-time 1)))
     (org-id-get-create)
     (org-sm--init-item type)
+    (org-sm--card-changed 'mark)
     (message "org-sm: marked as %s%s — due tomorrow" type
              (if (and (eq type 'cloze) (not (org-sm--cloze-markers-p)))
                  " (⚠ no {{cloze}} markers found)" ""))))
@@ -847,11 +861,11 @@ Point-relative and excursion-agnostic: the caller owns buffer/point state
   (insert body "\n")
   id)
 
-(defun org-sm--extract (type selected sel-start sel-end)
+(defun org-sm-extract (type selected sel-start sel-end)
   "Create a child SRS card of TYPE from the parent at point.
 Point must be on the parent heading.  SELECTED is the extracted text.
 SEL-START and SEL-END are its character offsets within the parent body
-\(as returned by `org-sm--body-bounds').  Insert a back-reference at the
+\(as returned by `org-sm-body-bounds').  Insert a back-reference at the
 selection, append a scheduled + inited child heading, and return the new
 child's id.  Pure buffer logic: no region, no prompt, no overlay/UI.
 
@@ -861,7 +875,7 @@ child's id.  Pure buffer logic: no region, no prompt, no overlay/UI.
          {{answer}} at SEL-START; title is the cloze prefix + first N
          chars of the parent body."
   (let* ((level    (org-current-level))
-         (bounds   (org-sm--body-bounds))
+         (bounds   (org-sm-body-bounds))
          (body-raw (buffer-substring-no-properties (car bounds) (cdr bounds)))
          (id       (org-id-new))
          (title    (pcase type
@@ -871,7 +885,7 @@ child's id.  Pure buffer logic: no region, no prompt, no overlay/UI.
                                      (org-sm--truncate-title body-raw)))))
          (child-body (pcase type
                        ('topic selected)
-                       ('cloze (org-sm--body-clean
+                       ('cloze (org-sm-body-clean
                                 (concat (substring body-raw 0 sel-start)
                                         (format "{{%s}}" selected)
                                         (substring body-raw sel-end)))))))
@@ -880,7 +894,9 @@ child's id.  Pure buffer logic: no region, no prompt, no overlay/UI.
     (insert (format "[[id:%s][%s]]" id (pcase type ('topic "<T>") ('cloze "<C>"))))
     ;; Append child heading at end of current subtree.
     (save-excursion
-      (org-sm--insert-child level type title child-body id))))
+      (org-sm--insert-child level type title child-body id))
+    (org-sm--card-changed 'extract)
+    id))
 
 (defun org-sm--extract-cards (cards)
   "Split the parent card at point into child topic cards from CARDS.
@@ -890,10 +906,10 @@ each child is appended to the parent body.  The parent is left intact
 \(not dismissed).  Returns the list of new child ids.  Pure buffer logic:
 no prompt, no AI, no save.
 
-Like `org-sm--extract' but for a whole-card split: many children, no
+Like `org-sm-extract' but for a whole-card split: many children, no
 selection, back-references appended at the end of the parent body."
   (let ((level (org-current-level))
-        (end   (cdr (org-sm--body-bounds)))
+        (end   (cdr (org-sm-body-bounds)))
         ids links)
     (dolist (card cards)
       (let* ((id    (org-id-new))
@@ -910,6 +926,7 @@ selection, back-references appended at the end of the parent body."
     (goto-char end)
     (insert " " (string-join (nreverse links) " "))
     (unless (bolp) (insert "\n"))
+    (org-sm--card-changed 'extract)
     (nreverse ids)))
 
 ;;;###autoload
@@ -929,7 +946,7 @@ body and optionally propose child cards in one call."
   (when (org-before-first-heading-p) (user-error "Not on an org heading"))
   (org-back-to-heading t)
   (let* ((heading (org-get-heading t t t t))
-         (bounds  (org-sm--body-bounds))
+         (bounds  (org-sm-body-bounds))
          (body    (string-trim (buffer-substring-no-properties
                                 (car bounds) (cdr bounds))))
          (type    (org-sm-type))
@@ -948,7 +965,7 @@ body and optionally propose child cards in one call."
   "Return a marker on OLP's deepest heading in FILE, creating what is missing.
 
 The marker must sit *on the heading line*: callers read `org-current-level'
-there to place children (see `org-sm--capture').  Landing on whatever line
+there to place children (see `org-sm-capture-card').  Landing on whatever line
 follows the insertion would silently file cards under an unrelated heading
 whenever the target tree is not the last one in the file."
   (let ((buf (find-file-noselect file)))
@@ -969,19 +986,19 @@ whenever the target tree is not the last one in the file."
                  (insert (make-string level ?*) " " head "\n")
                  (forward-line -1)))))))))
 
-(defun org-sm--capture (type body &optional file olp title)
+(defun org-sm-capture-card (type body &optional file olp title)
   "Create a new SRS card of TYPE with BODY under FILE / OLP; return its id.
 Insert a scheduled + inited heading as the last child of the deepest heading
 in OLP and fill it with BODY (via `org-sm--insert-child').  Like
-`org-sm--extract' but with no parent and no back-reference; saves nothing.
-FILE/OLP default to `org-sm--capture-target-file'/`org-sm-capture-olp'; the
+`org-sm-extract' but with no parent and no back-reference; saves nothing.
+FILE/OLP default to `org-sm-capture-target-file'/`org-sm-capture-olp'; the
 file and headings are created if missing.  TITLE, when blank, is derived
 from BODY.
 
 Contract: leaves the target file's buffer current (deliberately, so callers
 can save it), and that outlives any `with-current-buffer' around the call --
 callers needing their own buffer back must `set-buffer' it explicitly."
-  (let* ((body   (org-sm--body-clean (or body "")))
+  (let* ((body   (org-sm-body-clean (or body "")))
          (id     (org-id-new))
          (prefix (pcase type
                    ('topic org-sm-topic-prefix)
@@ -991,29 +1008,31 @@ callers needing their own buffer back must `set-buffer' it explicitly."
                          (if (and title (org-string-nw-p title))
                              (string-trim title)
                            (org-sm--truncate-title body))))
-         (target (org-sm--ensure-olp (or file (org-sm--capture-target-file))
+         (target (org-sm--ensure-olp (or file (org-sm-capture-target-file))
                                      (or olp org-sm-capture-olp))))
     (set-buffer (marker-buffer target))
     (org-with-wide-buffer
      (goto-char target)
      (set-marker target nil)
-     (org-sm--insert-child (org-current-level) type title body id))))
+     (org-sm--insert-child (org-current-level) type title body id)
+     (org-sm--card-changed 'create)
+     id)))
 
 ;;;###autoload
 (defun org-sm-item-extract ()
   "Extract the active region as a child topic or cloze heading.
-Prompts for the card type, then delegates to `org-sm--extract'.  The
+Prompts for the card type, then delegates to `org-sm-extract'.  The
 parent body is not modified; a back-reference link is inserted at the
 selection."
   (interactive)
   (unless (region-active-p) (user-error "Select text to extract first"))
-  (let* ((bounds   (org-sm--body-bounds))
+  (let* ((bounds   (org-sm-body-bounds))
          (sel-start (- (region-beginning) (car bounds)))
          (sel-end   (- (region-end) (car bounds)))
          (selected  (buffer-substring-no-properties
                      (region-beginning) (region-end)))
          (type      (intern (completing-read "Extract as: " '("topic" "cloze") nil t))))
-    (org-sm--extract type selected sel-start sel-end))
+    (org-sm-extract type selected sel-start sel-end))
   (when (eq org-sm--cloze-state 'revealed)
     (org-sm-cloze-remove-overlays)
     (org-sm-cloze-apply-overlays)))
@@ -1024,20 +1043,20 @@ selection."
   "Return non-nil if current heading carries the :dismissed: tag."
   (member "dismissed" (org-get-tags nil t)))
 
-(defun org-sm--sched-day-delta ()
+(defun org-sm-sched-day-delta ()
   "Return whole-day offset from today to the current heading's SCHEDULED time.
 Negative means overdue, 0 means today, positive means upcoming; nil when the
 heading has no SCHEDULED time."
   (when-let* ((s (org-get-scheduled-time nil)))
     (- (time-to-days s) (time-to-days (current-time)))))
 
-(defun org-sm--due-p ()
+(defun org-sm-due-p ()
   "Return non-nil if current heading is a due (scheduled today or earlier) card."
   (and (org-sm-type)
        (not (org-sm--dismissed-p))
-       (when-let* ((d (org-sm--sched-day-delta))) (<= d 0))))
+       (when-let* ((d (org-sm-sched-day-delta))) (<= d 0))))
 
-(defun org-sm--map-items (fn &optional pred)
+(defun org-sm-map-items (fn &optional pred)
   "Map FN over SRS headings (skipping dismissed ones); collect non-nil results.
 When PRED is non-nil, only entries for which it returns non-nil are visited."
   (delq nil (org-map-entries
@@ -1053,14 +1072,14 @@ When PRED is non-nil, only entries for which it returns non-nil are visited."
   "Return priority-sorted markers for SRS cards satisfying PRED (all if nil)."
   (mapcar #'cdr
           (seq-sort-by #'car #'>
-                       (org-sm--map-items
+                       (org-sm-map-items
                         (lambda () (cons (org-get-priority (org-get-heading t t t t))
                                          (point-marker)))
                         pred))))
 
 (defun org-sm--collect-due-markers ()
   "Return priority-sorted markers for all due SRS cards."
-  (org-sm--collect-markers #'org-sm--due-p))
+  (org-sm--collect-markers #'org-sm-due-p))
 
 (defun org-sm--cleanup-buffer ()
   "Clear review progress, narrowing, cloze overlays and state in the previous buffer.
@@ -1075,7 +1094,9 @@ would silently stay narrowed to the card just reviewed."
       (when org-sm--cloze-state
         (org-sm-cloze-remove-overlays)
         (setq org-sm--cloze-state nil))))
-  (setq org-sm--current-buffer nil))
+  (when (markerp org-sm--current-card-marker)
+    (set-marker org-sm--current-card-marker nil))
+  (setq org-sm--current-buffer nil org-sm--current-card-marker nil))
 
 (defun org-sm--goto-marker (marker)
   "Switch to MARKER's buffer, narrow to its subtree, set up cloze state."
@@ -1087,6 +1108,7 @@ would silently stay narrowed to the card just reviewed."
   (widen)
   (goto-char marker)
   (org-back-to-heading t)
+  (setq org-sm--current-card-marker (point-marker))
   (org-narrow-to-subtree)
   (org-fold-hide-subtree)
   ;; Topics are reading material: also show child heading lines, so the
@@ -1111,11 +1133,13 @@ would silently stay narrowed to the card just reviewed."
 
 (defun org-sm--show-prompt (&optional prev)
   "Show review hint in the echo area, optionally prefixed with PREV result."
-  (let ((pre (if prev (format "✓ %s  |  " prev) "")))
+  (let* ((pre (if prev (format "✓ %s  |  " prev) ""))
+         (banner (funcall org-sm-banner-function (org-sm-card-at-point)))
+         (prefix (if banner (format "%s — " banner) "")))
     (pcase (org-sm-type)
-      ('cloze (message "org-sm %scloze: %s — M-x review-confirm" pre
+      ('cloze (message "org-sm %s%scloze: %s — M-x review-confirm" pre prefix
                        (if (eq org-sm--cloze-state 'hidden) "hidden" "revealed")))
-      ('topic (message "org-sm %stopic — M-x review-confirm" pre))
+      ('topic (message "org-sm %s%stopic — M-x review-confirm" pre prefix))
       (_      (message "org-sm: not an SRS heading")))))
 
 (defun org-sm--advance (&optional prev)
@@ -1136,7 +1160,7 @@ PREV is a string describing the last action, shown in the echo area."
           (force-mode-line-update)
           (org-sm--show-prompt prev))
       (org-sm--cleanup-buffer)
-      (message "%s" (org-sm--bonfire-summary prev)))))
+      (message "%s" (funcall org-sm-finish-function prev nil)))))
 
 (defun org-sm--review-markers (markers &optional what)
   "Start a review session over MARKERS (a list).  WHAT names them in messages."
@@ -1144,8 +1168,8 @@ PREV is a string describing the last action, shown in the echo area."
   (if (null markers)
       (message "org-sm: nothing to review%s 󱁖" (if what (format " (%s)" what) ""))
     (setq org-sm--queue markers
-          org-sm--review-total (length markers)
-          org-sm--session-stats (list :reviewed 0 :dismissed 0 :promoted nil))
+          org-sm--review-total (length markers))
+    (run-hooks 'org-sm-review-start-hook)
     (org-sm--advance)))
 
 ;;;###autoload
@@ -1174,20 +1198,22 @@ PREV is a string describing the last action, shown in the echo area."
   "Interactive topic review: reschedule, postpone, explain, or dismiss.
 Computation is delegated to the pure grading functions; this only
 collects the user's choice and advances the queue."
-  (let* ((auto-ivl (org-sm--topic-read (org-sm--topic-afactor)))
+  (let* ((auto-ivl (org-sm-topic-interval (org-sm-topic-afactor)))
+         (banner (funcall org-sm-banner-function (org-sm-card-at-point)))
+         (prompt (if banner (format "%s · Topic: " banner) "Topic: "))
          (choices  `((?r ,(format "rsch(%dd)" auto-ivl))
                      (?p "postpone")
                      (?e "explain")
                      ,@(when (fboundp 'org-sm-gptel-pick) '((?x "pick"))))))
-    (org-sm--prompt-choice "Topic: " choices
+    (org-sm--prompt-choice prompt choices
       (lambda (key)
         (pcase key
-          (?r (let ((r (org-sm--topic-grade)))
-                (org-sm--advance (plist-get r :feedback))))
-          (?p (let ((r (org-sm--topic-postpone-grade (read-number "Postpone days: " 7))))
-                (org-sm--advance (format "topic postpone → %d days" (plist-get r :interval-days)))))
+          (?r (org-sm--advance (funcall org-sm-feedback-function (org-sm-grade-topic))))
+          (?p (org-sm--advance
+               (funcall org-sm-feedback-function
+                        (org-sm-grade-postpone (read-number "Postpone days: " 7)))))
           (?e (if (fboundp 'org-sm-gptel-explain)
-                  (progn (org-sm--log-review 'topic nil "explain")
+                  (progn (org-sm--log-review 'explain)
                          (org-sm-gptel-explain))
                 (user-error "org-sm-gptel not loaded")))
           ;; Pick does not advance: the user may still edit the draft, then
@@ -1196,12 +1222,12 @@ collects the user's choice and advances the queue."
 
 (defun org-sm--cloze-rating-label (rating secs)
   "Format a menu LABEL for RATING with interval SECS."
-  (format "%s(%s)" rating (org-sm--secs-label secs)))
+  (format "%s(%s)" rating (org-sm-interval-label secs)))
 
 (defun org-sm--review-confirm-cloze ()
   "Interactive cloze review: reveal, then rate (or dismiss).
-Rating computation is delegated to `org-sm--cloze-preview' and
-`org-sm--cloze-grade'; this only handles overlays and the queue."
+Rating computation is delegated to `org-sm-preview-cloze' and
+`org-sm-grade-cloze'; this only handles overlays and the queue."
   (pcase org-sm--cloze-state
     ('hidden
      (org-sm-cloze-reveal-overlays)
@@ -1209,7 +1235,7 @@ Rating computation is delegated to `org-sm--cloze-preview' and
      (message "org-sm: cloze revealed — edit if needed, M-x review-confirm to rate"))
     ('revealed
      (org-sm-cloze-remove-overlays)
-     (let* ((preview (org-sm--cloze-preview))
+     (let* ((preview (org-sm-preview-cloze))
             ;; Map menu key → rating symbol; keys stay stable (r = reveal, r = good).
             (keymap  '((?a . :again) (?h . :hard) (?r . :good) (?e . :easy)))
             (choices (mapcar
@@ -1220,8 +1246,8 @@ Rating computation is delegated to `org-sm--cloze-preview' and
        (org-sm--prompt-choice "Rate: " choices
          (lambda (key)
            (let* ((rating (cdr (assq key keymap)))
-                  (r      (org-sm--cloze-grade rating preview)))
-             (org-sm--advance (plist-get r :feedback)))))))))
+                  (r      (org-sm-grade-cloze rating preview)))
+             (org-sm--advance (funcall org-sm-feedback-function r)))))))))
 
 ;;;###autoload
 (defun org-sm-review-confirm ()
@@ -1231,28 +1257,33 @@ Rating computation is delegated to `org-sm--cloze-preview' and
   (unless (or org-sm--queue org-sm--cloze-state
               (buffer-live-p org-sm--current-buffer))
     (user-error "No active review session — call org-sm-review-start"))
+  (unless (org-sm--current-review-card-p)
+    (user-error "Return to the current review card before confirming"))
   (pcase (or (org-sm-type) (user-error "Not on an SRS heading"))
     ('topic (org-sm--review-confirm-topic))
     ('cloze (org-sm--review-confirm-cloze))))
 
 
-(defun org-sm--dismiss ()
-  "Tag the current item :dismissed: and log it.  Pure data operation, no UI.
+(defun org-sm-dismiss ()
+  "Tag the current item :dismissed:, log it and return a review event.
+This operation modifies the buffer but performs no UI.
 Signals an error if not on an SRS heading or already dismissed.  All SRS
 properties and scheduling data are preserved for `org-sm-item-undismiss'."
   (unless (org-sm-type) (user-error "Not on an SRS heading"))
   (when (org-sm--dismissed-p) (user-error "Already dismissed"))
-  (org-toggle-tag "dismissed" 'on)
-  (org-sm--log-review 'dismissed)
-  (org-sm--record-review-event 'dismissed (org-sm--current-interval-days) nil))
+  (let ((card (org-sm-card-at-point)))
+    (org-toggle-tag "dismissed" 'on)
+    (org-sm--log-review 'dismissed)
+    (org-sm--commit-action 'dismiss card :old-days (plist-get card :interval-days))))
 
 ;;;###autoload
 (defun org-sm-item-dismiss ()
   "Dismiss current SRS item, advancing the queue if a session is active."
   (interactive)
-  (let ((fb (org-sm--dismiss)))
-    ;; Only advance the review queue if a session is active.
-    (if (or org-sm--queue (buffer-live-p org-sm--current-buffer))
+  (let* ((event (org-sm-dismiss))
+         (fb (funcall org-sm-feedback-function event)))
+    ;; A mutation of a different card must not consume this session's queue.
+    (if (plist-get event :session)
         (org-sm--advance fb)
       (message "org-sm: %s" fb))))
 
@@ -1276,6 +1307,7 @@ other key, call ACTION-FN with it."
   (unless (org-sm-type) (user-error "Not on an SRS heading"))
   (unless (org-sm--dismissed-p) (user-error "Item is not dismissed"))
   (org-toggle-tag "dismissed" 'off)
+  (org-sm--card-changed 'restore)
   (if-let* ((s (org-get-scheduled-time nil)))
       (message "org-sm: item restored — due %s" (format-time-string "%F" s))
     (message "org-sm: item restored (no schedule)")))
@@ -1322,7 +1354,7 @@ Point must be on the card heading."
 
 
 ;;;; ---- Source navigation ---------------------------------------------------
-;; A card's source is wherever its own ID is linked — `org-sm--extract' leaves an
+;; A card's source is wherever its own ID is linked — `org-sm-extract' leaves an
 ;; [[id:CHILD]] link at the extraction point — so we just grep the vault for it.
 
 ;;;###autoload
@@ -1336,13 +1368,13 @@ Point must be on the card heading."
 
 ;;;###autoload
 (defun org-sm-review-abort ()
-  "Stop the current review session at a bonfire (a valid endpoint)."
+  "Stop the current review session and clean up its display state."
   (interactive)
   (unless (or org-sm--queue (buffer-live-p org-sm--current-buffer))
     (user-error "No active review session"))
   (setq org-sm--queue nil)
   (org-sm--cleanup-buffer)
-  (message "%s" (org-sm--bonfire-summary)))
+  (message "%s" (funcall org-sm-finish-function nil t)))
 
 (defvar-keymap org-sm-review-repeat-map
   :doc "Repeat keys available during an org-sm review session."
@@ -1410,11 +1442,11 @@ Point must be on the card heading."
 (defun org-sm--tree-render (pred)
   "Render the tree buffer, showing only cards satisfying PRED (all if nil)."
   (let ((buf (get-buffer-create "*org-sm tree*"))
-        (rows (org-sm--map-items
+        (rows (org-sm-map-items
                (lambda ()
                  (list (make-string (org-outline-level) ?*)
                        (org-get-heading t t t t)
-                       (org-sm--sched-day-delta)
+                       (org-sm-sched-day-delta)
                        (org-entry-get nil "PRIORITY")
                        (point-marker)))
                pred)))
@@ -1443,7 +1475,7 @@ DAYS keeps cards due within that many days (overdue always included);
 KEYWORD is a regexp matched against the title."
   (lambda ()
     (and (or (not days)
-             (when-let* ((d (org-sm--sched-day-delta))) (<= d days)))
+             (when-let* ((d (org-sm-sched-day-delta))) (<= d days)))
          (or (not keyword)
              (string-match-p keyword (org-get-heading t t t t))))))
 

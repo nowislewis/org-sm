@@ -17,8 +17,9 @@
 
 (ert-deftest org-sm-web-test-postpone-parses-days ()
   (org-sm-web-test--with-card
-    (should (= (plist-get (org-sm-web--apply-review nil "postpone" "7")
-                          :interval-days) 7))
+    (let ((event (org-sm-web--apply-review nil "postpone" "7")))
+      (should (= (plist-get event :postpone-days) 7))
+      (should (plist-get event :new-days)))
     (should-error (org-sm-web--apply-review nil "postpone" "7garbage")
                   :type 'user-error)
     (should-error (org-sm-web--apply-review nil "postpone" "0")
@@ -28,7 +29,7 @@
   (org-sm-web-test--with-card
     (let ((original (org-sm-web--revision)))
       (org-sm-web--check-revision original)
-      (org-sm--set-body "new body")
+      (org-sm-set-body "new body")
       (should-error (org-sm-web--check-revision original)
                     :type 'org-sm-web-conflict))
     (let ((original (org-sm-web--revision)))

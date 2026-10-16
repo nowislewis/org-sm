@@ -12,6 +12,37 @@ material — instant, no AI, no judgment.  Every AI action operates on an
                  M-z, C-c C-c                     C-c s A, C-c C-a
 #+end_example
 
+* Extension interfaces
+
+=org-sm-card.el= is a read-only storage module independent of FSRS and review UI.
+=org-sm-card-at-point= and =org-sm-cards-in-file= return the same metadata plist:
+=:type= (symbol), =:id=, =:title=, =:dismissed=, =:interval-days=, =:reviews=,
+=:child-topics= and =:child-clozes=. Descendant counts include all nested cards.
+File scans use temporary Org buffers without user mode hooks and prefer unsaved
+contents of an already visiting buffer. Historical postpone/explain log lines
+are excluded from repetition counts without rewriting files.
+
+Frontend operations use =org-sm-body-text= / =org-sm-body-bounds=,
+=org-sm-set-body= / =org-sm-set-title=, =org-sm-extract=,
+=org-sm-capture-card=, =org-sm-preview-cloze=, =org-sm-grade-cloze=,
+=org-sm-topic-interval= / =org-sm-topic-afactor=, =org-sm-grade-topic=,
+=org-sm-grade-postpone= and =org-sm-dismiss=. Mutation operations write to the
+current buffer but do not save it automatically. These are not pure functions.
+
+Review actions return an event with =:action=, pre-action =:card=, =:session=
+and action-specific fields. Session membership matches the exact presented
+card marker, not merely another heading in the same buffer. =:old-days= / =:new-days= are card intervals;
+postpone duration is =:postpone-days=, not the new interval. UI formatting is
+separate through =org-sm-banner-function=, =org-sm-feedback-function= and
+=org-sm-finish-function=.
+
+=org-sm-after-review-functions= receives action events;
+=org-sm-after-card-change-functions= also receives creation, editing,
+extraction and restoration events. Observers must not modify events. Errors in
+observers are reported without failing an already completed write. Session
+summaries should count only events with =:session=, excluding postponements.
+These notifications cover package operations, not arbitrary manual Org edits.
+
 * Card Types
 
 *topic* — repeated reading passage.  No grading; interval grows by A-Factor.
