@@ -55,39 +55,20 @@
 
 ;;;; ---- Customization -------------------------------------------------------
 
-(defgroup org-sm nil
-  "SuperMemo-style incremental reading for org-mode."
-  :group 'org
-  :prefix "org-sm-")
-
 (defcustom org-sm-title-max-length 40
   "Max display-column width for auto-generated heading titles."
-  :type 'integer)
+  :type 'integer
+  :group 'org-sm)
 
 (defcustom org-sm-topic-prefix "[T] "
   "Prefix string prepended to auto-generated topic heading titles."
-  :type 'string)
+  :type 'string
+  :group 'org-sm)
 
 (defcustom org-sm-cloze-prefix "[C] "
   "Prefix string prepended to auto-generated cloze heading titles."
-  :type 'string)
-
-;;;; ---- File discovery ------------------------------------------------------
-
-(defcustom org-sm-directory nil
-  "Root directory scanned by `org-sm-files' for SRS items."
-  :type '(choice (const :tag "Unset" nil) directory))
-
-(defun org-sm-files ()
-  "Return org files under `org-sm-directory' that contain SRS items.
-Rescanned live on each call, so the result never goes stale."
-  (when org-sm-directory
-    (let ((rg  (or (executable-find "rg")
-                   (user-error "org-sm: ripgrep (rg) not found on PATH")))
-          (dir (expand-file-name org-sm-directory)))
-      (with-temp-buffer
-        (call-process rg nil t nil "-l0" "--glob" "*.org" ":SRS_TYPE:" dir)
-        (split-string (buffer-string) "\0" t)))))
+  :type 'string
+  :group 'org-sm)
 
 ;;;; ---- Schedule helper -----------------------------------------------------
 

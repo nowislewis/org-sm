@@ -9,6 +9,28 @@
 (require 'cl-lib)
 (require 'parse-time)
 
+(defgroup org-sm nil
+  "SuperMemo-style incremental reading for org-mode."
+  :group 'org
+  :prefix "org-sm-")
+
+(defcustom org-sm-directory nil
+  "Root directory scanned by `org-sm-files' for SRS items."
+  :type '(choice (const :tag "Unset" nil) directory)
+  :group 'org-sm)
+
+;;;###autoload
+(defun org-sm-files ()
+  "Return org files under `org-sm-directory' that contain SRS items.
+Rescanned live on each call, so the result never goes stale."
+  (when org-sm-directory
+    (let ((rg  (or (executable-find "rg")
+                   (user-error "org-sm: ripgrep (rg) not found on PATH")))
+          (dir (expand-file-name org-sm-directory)))
+      (with-temp-buffer
+        (call-process rg nil t nil "-l0" "--glob" "*.org" ":SRS_TYPE:" dir)
+        (split-string (buffer-string) "\0" t)))))
+
 (defun org-sm-elapsed-days (start end)
   "Return elapsed fractional days from START to END (Emacs time values)."
   (/ (float-time (time-subtract end start)) 86400.0))
