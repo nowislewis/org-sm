@@ -736,6 +736,7 @@ buffer-locally for callers that aren't the plain top-level capture flow."
       (unless (derived-mode-p 'org-sm-capture-mode) (org-sm-capture-mode))
       (kill-local-variable 'org-sm-capture-parent-marker)
       (kill-local-variable 'org-sm-capture-card-type)
+      (kill-local-variable 'header-line-format)
       (erase-buffer)
       (insert content)
       (goto-char (point-min))
@@ -743,6 +744,14 @@ buffer-locally for callers that aren't the plain top-level capture flow."
     (pop-to-buffer buf
                    '(display-buffer-in-side-window
                      (side . right) (window-width . 0.5)))
+    (with-current-buffer buf
+      (message "%s"
+               (substitute-command-keys
+                (concat "Type \\[org-sm-capture-commit] to commit, "
+                        "\\[org-sm-capture-abort] to abort"
+                        (when (and org-sm-capture-parent-marker
+                                   (fboundp 'org-sm-gptel-card-ai))
+                          ", or \\[org-sm-gptel-card-ai] for AI")))))
     buf))
 
 ;;;###autoload
@@ -1108,11 +1117,16 @@ would silently stay narrowed to the card just reviewed."
   "Show default review hint in the echo area for STATE plist."
   (let* ((prev   (plist-get state :prev))
          (pre    (if prev (format "✓ %s  |  " prev) ""))
-         (cstate (plist-get state :cloze-state)))
+         (cstate (plist-get state :cloze-state))
+         (keys   (substitute-command-keys
+                  (concat "\\[org-sm-review-confirm] confirm"
+                          ", \\[org-sm-card-workbench] workbench"
+                          (when (fboundp 'org-sm-gptel-explain)
+                            ", \\[org-sm-gptel-explain] explain")))))
     (pcase (plist-get (plist-get state :card) :type)
-      ('cloze (message "org-sm %scloze: %s — M-x review-confirm" pre
-                       (if (eq cstate 'hidden) "hidden" "revealed")))
-      ('topic (message "org-sm %stopic — M-x review-confirm" pre))
+      ('cloze (message "org-sm %scloze (%s) — %s" pre
+                       (if (eq cstate 'hidden) "hidden" "revealed") keys))
+      ('topic (message "org-sm %stopic — %s" pre keys))
       (_      (message "org-sm: not an SRS heading")))))
 
 (defun org-sm--show-prompt (&optional prev)
@@ -1425,7 +1439,8 @@ Point must be on the card heading."
                               (if (looking-at "▸") 1
                                 (1+ (/ (- (match-end 0) (match-beginning 0)) 2))))
               header-line-format
-              " [r] 复习当前项/书  [C-u r] 复习全部  [TAB] 折叠  [RET] 跳转原文  [g] 刷新")
+              (substitute-command-keys
+               " \\[org-sm-tree-review] 复习当前(C-u全部)  \\[outline-cycle] 折叠  \\[org-sm-tree-goto] 跳转原文  \\[org-sm-tree-revert] 刷新"))
   (outline-minor-mode 1))
 
 (defvar-local org-sm--tree-pred nil "Filter predicate for the current tree, or nil for all.")
