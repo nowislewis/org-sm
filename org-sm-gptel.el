@@ -476,10 +476,12 @@ now stays in the card for next time."
   (with-current-buffer (org-sm-card-workbench)
     (org-sm-gptel--card-run 'pick "挑一段" nil)))
 
-;; Wire the AI action into the core capture workbench when gptel is present.
+;; Wire the AI action into the core capture workbench and review repeat map.
 (with-eval-after-load 'org-sm
   (when (boundp 'org-sm-capture-mode-map)
-    (define-key org-sm-capture-mode-map (kbd "C-c C-a") #'org-sm-gptel-card-ai)))
+    (define-key org-sm-capture-mode-map (kbd "C-c C-a") #'org-sm-gptel-card-ai))
+  (when (boundp 'org-sm-review-repeat-map)
+    (define-key org-sm-review-repeat-map (kbd "?") #'org-sm-gptel-explain)))
 
 (provide 'org-sm-gptel)
 ;;; org-sm-gptel.el ends here

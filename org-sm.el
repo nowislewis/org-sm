@@ -1113,16 +1113,23 @@ would silently stay narrowed to the card just reviewed."
     (org-fold-show-context 'org-goto)
     (recenter)))
 
+(defun org-sm-review-keys-hint ()
+  "Return keybinding hint string for an active review session."
+  (substitute-command-keys
+   (concat "\\<org-sm-review-repeat-map>"
+           "\\[org-sm-review-confirm] confirm"
+           ", \\[org-sm-card-workbench] workbench"
+           (when (fboundp 'org-sm-gptel-explain)
+             ", \\[org-sm-gptel-explain] explain")
+           ", \\[org-sm-item-dismiss] dismiss"
+           ", \\[org-sm-review-abort] abort")))
+
 (defun org-sm-default-prompt (state)
   "Show default review hint in the echo area for STATE plist."
   (let* ((prev   (plist-get state :prev))
          (pre    (if prev (format "✓ %s  |  " prev) ""))
          (cstate (plist-get state :cloze-state))
-         (keys   (substitute-command-keys
-                  (concat "\\[org-sm-review-confirm] confirm"
-                          ", \\[org-sm-card-workbench] workbench"
-                          (when (fboundp 'org-sm-gptel-explain)
-                            ", \\[org-sm-gptel-explain] explain")))))
+         (keys   (org-sm-review-keys-hint)))
     (pcase (plist-get (plist-get state :card) :type)
       ('cloze (message "org-sm %scloze (%s) — %s" pre
                        (if (eq cstate 'hidden) "hidden" "revealed") keys))
@@ -1375,10 +1382,13 @@ Point must be on the card heading."
 (defvar-keymap org-sm-review-repeat-map
   :doc "Repeat keys available during an org-sm review session."
   "r" #'org-sm-review-confirm
+  "w" #'org-sm-card-workbench
   "d" #'org-sm-item-dismiss
   "a" #'org-sm-review-abort)
 
 (dolist (command '(org-sm-review-start
+                   org-sm-review-start-light
+                   org-sm-tree-review
                    org-sm-review-confirm
                    org-sm-item-dismiss))
   (put command 'repeat-map 'org-sm-review-repeat-map))
