@@ -142,4 +142,48 @@
               (should (equal (org-sm-card-at-point) (car cards))))))
       (delete-file file))))
 
+(ert-deftest org-sm-zotero-create-and-late-comment-append ()
+  (require 'org-sm-zotero)
+  (let* ((dir (make-temp-file "org-sm-zotero-test-" t))
+         (org-sm-directory dir)
+         (org-sm-capture-file (expand-file-name "sm-cards.org" dir))
+         (org-sm-capture-olp '("sm-cards"))
+         (item '(:key "ITEMKEY1" :title "测试书籍"))
+         (src1 '(:key "ANNOKEY1" :type "highlight" :attachment "ATTKEY1"
+                 :text "这是一段重要摘录" :comment nil :page "12" :color "#ff6666"))
+         (img-src '(:key "ANNOIMG1" :type "image" :attachment "ATTKEY1"
+                    :text "" :comment "架构图：脉动阵列数据流" :page "15" :color "#ffd400"))
+         (index (org-sm-zotero--index))
+         (olp (org-sm-zotero--olp item))
+         (key (org-sm-zotero--key item src1))
+         (body (org-sm-zotero--body item "作者甲" src1))
+         (img-body (org-sm-zotero--body item "作者甲" img-src))
+         (action (org-sm-zotero--color-action (plist-get src1 :color))))
+    (unwind-protect
+        (progn
+          (should (eq action ?A))
+          (should (eq (org-sm-zotero--color-action "#aaaaaa") 'ignore))
+          (should (null (org-sm-zotero--color-action "#ffd400")))
+          (should (string-match-p "zotero://open-pdf/library/items/ATTKEY1\\?page=12&annotation=ANNOKEY1" body))
+          (should (string-match-p "来源：测试书籍 / 作者甲，第 12 页\n\\[\\[zotero://" body))
+          (should (string-match-p "\\`\\[图片批注\\] 架构图：脉动阵列数据流\n\n来源：" img-body))
+          (org-sm-zotero--create body key index olp nil action)
+          (let ((marker (gethash key index)))
+            (should (markerp marker))
+            ;; Late comment added in Zotero appends before 来源： and only once.
+            (should (org-sm-zotero--append-comment marker "事后补充的想法"))
+            (should-not (org-sm-zotero--append-comment marker "重复追加应被忽略"))
+            (with-current-buffer (marker-buffer marker)
+              (org-with-wide-buffer
+               (goto-char marker)
+               (should (equal (org-entry-get nil "PRIORITY") "A"))
+               (let ((card-body (org-sm-body-text)))
+                 (should (string-match-p "批注：事后补充的想法\n\n来源：测试书籍" card-body)))
+               (goto-char (point-min))
+               (re-search-forward "\\[\\[zotero://" nil t)
+               (should (equal (org-element-property :type (org-element-context)) "zotero"))))))
+      (when-let* ((buf (get-file-buffer org-sm-capture-file)))
+        (kill-buffer buf))
+      (delete-directory dir t))))
+
 ;;; org-sm-core-test.el ends here

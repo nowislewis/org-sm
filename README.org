@@ -247,6 +247,26 @@ shown in the header line.
 the card: rate it with ~r~, pick another passage, or postpone.  Nothing
 advances the queue for you.
 
+* Zotero import (org-sm-zotero)
+
+Read-only client for Zotero 10's built-in Local HTTP API
+(~http://127.0.0.1:23119/api~).  Reads go through Zotero's live process without
+touching ~zotero.sqlite~ on disk; newly highlighted passages are visible
+immediately and trashed items are excluded automatically.
+
+- ~M-x org-sm-zotero-import~: pick books and import new PDF/EPUB highlights (and
+  commented image/area annotations) as topic cards under ~sm-cards / <book>~,
+  ordered by Zotero's reading ~sortIndex~.
+- ~org-sm-zotero-color-rules~: maps highlight hex colors to actions (by default,
+  red ~#ff6666~ / ~#ff0000~ stamps priority ~[#A]~, gray ~#aaaaaa~ is ~ignore~
+  for pure reading marks, and other colors create standard topic cards).
+- Deduplicates vault-wide by ~ZOTERO_KEY~; adding a comment later in Zotero to
+  an already imported highlight appends ~批注：~ in place without resetting its
+  schedule.
+- Cards include a ~[[zotero://...][在 Zotero 中打开]]~ deep link (registered as
+  an Org link type so ~C-c C-o~ jumps straight to the PDF/EPUB annotation in
+  Zotero).
+
 * Web review & mobile editing (org-sm-web)
 
 Phone browser UI for reviewing and editing due cards over a local network; needs
