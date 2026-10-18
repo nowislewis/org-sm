@@ -36,7 +36,7 @@ Rescanned live on each call, so the result never goes stale."
   (/ (float-time (time-subtract end start)) 86400.0))
 
 (defun org-sm-book-label (&optional file)
-  "Return a clean book/topic title for FILE (or `buffer-file-name'), stripping Denote metadata."
+  "Return a clean book/topic title for FILE, stripping Denote metadata."
   (when-let* ((path (or file (buffer-file-name)))
               (name (file-name-nondirectory path)))
     (replace-regexp-in-string
@@ -51,23 +51,37 @@ Rescanned live on each call, so the result never goes stale."
     (when (member type '("topic" "cloze"))
       (let ((last (org-entry-get nil "SRS_LAST"))
             (scheduled (org-get-scheduled-time nil))
+            (dismissed (and (member "dismissed" (org-get-tags nil t)) t))
             (end (save-excursion (outline-next-heading) (point)))
-            (reviews 0))
+            (reviews 0)
+            dis-date)
 	;; Historical explain/postpone entries used the topic prefix but were
 	;; not repetitions.  Read them correctly without rewriting user files.
 	(save-excursion
           (org-back-to-heading t)
-          (while (re-search-forward "^[ \t]*- \\(topic\\|cloze\\)\\b\\(.*\\)$" end t)
-            (unless (string-match-p "\\`[ \t]+\\(?:postpone\\|explain\\)\\b"
-                                    (match-string 2))
-              (cl-incf reviews))))
-	(list :type (intern type) :id (org-entry-get nil "ID")
-              :title (org-get-heading t t t t)
-              :dismissed (and (member "dismissed" (org-get-tags nil t)) t)
-              :interval-days (when (and last scheduled)
-                               (max 0 (floor (org-sm-elapsed-days
-                                              (parse-iso8601-time-string last) scheduled))))
-              :reviews reviews :child-topics 0 :child-clozes 0)))))
+          (while (re-search-forward
+                  "^[ \t]*- \\(topic\\|cloze\\|dismissed\\)\\b\\(.*\\)$" end t)
+            (let ((kind (match-string 1))
+                  (rest (match-string 2)))
+              (if (equal kind "dismissed")
+                  (when (and (null dis-date)
+                             (string-match
+                              "\\[\\([0-9]\\{4\\}-[0-9]\\{2\\}-[0-9]\\{2\\}\\)" rest))
+                    (setq dis-date (match-string 1 rest)))
+                (unless (string-match-p "\\`[ \t]+\\(?:postpone\\|explain\\)\\b" rest)
+                  (cl-incf reviews))))))
+	(let ((days (when (and last scheduled)
+                      (org-sm-elapsed-days
+                       (parse-iso8601-time-string last) scheduled))))
+          (list :type (intern type) :id (org-entry-get nil "ID")
+                :title (org-get-heading t t t t)
+                :dismissed dismissed
+                :date (or (and dismissed dis-date)
+                          (and last (>= (length last) 10) (substring last 0 10)))
+                :interval-days (and days (max 0 (round days)))
+                :interval-mins (and days (> days 0) (< days 0.5)
+                                    (max 1 (round (* days 1440))))
+                :reviews reviews :child-topics 0 :child-clozes 0))))))
 
 (defun org-sm-card-at-point ()
   "Read the current card and count all descendant topic/cloze cards.
