@@ -397,7 +397,7 @@ avoid recomputing."
                     (error "Unknown cloze rating: %S" rating)))
          (card  (plist-get entry :card))
          (secs  (plist-get entry :interval-secs))
-         (days  (floor (/ secs 86400.0)))
+         (days  (max 0 (round (/ secs 86400.0))))
          (label (org-sm-interval-label secs))
          (extra (format "%s  %s" rating label)))
     (org-sm--cloze-write card)
@@ -1064,7 +1064,7 @@ otherwise Cloze cards precede Topic cards."
                         pred))))
 
 (defun org-sm--cleanup-buffer ()
-  "Clear review progress, narrowing, cloze overlays and state in the previous buffer.
+  "Clear review progress, narrowing, overlays, and state in previous buffer.
 Widening belongs here rather than in the caller: a review queue spans files, so
 by the time the next card is shown the previous buffer is no longer current and
 would silently stay narrowed to the card just reviewed."

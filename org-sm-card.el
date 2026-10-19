@@ -70,14 +70,14 @@ Rescanned live on each call, so the result never goes stale."
                     (setq dis-date (match-string 1 rest)))
                 (unless (string-match-p "\\`[ \t]+\\(?:postpone\\|explain\\)\\b" rest)
                   (cl-incf reviews))))))
-	(let ((days (when (and last scheduled)
-                      (org-sm-elapsed-days
-                       (parse-iso8601-time-string last) scheduled))))
+	(let* ((last-time (and last (parse-iso8601-time-string last)))
+               (days (when (and last-time scheduled)
+                       (org-sm-elapsed-days last-time scheduled))))
           (list :type (intern type) :id (org-entry-get nil "ID")
                 :title (org-get-heading t t t t)
                 :dismissed dismissed
                 :date (or (and dismissed dis-date)
-                          (and last (>= (length last) 10) (substring last 0 10)))
+                          (and last-time (format-time-string "%F" last-time)))
                 :interval-days (and days (max 0 (round days)))
                 :interval-mins (and days (> days 0) (< days 0.5)
                                     (max 1 (round (* days 1440))))
