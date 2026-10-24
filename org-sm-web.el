@@ -66,6 +66,19 @@ or a trusted LAN.  A token in an HTTP URL does not replace TLS."
 (defvar org-sm-web--token nil
   "Token actually enforced by the running server, or nil.")
 
+(defvar org-sm-web-hud-function nil
+  "Optional function returning climb and relic HUD plist for the web UI.
+Called with one boolean argument INCLUDE-FOREST.")
+
+(defvar org-sm-web-badge-function nil
+  "Optional function mapping a card metadata plist to a short identity badge.
+Lets a gamification layer label cards without org-sm knowing its vocabulary.")
+
+(defun org-sm-web--hud (&optional include-forest)
+  "Return the HUD plist from `org-sm-web-hud-function', or nil."
+  (when (functionp org-sm-web-hud-function)
+    (ignore-errors (funcall org-sm-web-hud-function include-forest))))
+
 (defun org-sm-web--param (name)
   "Return query/form parameter NAME for the running request, or nil."
   (cadr (assoc name httpd-query)))
@@ -115,21 +128,40 @@ this unauthenticated server under an attacker-controlled hostname."
 
 (defalias 'org-sm-web--book-label #'org-sm-book-label)
 
+(defconst org-sm-web--container-headings '("notes" "xnote" "xnotes" "sm-cards")
+  "Top-level generic container headings omitted from section breadcrumbs.")
+
+(defun org-sm-web--clean-heading (title)
+  "Strip SRS prefixes and trim whitespace from heading TITLE."
+  (string-trim
+   (replace-regexp-in-string "\\`\\[[TC]\\][ \t]*" "" (or title ""))))
+
+(defun org-sm-web--section-olp ()
+  "Return clean ancestor heading titles for point, excluding generic roots."
+  (seq-remove
+   (lambda (s) (member (downcase s) org-sm-web--container-headings))
+   (mapcar #'org-sm-web--clean-heading (org-get-outline-path nil))))
+
 (defun org-sm-web--card-at-point ()
   "Serialize the current org-sm card for the browser, or nil if it has no ID.
 Read-only: uses `org-id-get' rather than `org-id-get-create' because an
 overdue card that has never been opened in Emacs must not gain a property
 drawer just because a phone asked for the queue.  A card with no ID cannot be
 addressed back by the review endpoint, so it is skipped instead."
-  (when-let* ((id (org-id-get)))
+  (when-let* ((id (org-id-get))
+              (meta (org-sm-card-at-point)))
     (list :id id
           :type (symbol-name (org-sm-type))
           :title (org-get-heading t t t t)
           :body (org-sm-body-text)
           :book (org-sm-web--book-label)
+          :olp (vconcat (org-sm-web--section-olp))
           ;; `org-sm-sched-day-delta' is negative for overdue cards, so
           ;; negate it: days late is a positive number here.
           :overdue (max 0 (- (or (org-sm-sched-day-delta) 0)))
+          :priority (org-get-priority (org-get-heading t t t t))
+          :badge (and (functionp org-sm-web-badge-function)
+                      (funcall org-sm-web-badge-function meta))
           :intervals (org-sm-web--intervals)
           :revision (org-sm-web--revision))))
 
@@ -177,7 +209,7 @@ on a LAN-facing server it leaks absolute filesystem paths."
          (progn
            (org-sm-web--authorize!)
            (unless (equal (caar httpd-request)
-                          ,(if (memq endpoint '(api/session api/git/diff)) "GET" "POST"))
+                          ,(if (memq endpoint '(api/session api/hud api/git/diff)) "GET" "POST"))
              (user-error "Wrong HTTP method"))
            (insert (org-sm-web--json (progn ,@body))))
        (org-sm-web-denied
@@ -194,7 +226,10 @@ on a LAN-facing server it leaks absolute filesystem paths."
         (httpd-send-header t 'application/json 400)))))
 
 (org-sm-web--json-servlet api/session ()
-  (org-sm-web--session))
+  (list :cards (org-sm-web--session) :hud (org-sm-web--hud nil)))
+
+(org-sm-web--json-servlet api/hud ()
+  (append (list :ok t) (org-sm-web--hud t)))
 
 (defun org-sm-web--rating (rating)
   "Validate web RATING and return its keyword form."
@@ -226,8 +261,12 @@ on a LAN-facing server it leaks absolute filesystem paths."
 (org-sm-web--json-servlet api/review/:id (rating action days revision)
   (org-sm-web--with-card id
     (org-sm-web--check-revision revision)
-    (prog1 (append (list :ok t) (org-sm-web--apply-review rating action days))
-      (org-sm-web--save!))))
+    (let ((event (org-sm-web--apply-review rating action days)))
+      (org-sm-web--save!)
+      (append (list :ok t
+                    :feedback (funcall org-sm-feedback-function event)
+                    :hud (org-sm-web--hud nil))
+              event))))
 
 ;;;; ---- Writing from the phone ---------------------------------------------
 ;; Editing is what the browser is actually for: iOS gives real selection
@@ -304,7 +343,7 @@ extract on such a card would silently mark the wrong span."
         ;; it never saw.
         (let ((parent (org-sm-web--card-at-point)))
           (org-sm-web--save!)
-          (list :ok t :id child :parent parent)))))))
+          (list :ok t :id child :parent parent :hud (org-sm-web--hud nil))))))))
 
 ;;;; ---- Git synchronization ------------------------------------------------
 

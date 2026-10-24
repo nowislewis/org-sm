@@ -77,7 +77,8 @@ Rescanned live on each call, so the result never goes stale."
                 :title (org-get-heading t t t t)
                 :dismissed dismissed
                 :date (or (and dismissed dis-date)
-                          (and last-time (format-time-string "%F" last-time)))
+                          (and last-time (format-time-string "%F" last-time))
+                          (and scheduled (format-time-string "%F" scheduled)))
                 :interval-days (and days (max 0 (round days)))
                 :interval-mins (and days (> days 0) (< days 0.5)
                                     (max 1 (round (* days 1440))))

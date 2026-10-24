@@ -3,38 +3,49 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#16161e">
+<meta name="theme-color" content="#fdfcf9" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#16161e" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <title>org-sm review</title>
 <style>
+  /* Warm editorial paper palette shared with nowis-learning. */
   :root {
-    --bg: #16161e;
-    --surface: #1f2335;
-    --card: #24283b;
-    --border: #2f354f;
-    --text: #c0caf5;
-    --dim: #787c99;
-    --accent: #7aa2f7;
-    --again: #f7768e;
-    --hard: #ff9e64;
-    --good: #9ece6a;
-    --easy: #7dcfff;
-    --radius: 14px;
+    --bg: #fdfcf9;
+    --surface: #ffffff;
+    --card: #ffffff;
+    --border: #d8d3c4;
+    --text: #1a1a1a;
+    --dim: #666156;
+    --accent: #9a3c1c;
+    --accent-soft: #f5e6df;
+    --teal: #2b5f6b;
+    --teal-soft: #e6f0f2;
+    --good: #2f6f4f;
+    --good-soft: #e6f4ec;
+    --gold: #b07d12;
+    --gold-soft: #fbf3dc;
+    --track: #e6e1d3;
+    --radius: 12px;
+    --mono: "iA Writer Mono", "SF Mono", Menlo, Consolas, monospace;
   }
-  @media (prefers-color-scheme: light) {
+  @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #f5f6fa;
-      --surface: #ffffff;
-      --card: #ffffff;
-      --border: #e2e4ed;
-      --text: #24283b;
+      --bg: #16161e;
+      --surface: #1f2335;
+      --card: #24283b;
+      --border: #2f354f;
+      --text: #c0caf5;
       --dim: #787c99;
-      --accent: #3d59a1;
-      --again: #d94a52;
-      --hard: #c96a1e;
-      --good: #2f8f3e;
-      --easy: #1a72c9;
+      --accent: #f7768e;
+      --accent-soft: #3b2733;
+      --teal: #7dcfff;
+      --teal-soft: #213140;
+      --good: #9ece6a;
+      --good-soft: #263425;
+      --gold: #e0af68;
+      --gold-soft: #3a3124;
+      --track: #2f354f;
     }
   }
 
@@ -47,7 +58,6 @@
     font: 16px/1.7 -apple-system, "PingFang SC", "Segoe UI", system-ui, sans-serif;
     overflow: hidden;
   }
-
   body {
     display: flex;
     flex-direction: column;
@@ -55,109 +65,118 @@
     padding-bottom: env(safe-area-inset-bottom);
   }
 
-  /* Header Bar */
+  /* Quiet peripheral top bar: floor + 5 step pips (clickable for vine). */
   header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 7px 14px;
+    flex: none;
+  }
+  .hud-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 16px;
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
-    flex-none: none;
-    font-size: 13px;
+    gap: 10px;
   }
-  .progress-wrap {
+  .hud-stat {
+    font: 700 13px/1.4 var(--mono);
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 10px;
+    min-width: 0;
+    cursor: pointer;
   }
-  .badge-count {
-    font-weight: 700;
-    color: var(--accent);
-  }
-  .header-actions button {
+  .hud-floor { color: var(--good); white-space: nowrap; }
+  .hud-actions { display: flex; gap: 6px; flex: none; }
+  .hud-actions button {
     background: transparent;
     border: 1px solid var(--border);
     color: var(--text);
-    padding: 5px 12px;
-    border-radius: 8px;
-    font-size: 13px;
+    padding: 3px 9px;
+    border-radius: 7px;
+    font: 12px/1.5 var(--mono);
     cursor: pointer;
   }
-
-  #prog-bar {
-    height: 3px;
-    background: var(--accent);
-    width: 0%;
-    transition: width 0.2s ease;
+  .hud-actions button.on {
+    border-color: var(--teal);
+    background: var(--teal-soft);
+    color: var(--teal);
+    font-weight: 700;
   }
+  .pips { display: inline-flex; gap: 4px; }
+  .pip {
+    width: 14px;
+    height: 7px;
+    border-radius: 3px;
+    background: var(--track);
+    transition: background 0.2s ease;
+  }
+  .pip.done { background: var(--good); }
 
-  /* Card Container */
   main {
     flex: 1;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
-    padding: 16px;
+    padding: 14px;
     display: flex;
     flex-direction: column;
   }
-
   .meta-info {
     display: flex;
     align-items: center;
     gap: 10px;
     font-size: 12px;
     color: var(--dim);
-    margin-bottom: 12px;
-  }
-  .tag-overdue {
-    color: var(--hard);
-    font-weight: 600;
+    margin-bottom: 10px;
   }
   .tag-book {
-    max-width: 60vw;
+    flex: 1;
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
+  .badge {
+    flex: none;
+    padding: 1px 8px;
+    border-radius: 5px;
+    font: 700 11px/1.6 var(--mono);
+  }
+  .badge.cloze { background: var(--teal-soft); color: var(--teal); }
+  .badge.topic { background: var(--accent-soft); color: var(--accent); }
 
   .card-box {
     background: var(--card);
     border: 1px solid var(--border);
+    border-top: 3px solid var(--teal);
     border-radius: var(--radius);
-    padding: 18px 20px;
-    box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+    padding: 16px 18px;
     flex: 1;
     display: flex;
     flex-direction: column;
     min-height: 180px;
   }
-
+  .card-box.topic { border-top-color: var(--accent); }
   .card-title {
     font-size: 14px;
     color: var(--dim);
     font-weight: 600;
-    margin-bottom: 14px;
-    padding-bottom: 10px;
+    margin-bottom: 12px;
+    padding-bottom: 9px;
     border-bottom: 1px solid var(--border);
   }
-
   .card-body {
-    font-size: 18px;
-    line-height: 1.85;
+    font: 18px/1.85 "iA Writer Quattro", Georgia, "PingFang SC", "Songti SC", serif;
     white-space: pre-wrap;
     word-break: break-word;
     flex: 1;
   }
-
-  /* Cloze markers */
   .cloze-hide {
-    background: color-mix(in srgb, var(--accent) 30%, transparent);
-    color: var(--accent);
-    border: 1px solid var(--accent);
+    background: var(--teal);
+    color: var(--bg);
     border-radius: 6px;
     padding: 1px 8px;
-    font-weight: 700;
+    font: 700 0.9em var(--mono);
     cursor: pointer;
     user-select: none;
   }
@@ -168,28 +187,20 @@
     padding: 0 4px;
   }
 
-  /* Footer Controls */
   footer {
-    padding: 12px 16px;
+    padding: 10px 14px;
     background: var(--surface);
     border-top: 1px solid var(--border);
-    flex-none: none;
+    flex: none;
   }
-
-  .btn-row {
-    display: flex;
-    gap: 10px;
-  }
-  .btn-row + .btn-row {
-    margin-top: 10px;
-  }
-
+  .btn-row { display: flex; gap: 8px; }
+  .btn-row + .btn-row { margin-top: 8px; }
   .btn {
     flex: 1;
-    border: 0;
-    border-radius: var(--radius);
-    padding: 12px 6px;
-    font-size: 16px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 10px 4px;
+    font-size: 15px;
     font-weight: 600;
     cursor: pointer;
     display: flex;
@@ -198,64 +209,46 @@
     justify-content: center;
     min-height: 52px;
     touch-action: manipulation;
-  }
-  .btn:active { filter: brightness(0.85); }
-  .btn .sub {
-    font-size: 11px;
-    font-weight: 500;
-    opacity: 0.8;
-    margin-top: 2px;
-  }
-
-  .btn-good { background: var(--good); color: #16161e; }
-  .btn-again { background: var(--again); color: #16161e; }
-  .btn-hard { background: var(--hard); color: #16161e; }
-  .btn-easy { background: var(--easy); color: #16161e; }
-  .btn-ghost {
     background: var(--card);
     color: var(--text);
-    border: 1px solid var(--border);
   }
+  .btn:active { filter: brightness(0.9); }
+  .btn:disabled { opacity: 0.5; }
+  .btn .sub { font: 500 11px/1.4 var(--mono); opacity: 0.85; margin-top: 2px; }
+  .btn-good { background: var(--good); border-color: var(--good); color: var(--bg); }
+  .btn-again { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+  .btn-hard { background: var(--gold-soft); border-color: var(--gold); color: var(--gold); }
+  .btn-easy { background: var(--teal-soft); border-color: var(--teal); color: var(--teal); }
 
-  /* Edit & Sync Modal Sheets */
-  #edit-modal, #sync-modal {
+  /* Full-screen sheets: relic, edit, sync. */
+  .sheet {
     position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
+    inset: 0;
     background: var(--bg);
     z-index: 100;
     display: none;
     flex-direction: column;
     padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
   }
-  #edit-modal.active, #sync-modal.active {
-    display: flex;
-  }
-
-  .edit-header {
+  .sheet.active { display: flex; }
+  .sheet-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     padding: 12px 0;
     border-bottom: 1px solid var(--border);
   }
-  .edit-header h3 {
-    margin: 0;
-    font-size: 17px;
-  }
-  .edit-header button {
+  .sheet-header h3 { margin: 0; font-size: 17px; }
+  .sheet-header button {
     background: transparent;
     border: 0;
     font-size: 16px;
-    color: var(--accent);
+    color: var(--teal);
     cursor: pointer;
     font-weight: 600;
   }
-  .edit-header button.cancel {
-    color: var(--dim);
-    font-weight: 400;
-  }
-
-  .edit-fields {
+  .sheet-header button.cancel { color: var(--dim); font-weight: 400; }
+  .sheet-body {
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -263,36 +256,87 @@
     padding: 16px 0;
     overflow-y: auto;
   }
-  .edit-fields label {
-    font-size: 12px;
-    color: var(--dim);
-    font-weight: 600;
+  .sheet-body label { font-size: 12px; color: var(--dim); font-weight: 600; }
+
+  .relic-box {
+    background: #141720;
+    color: #e2e8f0;
+    border: 1.5px solid #2e364f;
+    border-radius: var(--radius);
+    padding: 14px;
   }
-  .edit-title-input {
+  .relic-box.unlocked { border-color: #eab308; }
+  .relic-head {
+    display: flex;
+    justify-content: space-between;
+    font: 12px/1.5 var(--mono);
+    color: #94a3b8;
+    margin-bottom: 10px;
+  }
+  .relic-head strong { color: #fde047; }
+  .relic-svg { border-radius: 8px; overflow: hidden; line-height: 0; }
+  .relic-svg svg { width: 100%; height: auto; display: block; }
+  .relic-title { margin-top: 10px; font: 700 14px/1.5 var(--mono); color: #fde047; }
+  .relic-lore { font-size: 13px; line-height: 1.6; color: #cbd5e1; }
+
+  .vine { display: flex; flex-direction: column; gap: 2px; font: 13px/1.9 var(--mono); }
+  .vine-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 2px 10px;
+    border-radius: 8px;
+    color: var(--text);
+  }
+  .vine-row .f { width: 3.4em; text-align: right; font-weight: 700; flex: none; }
+  .vine-row .r { flex: 1; min-width: 0; }
+  .vine-row.cleared { color: var(--dim); opacity: 0.55; }
+  .vine-row.relic { color: var(--gold); font-weight: 700; }
+  .vine-row.current {
+    color: var(--good);
+    background: var(--good-soft);
+    font-weight: 700;
+  }
+  .vine-row .mini { display: inline-flex; gap: 3px; margin-left: 8px; vertical-align: middle; }
+  .vine-row .mini .pip { width: 14px; height: 6px; }
+  .vine-sum { font: 12px/1.6 var(--mono); color: var(--gold); padding: 4px 10px 0; }
+  .vine-sum.dim { color: var(--dim); }
+
+  .stat-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+  }
+  .stat-card h4 { margin: 0 0 6px; font: 700 13px/1.5 var(--mono); }
+  .stat-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font: 12px/1.9 var(--mono);
+  }
+  .stat-row .name { width: 2.2em; flex: none; }
+  .stat-row .bar { flex: 1; height: 7px; background: var(--track); border-radius: 4px; overflow: hidden; }
+  .stat-row .bar span { display: block; height: 100%; background: var(--teal); border-radius: 4px; }
+  .stat-row.monster .bar span { background: var(--accent); }
+  .stat-row .num { width: 5.4em; text-align: right; flex: none; }
+
+  .edit-title-input, .edit-body-textarea {
     width: 100%;
     background: var(--card);
     border: 1px solid var(--border);
     color: var(--text);
-    padding: 10px 14px;
     border-radius: 10px;
-    font-size: 16px;
     outline: none;
   }
+  .edit-title-input { padding: 10px 14px; font-size: 16px; }
   .edit-body-textarea {
-    width: 100%;
     flex: 1;
     min-height: 220px;
-    background: var(--card);
-    border: 1px solid var(--border);
-    color: var(--text);
     padding: 14px;
-    border-radius: 10px;
     font: 16px/1.7 ui-monospace, Menlo, -apple-system, sans-serif;
-    outline: none;
     resize: none;
-    -webkit-overflow-scrolling: touch;
   }
-
   .edit-toolbar {
     display: flex;
     gap: 10px;
@@ -310,28 +354,39 @@
     font-weight: 600;
     cursor: pointer;
   }
-
-  /* Empty state */
-  .empty-state {
-    margin: auto;
-    text-align: center;
+  .mono-box {
+    font: 12px/1.6 ui-monospace, Menlo, monospace;
     color: var(--dim);
+    white-space: pre-wrap;
+    padding: 10px 12px;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 8px;
   }
+  #sync-diff-container {
+    flex: 1;
+    min-height: 220px;
+    overflow: auto;
+    white-space: pre;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .empty-state { margin: auto; text-align: center; color: var(--dim); }
   .empty-icon { font-size: 48px; margin-bottom: 12px; }
 
-  /* Toast Notification */
   #toast {
     position: fixed;
-    top: calc(env(safe-area-inset-top) + 60px);
+    top: calc(env(safe-area-inset-top) + 64px);
     left: 50%;
     transform: translateX(-50%);
-    background: rgba(36, 40, 59, 0.95);
+    max-width: 90vw;
+    background: var(--surface);
     border: 1px solid var(--border);
     color: var(--text);
     padding: 8px 18px;
     border-radius: 20px;
     font-size: 14px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.12);
     pointer-events: none;
     opacity: 0;
     transition: opacity 0.2s ease;
@@ -343,15 +398,18 @@
 <body>
 
 <header>
-  <div class="progress-wrap">
-    <span>待复习: <span class="badge-count" id="count-left">-</span></span>
-  </div>
-  <div class="header-actions">
-    <button id="btn-open-sync">🔄 同步</button>
-    <button id="btn-open-edit">✎ 编辑卡片</button>
+  <div class="hud-row">
+    <div class="hud-stat" id="btn-open-relic" title="点开通天藤蔓与遗迹">
+      <span class="hud-floor" id="hud-floor">待复习</span>
+      <span class="pips" id="hud-pips"></span>
+    </div>
+    <div class="hud-actions">
+      <button id="btn-mode" title="切换 6 卡轻远征 / 全量">🎲 6</button>
+      <button id="btn-open-sync" title="Git 同步">🔄</button>
+      <button id="btn-open-edit" title="编辑卡片">✎</button>
+    </div>
   </div>
 </header>
-<div id="prog-bar"></div>
 
 <main id="main">
   <div class="empty-state">
@@ -362,39 +420,47 @@
 
 <footer id="footer"></footer>
 
-<!-- Sync Modal Sheet -->
-<div id="sync-modal">
-  <div class="edit-header">
+<!-- Relic & Forest Sheet -->
+<div class="sheet" id="relic-modal">
+  <div class="sheet-header">
+    <button class="cancel" id="btn-relic-close">关闭</button>
+    <h3>🧗 藤蔓 · 遗迹 · 森林</h3>
+    <span style="width:2em"></span>
+  </div>
+  <div class="sheet-body" id="relic-body"></div>
+</div>
+
+<!-- Sync Sheet -->
+<div class="sheet" id="sync-modal">
+  <div class="sheet-header">
     <button class="cancel" id="btn-sync-close">关闭</button>
     <h3>Git 知识库同步</h3>
-    <button id="btn-sync-pull">拉取最新 (Pull)</button>
+    <button id="btn-sync-pull">拉取 (Pull)</button>
   </div>
-  <div class="edit-fields" style="gap: 14px;">
+  <div class="sheet-body">
     <div style="display:flex;justify-content:space-between;align-items:center;">
-      <label>本地变更摘要 (Status & Stat)</label>
-      <button id="btn-sync-refresh" style="background:transparent;border:0;color:var(--accent);font-size:13px;cursor:pointer">刷新 ⟳</button>
+      <label>本地变更摘要 (Status &amp; Stat)</label>
+      <button id="btn-sync-refresh" style="background:transparent;border:0;color:var(--teal);font-size:13px;cursor:pointer">刷新 ⟳</button>
     </div>
-    <div id="sync-stat" style="font-size:12px;color:var(--dim);white-space:pre-wrap;font-family:ui-monospace,Menlo,monospace;padding:10px 12px;background:var(--card);border:1px solid var(--border);border-radius:8px;">正在检查...</div>
-
+    <div id="sync-stat" class="mono-box">正在检查...</div>
     <label>变更详情 (Diff 预览)</label>
-    <div id="sync-diff-container" style="flex:1;min-height:220px;background:var(--card);border:1px solid var(--border);border-radius:10px;padding:12px;overflow:auto;font:12px/1.6 ui-monospace,Menlo,monospace;white-space:pre;-webkit-overflow-scrolling:touch;">无变更</div>
+    <div id="sync-diff-container" class="mono-box">无变更</div>
   </div>
   <div style="padding:12px 0;border-top:1px solid var(--border);">
     <button id="btn-sync-push" class="btn btn-good" style="width:100%">✓ 确认变更并提交推送 (Push)</button>
   </div>
 </div>
 
-<!-- Edit Modal Sheet -->
-<div id="edit-modal">
-  <div class="edit-header">
+<!-- Edit Sheet -->
+<div class="sheet" id="edit-modal">
+  <div class="sheet-header">
     <button class="cancel" id="btn-edit-cancel">取消</button>
     <h3>修改卡片</h3>
     <button id="btn-edit-save">保存</button>
   </div>
-  <div class="edit-fields">
+  <div class="sheet-body">
     <label>标题 (Title)</label>
     <input type="text" id="edit-title" class="edit-title-input" autocorrect="off">
-
     <label>正文 (Org-mode 源码)</label>
     <textarea id="edit-body" class="edit-body-textarea" spellcheck="false"></textarea>
   </div>
@@ -411,6 +477,7 @@
 "use strict";
 
 const $ = id => document.getElementById(id);
+const LIGHT_SIZE = 6;
 
 const API = {
   token: new URLSearchParams(location.search).get("t")
@@ -435,22 +502,30 @@ const API = {
 };
 
 const State = {
+  all: [],
   queue: [],
   index: 0,
   revealed: false,
   totalInitial: 0,
   busy: false,
+  light: sessionStorage.getItem("org_sm_mode") !== "all",
+  hud: null,
   get current() {
     return this.queue[this.index] || null;
   }
 };
 
-function toast(msg) {
+function esc(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function toast(msg, ms) {
   const el = $("toast");
   el.textContent = msg;
   el.classList.add("show");
   clearTimeout(el._timer);
-  el._timer = setTimeout(() => el.classList.remove("show"), 2000);
+  el._timer = setTimeout(() => el.classList.remove("show"), ms || 2000);
 }
 
 function parseCloze(text) {
@@ -466,46 +541,105 @@ function parseCloze(text) {
   return parts;
 }
 
+/* Light mode samples LIGHT_SIZE cards, randomly within equal priority
+   (lower Org priority value = more important), mirroring
+   `org-sm-review-start-light'.  Full mode keeps the server's stalest-first
+   order. */
+function buildQueue() {
+  if (!State.light) return State.all.slice();
+  const shuffled = State.all
+    .map(c => ({ c, k: [c.priority == null ? 0 : -c.priority, Math.random()] }))
+    .sort((a, b) => a.k[0] - b.k[0] || a.k[1] - b.k[1])
+    .map(x => x.c);
+  return shuffled.slice(0, LIGHT_SIZE);
+}
+
+function startQueue() {
+  State.queue = buildQueue();
+  State.totalInitial = State.queue.length;
+  State.index = 0;
+  State.revealed = false;
+}
+
+/* ---------------------- Climb HUD ---------------------- */
+
+function pipsHtml(h) {
+  const per = h["steps-per-floor"] || 6;
+  const step = h["step-in-floor"] || 0;
+  return Array.from({ length: per }, (_, i) =>
+    `<i class="pip${i < step ? " done" : ""}"></i>`).join("");
+}
+
+function renderHud() {
+  const h = State.hud;
+  const pips = $("hud-pips");
+  $("btn-mode").textContent = State.light ? "🎲 6" : "∞";
+  $("btn-mode").classList.toggle("on", State.light);
+  if (!h) {
+    $("hud-floor").textContent = "待复习";
+    pips.innerHTML = "";
+    return;
+  }
+  $("hud-floor").textContent = `🧗 ${h.floor}F`;
+  pips.innerHTML = pipsHtml(h);
+}
+
+/* Merge a fresh HUD from a POST reply; stay silent during normal steps. */
+function applyHud(next) {
+  if (!next) return;
+  const prev = State.hud;
+  State.hud = Object.assign({}, prev || {}, next);
+  if (!prev) return;
+  if (next["unlocked-count"] > prev["unlocked-count"]) {
+    toast(`🏆 收集遗物！${next["unlocked-count"]}/${next["total-relics"]} 件`, 4000);
+    openRelic();
+  } else if (next["open-tiles"] > prev["open-tiles"]) {
+    toast(`🏺 ${prev.floor}F 破雾 ${next["open-tiles"]}/36`, 3200);
+  }
+}
+
+/* ---------------------- Card rendering ---------------------- */
+
 function render() {
   const c = State.current;
   const main = $("main");
   const footer = $("footer");
 
-  $("btn-open-edit").style.display = c ? "inline-block" : "none";
-  updateProgress();
+  $("btn-open-edit").style.display = c ? "" : "none";
+  renderHud();
 
   if (!c) {
-    main.innerHTML = `
-      <div class="empty-state">
-        <div class="empty-icon">🎉</div>
-        <div style="font-size:18px;font-weight:600;margin-bottom:6px">已完成全部复习</div>
-        <div>没有待复习的卡片了</div>
+    const more = State.light && State.all.length > 0;
+    const h = State.hud;
+    main.innerHTML = (h ? vineHtml(h) : "") + `
+      <div class="empty-state" style="margin:20px auto">
+        <div class="empty-icon">🔥</div>
+        <div style="font-size:18px;font-weight:600;margin-bottom:6px">${more ? "本轮篝火休整" : "已完成全部复习"}</div>
+        <div>${more ? "可点上方藤蔓查看迷雾遗迹与森林，或继续下一轮" : "今日待复习队列已清空"}</div>
       </div>`;
-    footer.innerHTML = "";
+    footer.innerHTML = more
+      ? `<div class="btn-row"><button class="btn btn-good" id="btn-next-round">🎲 再攀 1 层（${Math.min(LIGHT_SIZE, State.all.length)} 张）</button></div>`
+      : "";
+    if (main.firstElementChild) main.firstElementChild.onclick = openRelic;
+    if (more) $("btn-next-round").onclick = () => { startQueue(); render(); };
     return;
   }
 
-  // Render meta info & card
   main.innerHTML = "";
-
   const meta = document.createElement("div");
   meta.className = "meta-info";
-  const overdue = document.createElement("span");
-  overdue.className = "tag-overdue";
-  overdue.textContent = c.overdue > 0 ? `逾期 ${c.overdue} 天` : "今日到期";
   const book = document.createElement("span");
   book.className = "tag-book";
-  book.textContent = c.book ? `《${c.book}》` : "";
-  const spacer = document.createElement("span");
-  spacer.style.flex = "1";
-  const type = document.createElement("span");
-  type.textContent = c.type === "cloze" ? "填空卡" : "阅读卡";
-  meta.append(overdue, book, spacer, type);
+  const crumb = (c.olp && c.olp.length) ? " › " + c.olp.join(" › ") : "";
+  book.textContent = (c.book ? `《${c.book}》` : "") + crumb;
+  const badge = document.createElement("span");
+  badge.className = "badge " + c.type;
+  badge.textContent = c.badge || (c.type === "cloze" ? "填空卡" : "阅读卡");
+  meta.append(book, badge);
   main.appendChild(meta);
 
   const box = document.createElement("div");
-  box.className = "card-box";
-
+  box.className = "card-box " + c.type;
   const title = document.createElement("div");
   title.className = "card-title";
   title.textContent = c.title || "（无标题）";
@@ -513,39 +647,40 @@ function render() {
 
   const body = document.createElement("div");
   body.className = "card-body";
-
   if (c.type === "cloze") {
-    const tokens = parseCloze(c.body || "");
-    tokens.forEach(tok => {
+    parseCloze(c.body || "").forEach(tok => {
       if (tok.text !== undefined) {
         body.appendChild(document.createTextNode(tok.text));
-      } else {
-        const span = document.createElement("span");
-        if (State.revealed) {
-          span.className = "cloze-show";
-          span.textContent = tok.cloze;
-        } else {
-          span.className = "cloze-hide";
-          span.textContent = "[___]";
-          span.onclick = (e) => {
-            e.stopPropagation();
-            State.revealed = true;
-            render();
-          };
-        }
-        body.appendChild(span);
+        return;
       }
+      const span = document.createElement("span");
+      if (State.revealed) {
+        span.className = "cloze-show";
+        span.textContent = tok.cloze;
+      } else {
+        span.className = "cloze-hide";
+        span.textContent = "[___]";
+        span.onclick = (e) => {
+          e.stopPropagation();
+          State.revealed = true;
+          render();
+        };
+      }
+      body.appendChild(span);
     });
   } else {
     body.textContent = c.body || "";
   }
-
   box.appendChild(body);
   main.appendChild(box);
 
-  // Render action footer
   renderButtons(footer, c);
   footer.querySelectorAll("button").forEach(btn => { btn.disabled = State.busy; });
+}
+
+function ratingButton(cls, rating, label, iv) {
+  return `<button class="btn ${cls}" data-rating="${rating}">${label}` +
+    `<span class="sub">${esc(iv || "")}</span></button>`;
 }
 
 function renderButtons(footer, c) {
@@ -553,26 +688,19 @@ function renderButtons(footer, c) {
   const iv = c.intervals || {};
 
   if (c.type === "cloze" && !State.revealed) {
-    const row = document.createElement("div");
-    row.className = "btn-row";
-    row.innerHTML = `<button class="btn btn-good" id="btn-show-cloze">显示答案 (空格)</button>`;
-    footer.appendChild(row);
-    $("btn-show-cloze").onclick = () => {
-      State.revealed = true;
-      render();
-    };
+    footer.innerHTML = `<div class="btn-row"><button class="btn btn-good" id="btn-show-cloze">显示答案 (空格)</button></div>`;
+    $("btn-show-cloze").onclick = () => { State.revealed = true; render(); };
     return;
   }
 
-  if (c.type === "cloze" && State.revealed) {
+  if (c.type === "cloze") {
     const row = document.createElement("div");
     row.className = "btn-row";
-    row.innerHTML = `
-      <button class="btn btn-again" data-rating="again">重来<span class="sub">${iv.again || "10m"}</span></button>
-      <button class="btn btn-hard" data-rating="hard">困难<span class="sub">${iv.hard || "1d"}</span></button>
-      <button class="btn btn-good" data-rating="good">良好<span class="sub">${iv.good || "3d"}</span></button>
-      <button class="btn btn-easy" data-rating="easy">简单<span class="sub">${iv.easy || "7d"}</span></button>
-    `;
+    row.innerHTML =
+      ratingButton("btn-again", "again", "重来", iv.again) +
+      ratingButton("btn-hard", "hard", "困难", iv.hard) +
+      ratingButton("btn-good", "good", "良好", iv.good) +
+      ratingButton("btn-easy", "easy", "简单", iv.easy);
     footer.appendChild(row);
     row.querySelectorAll("button").forEach(btn => {
       btn.onclick = () => reviewCloze(btn.dataset.rating);
@@ -580,21 +708,17 @@ function renderButtons(footer, c) {
     return;
   }
 
-  // Topic card controls
   const r1 = document.createElement("div");
   r1.className = "btn-row";
   r1.innerHTML = `
-    <button class="btn btn-good" id="btn-topic-rsch">已读确认<span class="sub">间隔 ${iv.reschedule || "自动"}</span></button>
-    <button class="btn btn-hard" id="btn-topic-postpone">稍后<span class="sub">推迟几天</span></button>
-  `;
+    <button class="btn btn-good" id="btn-topic-rsch">已读确认<span class="sub">间隔 ${esc(iv.reschedule || "自动")}</span></button>
+    <button class="btn btn-hard" id="btn-topic-postpone">稍后<span class="sub">推迟几天</span></button>`;
   footer.appendChild(r1);
-
   const r2 = document.createElement("div");
   r2.className = "btn-row";
   r2.innerHTML = `
-    <button class="btn btn-ghost" id="btn-topic-skip">跳过本卡</button>
-    <button class="btn btn-ghost" id="btn-topic-dismiss">不再复习</button>
-  `;
+    <button class="btn" id="btn-topic-skip">跳过本卡</button>
+    <button class="btn" id="btn-topic-dismiss">不再复习</button>`;
   footer.appendChild(r2);
 
   $("btn-topic-rsch").onclick = () => reviewTopic("reschedule");
@@ -603,15 +727,9 @@ function renderButtons(footer, c) {
   $("btn-topic-dismiss").onclick = () => reviewTopic("dismiss");
 }
 
-function updateProgress() {
-  const left = State.queue.length;
-  $("count-left").textContent = left;
-  const done = Math.max(0, State.totalInitial - left);
-  const pct = State.totalInitial ? (done / State.totalInitial * 100) : 0;
-  $("prog-bar").style.width = pct + "%";
-}
+/* ---------------------- Review actions ---------------------- */
 
-async function sendReview(params, successMessage) {
+async function sendReview(params) {
   const c = State.current;
   if (!c || State.busy) return;
   State.busy = true;
@@ -619,8 +737,8 @@ async function sendReview(params, successMessage) {
   try {
     const result = await API.call(`/api/review/${encodeURIComponent(c.id)}`,
                                   { ...params, revision: c.revision });
-    toast(successMessage(result, c));
-    advanceQueue();
+    applyHud(result.hud);
+    advanceQueue(c.id);
   } catch (e) {
     toast("操作失败: " + e.message);
   } finally {
@@ -630,19 +748,13 @@ async function sendReview(params, successMessage) {
 }
 
 function reviewCloze(rating) {
-  return sendReview({ rating }, (_result, c) =>
-    rating + " (下次: " + ((c.intervals || {})[rating] || "已排程") + ")");
+  return sendReview({ rating });
 }
 
 function reviewTopic(action, days) {
   const params = { action };
   if (days) params.days = days;
-  return sendReview(params, result => {
-    if (action === "dismiss") return "已移出复习队列";
-    if (action === "postpone") return `已推迟 ${days} 天`;
-    return "已读确认 (下次: " + (result["interval-days"] ?
-      result["interval-days"] + "天" : "已排程") + ")";
-  });
+  return sendReview(params);
 }
 
 function promptPostpone() {
@@ -665,16 +777,96 @@ function skipCurrent() {
   toast("已移至队列末尾");
 }
 
-function advanceQueue() {
+/* Drop a reviewed card from both the round and the full due list. */
+function advanceQueue(id) {
   State.queue.splice(State.index, 1);
-  if (State.index >= State.queue.length) {
-    State.index = 0;
-  }
+  State.all = State.all.filter(x => x.id !== id);
+  if (State.index >= State.queue.length) State.index = 0;
   State.revealed = false;
   render();
 }
 
-/* ---------------------- Native iOS Editing Sheet ---------------------- */
+/* ---------------------- Relic & Forest sheet ---------------------- */
+
+function statRows(rows, max, cls, num) {
+  return rows.map(r => `
+    <div class="stat-row ${cls}">
+      <span class="name">${esc(r.label)}</span>
+      <span class="bar"><span style="width:${Math.round((num(r) / max) * 100)}%"></span></span>
+      <span class="num">${esc(r.text || num(r))}</span>
+    </div>`).join("");
+}
+
+/* Vine ladder (highest floor first): icon = floor type, color = status. */
+function vineHtml(h) {
+  const rows = (h.vine || []).map(r => {
+    const relic = r["relic-done"];
+    const special = r.special;
+    const status = r.status;
+    const icon = status === "current" ? "🧗" : relic ? "🏆" : special ? "🏺" : "·";
+    const note = relic ? `#${r.relic}` : special ? `${r.tile}/36` : "";
+    const mini = status === "current"
+      ? `<span class="mini">${pipsHtml(h)}</span>` : "";
+    const cls = status === "locked" && (relic || special) ? "relic" : status;
+    return `<div class="vine-row ${cls}"><span>${icon}</span><span class="f">${r.floor}F</span>` +
+           `<span class="r">${note}${mini}</span></div>`;
+  }).join("");
+  const more = h["unlocked-count"] < h["total-relics"]
+    ? `<div class="vine-sum dim">🏺 ${h["special-floor"]}F 下次破雾 · 🏆 ${h["relic-floor"]}F 收集遗物 (还差 ${h["relic-floor"] - h.floor + 1} 层)</div>` : "";
+  return `<div class="stat-card"><h4>🧗 通天藤蔓 · 第 ${h.floor} 层</h4>
+    <div class="vine-sum dim" style="padding:0 0 6px">🧗当前 · ·普通层 · 🏺破雾(5F) · 🏆收集(180F) (灰=已过)</div>
+    <div class="vine">${rows}</div>
+    <div class="vine-sum">🏅 已登 ${h["cleared-floors"]} 层 · 已收集 ${h["unlocked-count"]}/${h["total-relics"]} 件</div>${more}</div>`;
+}
+
+async function openRelic() {
+  $("relic-modal").classList.add("active");
+  $("relic-body").innerHTML = "<div class='mono-box'>正在载入…</div>";
+  try {
+    const h = await API.call("/api/hud");
+    State.hud = Object.assign({}, State.hud || {}, h);
+    renderHud();
+    const done = h["relic-unlocked-p"];
+    const per = h["steps-per-floor"] || 6;
+    const stages = h.stages || [];
+    const chron = h.chronicle || [];
+    const maxS = Math.max(1, ...stages.map(s => s.count));
+    $("relic-body").innerHTML = vineHtml(h) + `
+      <div class="relic-box${done ? " unlocked" : ""}">
+        <div class="relic-head">
+          <span>已收集 ${h["unlocked-count"]}/${h["total-relics"]} 件 · ${esc(h["relic-key"] || "")}</span>
+          <strong>破雾 ${h["open-tiles"]}/36</strong>
+        </div>
+        <div class="relic-svg">${h.svg || ""}</div>
+        <div class="relic-title">${done ? esc(h.title) : "??? UNKNOWN RELIC"}</div>
+        <div class="relic-lore">${done ? esc(h.lore)
+          : `第 ${h.floor} 层 (${h["step-in-floor"]}/${per} 格)。每 24 分 (6 卡) 登顶 1 层，每 5 层破雾 1 格。`}</div>
+      </div>
+      <div class="stat-card">
+        <h4>🌲 知识森林 · 共 ${h.trees || 0} 棵树</h4>
+        <div class="vine-sum dim" style="padding:0 0 6px">🌱幼苗 · 🌿成株 · 🌲常青 · 🗿古树 · ⛰️远古</div>
+        ${statRows(stages, maxS, "", s => s.count)}
+      </div>
+      ${chron.length ? `<div class="stat-card">
+        <h4>📅 攀登编年史</h4>
+        ${chron.map(c => {
+          const badge = (c.relics && c.relics.length) ? `🏆 收集${c.relics.join(" ")}`
+            : c.tiles > 0 ? `🏺 破雾 ${c.tiles}` : "";
+          return `<div class="vine-row"><span class="f" style="width:4.5em;text-align:left">${esc(c.period)}</span>` +
+                 `<span class="r" style="color:var(--good);font-weight:700">+${c.floors} 层 <span style="color:var(--dim);font-weight:400">(${c.from}F→${c.to}F)</span></span>` +
+                 `<span style="color:var(--gold)">${esc(badge)}</span></div>`;
+        }).join("")}
+      </div>` : ""}`;
+  } catch (e) {
+    $("relic-body").innerHTML = `<div class='mono-box'>载入失败: ${esc(e.message)}</div>`;
+  }
+}
+
+function closeRelic() {
+  $("relic-modal").classList.remove("active");
+}
+
+/* ---------------------- Editing sheet ---------------------- */
 
 function openEditSheet() {
   const c = State.current;
@@ -715,7 +907,6 @@ async function saveEditSheet() {
   }
 }
 
-// Wrap selected text in textarea with {{...}}
 function toolWrapCloze() {
   const area = $("edit-body");
   const s = area.selectionStart;
@@ -725,8 +916,7 @@ function toolWrapCloze() {
     return;
   }
   const val = area.value;
-  const selText = val.slice(s, e);
-  area.value = val.slice(0, s) + "{{" + selText + "}}" + val.slice(e);
+  area.value = val.slice(0, s) + "{{" + val.slice(s, e) + "}}" + val.slice(e);
   area.selectionStart = s;
   area.selectionEnd = e + 4;
   area.focus();
@@ -759,10 +949,11 @@ async function toolExtract(type) {
     const res = await API.call(`/api/extract/${encodeURIComponent(c.id)}`, {
       start: String(start), end: String(end), type, revision: c.revision
     });
-    toast(type === "cloze" ? "已创建填空子卡" : "已创建阅读子卡");
+    toast(type === "cloze" ? "🌱 已创建填空子卡" : "📖 已创建阅读子卡");
     c.body = res.parent.body;
     c.title = res.parent.title;
     c.revision = res.parent.revision;
+    applyHud(res.hud);
     render();
   } catch (err) {
     openEditSheetAfterExtractFailure(c);
@@ -786,17 +977,17 @@ function renderDiff(text) {
     return '<span style="color:var(--dim)">无已跟踪文件的差异（未跟踪文件内容不在此显示）</span>';
   }
   return text.split("\n").map(line => {
-    const esc = line.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    const e = esc(line);
     if (line.startsWith("+") && !line.startsWith("+++")) {
-      return `<div style="color:var(--good);background:color-mix(in srgb, var(--good) 12%, transparent);">${esc}</div>`;
+      return `<div style="color:var(--good);background:var(--good-soft);">${e}</div>`;
     } else if (line.startsWith("-") && !line.startsWith("---")) {
-      return `<div style="color:var(--again);background:color-mix(in srgb, var(--again) 12%, transparent);">${esc}</div>`;
+      return `<div style="color:var(--accent);background:var(--accent-soft);">${e}</div>`;
     } else if (line.startsWith("@@")) {
-      return `<div style="color:var(--accent);font-weight:700;margin:4px 0;">${esc}</div>`;
+      return `<div style="color:var(--teal);font-weight:700;margin:4px 0;">${e}</div>`;
     } else if (line.startsWith("diff ") || line.startsWith("index ")) {
-      return `<div style="color:var(--dim);font-weight:600;">${esc}</div>`;
+      return `<div style="color:var(--dim);font-weight:600;">${e}</div>`;
     }
-    return `<div>${esc}</div>`;
+    return `<div>${e}</div>`;
   }).join("");
 }
 
@@ -805,7 +996,6 @@ async function loadGitDiff() {
   $("sync-diff-container").innerHTML = "正在拉取变动...";
   const pushBtn = $("btn-sync-push");
   pushBtn.disabled = true;
-
   try {
     const res = await API.call("/api/git/diff");
     if (!res.ok) throw new Error(res.error || "获取 Diff 失败");
@@ -814,14 +1004,13 @@ async function loadGitDiff() {
       (res.outgoing ? `\n\n已有 ${res.outgoing} 个本地提交待推送（涉及整个 Git 分支）` : "");
     $("sync-diff-container").innerHTML = renderDiff(res.diff) +
       (res.status.includes("??") ? "<p>⚠ 未跟踪文件只列出名称，内容未预览。</p>" : "");
-
     if (res.hasChanges || res.outgoing) {
       pushBtn.disabled = false;
       pushBtn.className = "btn btn-good";
       pushBtn.textContent = res.hasChanges ? "✓ 确认变更并提交推送 (Push)" : "重试推送现有提交 (Push)";
     } else {
       pushBtn.disabled = true;
-      pushBtn.className = "btn btn-ghost";
+      pushBtn.className = "btn";
       pushBtn.textContent = "无本地变更或待推送提交";
     }
   } catch (e) {
@@ -853,7 +1042,7 @@ async function syncPull() {
     alert("Git Pull 失败: " + e.message);
   } finally {
     pullBtn.disabled = false;
-    pullBtn.textContent = "拉取最新 (Pull)";
+    pullBtn.textContent = "拉取 (Pull)";
   }
 }
 
@@ -866,9 +1055,7 @@ async function syncPush() {
     const res = await API.call("/api/git/sync", { action: "push" });
     toast(res.commit || "提交并推送成功");
     await loadGitDiff();
-    setTimeout(() => {
-      closeSyncModal();
-    }, 1200);
+    setTimeout(closeSyncModal, 1200);
   } catch (e) {
     alert("Git Push 失败: " + e.message);
     pushBtn.disabled = false;
@@ -878,13 +1065,16 @@ async function syncPush() {
 
 /* ---------------------- Keyboard & Boot ---------------------- */
 
-window.addEventListener("keydown", (e) => {
-  if ($("edit-modal").classList.contains("active") || State.busy) return;
-  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
+function anySheetOpen() {
+  return ["edit-modal", "sync-modal", "relic-modal"]
+    .some(id => $(id).classList.contains("active"));
+}
 
+window.addEventListener("keydown", (e) => {
+  if (anySheetOpen() || State.busy) return;
+  if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
   const c = State.current;
   if (!c) return;
-
   if (e.code === "Space") {
     e.preventDefault();
     if (c.type === "cloze" && !State.revealed) {
@@ -901,6 +1091,15 @@ window.addEventListener("keydown", (e) => {
   }
 });
 
+$("btn-mode").onclick = () => {
+  if (State.busy) return;
+  State.light = !State.light;
+  sessionStorage.setItem("org_sm_mode", State.light ? "light" : "all");
+  startQueue();
+  render();
+};
+$("btn-open-relic").onclick = openRelic;
+$("btn-relic-close").onclick = closeRelic;
 $("btn-open-edit").onclick = openEditSheet;
 $("btn-edit-cancel").onclick = closeEditSheet;
 $("btn-edit-save").onclick = async () => {
@@ -911,7 +1110,6 @@ $("btn-edit-save").onclick = async () => {
 $("btn-tool-cloze").onclick = toolWrapCloze;
 $("btn-tool-extract-topic").onclick = () => toolExtract("topic");
 $("btn-tool-extract-cloze").onclick = () => toolExtract("cloze");
-
 $("btn-open-sync").onclick = openSyncModal;
 $("btn-sync-close").onclick = closeSyncModal;
 $("btn-sync-refresh").onclick = loadGitDiff;
@@ -919,21 +1117,21 @@ $("btn-sync-pull").onclick = syncPull;
 $("btn-sync-push").onclick = syncPush;
 
 async function init() {
-  if (API.token) {
-    sessionStorage.setItem("org_sm_token", API.token);
-  }
+  if (API.token) sessionStorage.setItem("org_sm_token", API.token);
   try {
-    const list = await API.call("/api/session");
-    State.queue = list;
-    State.totalInitial = list.length;
-    State.index = 0;
+    const res = await API.call("/api/session");
+    // Accept both {cards, hud} and the legacy bare array.
+    State.all = Array.isArray(res) ? res : (res.cards || []);
+    State.hud = Array.isArray(res) ? null : (res.hud || null);
+    startQueue();
     render();
   } catch (e) {
+    const auth = e.message.includes("令牌");
     $("main").innerHTML = `
       <div class="empty-state">
-        <div class="empty-icon">${e.message.includes("令牌") ? "🔑" : "⚠️"}</div>
-        <div style="font-size:16px;font-weight:600;margin-bottom:6px">${e.message.includes("令牌") ? "需要访问令牌" : "载入失败"}</div>
-        <div>${e.message}</div>
+        <div class="empty-icon">${auth ? "🔑" : "⚠️"}</div>
+        <div style="font-size:16px;font-weight:600;margin-bottom:6px">${auth ? "需要访问令牌" : "载入失败"}</div>
+        <div>${esc(e.message)}</div>
       </div>`;
   }
 }
