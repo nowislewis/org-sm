@@ -968,9 +968,8 @@ function vineHtml(h) {
            `<span class="r">${note}${mini}</span></div>`;
   }).join("");
   return `<div class="stat-card"><h4>🧗 通天藤蔓 · 第 ${h.floor} 层</h4>
-    <div class="vine-sum dim" style="padding:0 0 6px">🧗当前 · ·普通层 · 🏺破雾(5F) · 🏆收集(180F) (灰=已过)</div>
     <div class="vine">${rows}</div>
-    <div class="vine-sum">🏅 已登 ${h["cleared-floors"]} 层 · 已收集 ${h["unlocked-count"]}/${h["total-relics"]} 件</div></div>`;
+    <div class="vine-sum dim">🏅 已登 ${h["cleared-floors"]} 层 · 已收集 ${h["unlocked-count"]}/${h["total-relics"]} 件</div></div>`;
 }
 
 async function openRelic() {
@@ -981,20 +980,16 @@ async function openRelic() {
     State.hud = Object.assign({}, State.hud || {}, h);
     renderHud();
     const done = h["relic-unlocked-p"];
-    const per = h["steps-per-floor"] || 6;
     const stages = h.stages || [];
     const chron = h.chronicle || [];
     const maxS = Math.max(1, ...stages.map(s => s.count));
     $("relic-body").innerHTML = vineHtml(h) + `
       <div class="relic-box${done ? " unlocked" : ""}">
         <div class="relic-head">
-          <span>已收集 ${h["unlocked-count"]}/${h["total-relics"]} 件 · ${esc(h["relic-key"] || "")}</span>
-          <strong>破雾 ${h["open-tiles"]}/36</strong>
+          <span>${esc(h["relic-key"] || "")} · 破雾 ${h["open-tiles"]}/36</span>
         </div>
         <div class="relic-svg">${h.svg || ""}</div>
-        <div class="relic-title">${done ? esc(h.title) : "??? UNKNOWN RELIC"}</div>
-        <div class="relic-lore">${done ? esc(h.lore)
-          : `第 ${h.floor} 层 (${h["step-in-floor"]}/${per} 格)。每 24 分 (6 卡) 登顶 1 层，每 5 层破雾 1 格。`}</div>
+        ${done ? `<div class="relic-title">${esc(h.title)}</div><div class="relic-lore">${esc(h.lore)}</div>` : ""}
       </div>
       <div class="stat-card">
         <h4>🌲 知识森林 · 共 ${h.trees || 0} 棵树</h4>
@@ -1004,11 +999,13 @@ async function openRelic() {
       ${chron.length ? `<div class="stat-card">
         <h4>📅 攀登编年史</h4>
         ${chron.map(c => {
-          const badge = (c.relics && c.relics.length) ? `🏆 收集${c.relics.join(" ")}`
+          const hasRelic = c.relics && c.relics.length;
+          const badge = hasRelic ? `🏆 收集${c.relics.join(" ")}`
             : c.tiles > 0 ? `🏺 破雾 ${c.tiles}` : "";
+          const badgeStyle = hasRelic ? "color:var(--gold);font-weight:700" : "color:var(--dim)";
           return `<div class="vine-row"><span class="f" style="width:4.5em;text-align:left">${esc(c.period)}</span>` +
                  `<span class="r" style="color:var(--good);font-weight:700">+${c.floors} 层 <span style="color:var(--dim);font-weight:400">(${c.from}F→${c.to}F)</span></span>` +
-                 `<span style="color:var(--gold)">${esc(badge)}</span></div>`;
+                 `<span style="${badgeStyle}">${esc(badge)}</span></div>`;
         }).join("")}
       </div>` : ""}`;
   } catch (e) {
