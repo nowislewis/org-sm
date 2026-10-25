@@ -669,7 +669,8 @@ function renderHud() {
     pips.innerHTML = "";
     return;
   }
-  $("hud-floor").textContent = `🧗 ${h.floor}F`;
+  const mark = (h.floor % 180 === 0) ? " 🏆" : (h.floor % 5 === 0) ? " 🏺" : "";
+  $("hud-floor").textContent = `🧗 ${h.floor}F${mark}`;
   pips.innerHTML = pipsHtml(h);
 }
 
