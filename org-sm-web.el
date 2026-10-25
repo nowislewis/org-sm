@@ -185,7 +185,7 @@ addressed back by the review endpoint, so it is skipped instead."
     (signal 'org-sm-web-conflict nil)))
 
 (defun org-sm-web--session ()
-  "Return the whole due queue as one JSON-ready vector, priority then stalest first.
+  "Return the due queue vector sorted by priority then overdue days.
 Ships body text and precomputed intervals for every due card in one reply,
 so switching cards needs no GET; each write still awaits its POST response."
   (apply #'vector
