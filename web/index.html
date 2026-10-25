@@ -935,24 +935,36 @@ function statRows(rows, max, cls, num) {
 
 /* Vine ladder (highest floor first): icon = floor type, color = status. */
 function vineHtml(h) {
-  const rows = (h.vine || []).map(r => {
+  const vine = h.vine || [];
+  const top = vine.length ? vine[0].floor : h.floor;
+  const rf = h["relic-floor"];
+  const more = h["unlocked-count"] < h["total-relics"] && rf;
+  const left = rf ? rf - h.floor + 1 : 0;
+  const head = (more && rf > top)
+    ? `<div class="vine-row relic"><span>🏆</span><span class="f">${rf}F</span>` +
+      `<span class="r">#${h["unlocked-count"] + 1} <span style="color:var(--dim);font-weight:400">(还差 ${left} 层)</span></span></div>` +
+      (rf - 1 > top
+        ? `<div class="vine-row cleared"><span>⋮</span><span class="f">...</span><span class="r"></span></div>`
+        : "")
+    : "";
+  const rows = head + vine.map(r => {
     const relic = r["relic-done"];
     const special = r.special;
     const status = r.status;
     const icon = status === "current" ? "🧗" : relic ? "🏆" : special ? "🏺" : "·";
-    const note = relic ? `#${r.relic}` : special ? `${r.tile}/36` : "";
+    const note = relic
+      ? `#${r.relic}${more && left > 0 ? ` (还差 ${left} 层)` : ""}`
+      : special ? `${r.tile}/36` : "";
     const mini = status === "current"
       ? `<span class="mini">${pipsHtml(h)}</span>` : "";
     const cls = status === "locked" && (relic || special) ? "relic" : status;
     return `<div class="vine-row ${cls}"><span>${icon}</span><span class="f">${r.floor}F</span>` +
            `<span class="r">${note}${mini}</span></div>`;
   }).join("");
-  const more = h["unlocked-count"] < h["total-relics"]
-    ? `<div class="vine-sum dim">🏺 ${h["special-floor"]}F 下次破雾 · 🏆 ${h["relic-floor"]}F 收集遗物 (还差 ${h["relic-floor"] - h.floor + 1} 层)</div>` : "";
   return `<div class="stat-card"><h4>🧗 通天藤蔓 · 第 ${h.floor} 层</h4>
     <div class="vine-sum dim" style="padding:0 0 6px">🧗当前 · ·普通层 · 🏺破雾(5F) · 🏆收集(180F) (灰=已过)</div>
     <div class="vine">${rows}</div>
-    <div class="vine-sum">🏅 已登 ${h["cleared-floors"]} 层 · 已收集 ${h["unlocked-count"]}/${h["total-relics"]} 件</div>${more}</div>`;
+    <div class="vine-sum">🏅 已登 ${h["cleared-floors"]} 层 · 已收集 ${h["unlocked-count"]}/${h["total-relics"]} 件</div></div>`;
 }
 
 async function openRelic() {
