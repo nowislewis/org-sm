@@ -557,6 +557,25 @@ is created if missing.  Example: \\='(\"Topics\" \"Physics\")"
    (or org-sm-capture-file
        (expand-file-name "sm-cards.org" (or org-sm-directory default-directory)))))
 
+;;;###autoload
+(defun org-sm-capture-change-target (&optional file)
+  "Select the target `.org' FILE for `org-sm-capture'."
+  (interactive
+   (list (read-file-name
+          "Capture target file: "
+          (file-name-directory (org-sm-capture-target-file))
+          (org-sm-capture-target-file)
+          nil nil
+          (lambda (f)
+            (or (file-directory-p f)
+                (string-suffix-p ".org" f t))))))
+  (unless (and (stringp file) (not (string-empty-p file)))
+    (user-error "No capture target file selected"))
+  (setq org-sm-capture-file (expand-file-name file))
+  (message "org-sm: capture target → %s"
+           (or (org-sm-book-label org-sm-capture-file)
+               (file-name-nondirectory org-sm-capture-file))))
+
 (defun org-sm--grab-content ()
   "Return the region or clipboard text to capture, as a plain string.
 When a region is active or the buffer is in `reader-mode' (where the
@@ -729,6 +748,7 @@ Signals a `user-error' only when there is nothing at all to commit."
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c C-c") #'org-sm-capture-commit)
     (define-key map (kbd "C-c C-k") #'org-sm-capture-abort)
+    (define-key map (kbd "C-c C-t") #'org-sm-capture-change-target)
     map)
   "Keymap for `org-sm-capture-mode'.
 The AI extension (`org-sm-gptel') adds \\`C-c C-a' in
@@ -777,7 +797,13 @@ buffer-locally for callers that aren't the plain top-level capture flow."
     (with-current-buffer buf
       (message "%s"
                (substitute-command-keys
-                (concat "Type \\[org-sm-capture-commit] to commit, "
+                (concat (unless org-sm-capture-parent-marker
+                          (format "[→ %s] "
+                                  (or (org-sm-book-label (org-sm-capture-target-file))
+                                      (file-name-nondirectory (org-sm-capture-target-file)))))
+                        "Type \\[org-sm-capture-commit] to commit, "
+                        (unless org-sm-capture-parent-marker
+                          "\\[org-sm-capture-change-target] target, ")
                         "\\[org-sm-capture-abort] to abort"
                         (when (and org-sm-capture-parent-marker
                                    (fboundp 'org-sm-gptel-card-ai))
@@ -1172,11 +1198,31 @@ would silently stay narrowed to the card just reviewed."
     (org-fold-show-context 'org-goto)
     (recenter)))
 
+(defun org-sm--confirm-key-label ()
+  "Return the confirm action label with interval preview for the current card."
+  (pcase (org-sm-type)
+    ('topic
+     (format "confirm(%dd)" (org-sm-topic-interval (org-sm-topic-afactor))))
+    ('cloze
+     (if (eq org-sm--cloze-state 'revealed)
+         (let* ((preview (org-sm-preview-cloze))
+                (keys    '((?a . :again) (?h . :hard) (?r . :good) (?e . :easy)))
+                (labels  (mapcar
+                          (lambda (kr)
+                            (format "%c:%s" (car kr)
+                                    (org-sm-interval-label
+                                     (plist-get (cdr (assq (cdr kr) preview))
+                                                :interval-secs))))
+                          keys)))
+           (format "rate(%s)" (string-join labels " ")))
+       "reveal"))
+    (_ "confirm")))
+
 (defun org-sm-review-keys-hint ()
   "Return keybinding hint string for an active review session."
   (substitute-command-keys
    (concat "\\<org-sm-review-repeat-map>"
-           "\\[org-sm-review-confirm] confirm"
+           "\\[org-sm-review-confirm] " (org-sm--confirm-key-label)
            ", \\[org-sm-card-workbench] workbench"
            (when (fboundp 'org-sm-gptel-explain)
              ", \\[org-sm-gptel-explain] explain")
