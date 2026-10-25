@@ -61,6 +61,25 @@
                (lambda () (encode-time 0 59 23 1 10 2026))))
       (should (= (org-sm-sched-day-delta) 1)))))
 
+(ert-deftest org-sm-core-priority-order ()
+  (let ((file (make-temp-file "org-sm-prio-" nil ".org")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* [#C] Low\n:PROPERTIES:\n:SRS_TYPE: topic\n:END:\n"
+                    "* Medium\n:PROPERTIES:\n:SRS_TYPE: topic\n:END:\n"
+                    "* [#A] High\n:PROPERTIES:\n:SRS_TYPE: topic\n:END:\n"))
+          (cl-letf (((symbol-function 'org-sm-files) (lambda () (list file))))
+            (let* ((markers (org-sm--collect-markers nil t))
+                   (titles (mapcar (lambda (m)
+                                     (org-with-point-at m
+                                       (org-get-heading t t t t)))
+                                   markers)))
+              (mapc (lambda (m) (set-marker m nil)) markers)
+              (should (equal titles '("High" "Medium" "Low"))))))
+      (when-let* ((buf (get-file-buffer file))) (kill-buffer buf))
+      (delete-file file))))
+
 (ert-deftest org-sm-core-scan-uses-unsaved-buffer ()
   (let* ((file (make-temp-file "org-sm-unsaved-" nil ".org"))
          (buffer (find-file-noselect file)))

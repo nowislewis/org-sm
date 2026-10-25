@@ -1110,7 +1110,7 @@ otherwise Cloze cards precede Topic cards."
           (seq-sort-by #'car (lambda (a b) (value< b a))
                        (org-sm-map-items
                         (lambda ()
-                          (cons (list (org-get-priority (org-get-heading t t t t))
+                          (cons (list (org-get-priority (org-get-heading t t nil t))
                                       (if shuffle
                                           (random)
                                         (if (eq (org-sm-type) 'cloze) 1 0)))

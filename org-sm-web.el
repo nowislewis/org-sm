@@ -159,7 +159,7 @@ addressed back by the review endpoint, so it is skipped instead."
           ;; `org-sm-sched-day-delta' is negative for overdue cards, so
           ;; negate it: days late is a positive number here.
           :overdue (max 0 (- (or (org-sm-sched-day-delta) 0)))
-          :priority (org-get-priority (org-get-heading t t t t))
+          :priority (org-get-priority (org-get-heading t t nil t))
           :badge (and (functionp org-sm-web-badge-function)
                       (funcall org-sm-web-badge-function meta))
           :intervals (org-sm-web--intervals)
@@ -185,11 +185,14 @@ addressed back by the review endpoint, so it is skipped instead."
     (signal 'org-sm-web-conflict nil)))
 
 (defun org-sm-web--session ()
-  "Return the whole due queue as one JSON-ready vector, stalest first.
+  "Return the whole due queue as one JSON-ready vector, priority then stalest first.
 Ships body text and precomputed intervals for every due card in one reply,
 so switching cards needs no GET; each write still awaits its POST response."
   (apply #'vector
-         (seq-sort-by (lambda (c) (plist-get c :overdue)) #'>
+         (seq-sort-by (lambda (c)
+                        (list (plist-get c :priority)
+                              (plist-get c :overdue)))
+                      (lambda (a b) (value< b a))
                       (delq nil (org-sm-map-items
                                  #'org-sm-web--card-at-point
                                  #'org-sm-due-p)))))
