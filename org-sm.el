@@ -331,20 +331,44 @@ Return a review event distinguishing shift duration from card interval."
 
 ;;;; ---- Cloze overlays ------------------------------------------------------
 
-(defvar org-sm--cloze-regexp "{{\\([^}\n]+\\)}}"
+(defvar org-sm--cloze-regexp "{{\\([^}]+\\)}}"
   "Regexp matching {{cloze}} markup; group 1 is the answer.")
 
 (defface org-sm-cloze-face '((t :inherit bold :box t))
   "Face for {{cloze}} markers during normal reading."
   :group 'org-sm)
 
+(defface org-sm-extracted-face
+  '((((background dark))  :background "#292e42" :extend nil)
+    (((background light)) :background "#f3ead8" :extend nil))
+  "SuperMemo-style highlight face for extracted spans in parent cards."
+  :group 'org-sm)
+
+(defconst org-sm--extracted-end-regexp
+  "\\[\\[id:[^]\n]+\\]\\[<[TC]>\\]\\]"
+  "Regexp matching the closing back-reference link of an extracted span.")
+
+(defconst org-sm--extracted-regexp
+  (concat "\\(⌈\\)\\([^⌈]*?\\)\\(" org-sm--extracted-end-regexp "\\)")
+  "Regexp matching an extracted span `⌈...[[id:...][<T>/<C>]]'.")
+
+(defun org-sm--match-extracted (limit)
+  "Font-lock matcher for `org-sm--extracted-regexp' up to LIMIT."
+  (when (re-search-forward org-sm--extracted-regexp limit t)
+    (put-text-property (match-beginning 0) (match-end 0) 'font-lock-multiline t)
+    t))
+
 (defvar org-sm--font-lock-keywords
-  (let ((re "\\({{\\)\\([^}\n]+\\)\\(}}\\)"))
+  (let ((re "\\({{\\)\\([^}]+\\)\\(}}\\)"))
     `((,re
        (1 '(face nil display "") prepend)   ; hide "{{"
        (2 'org-sm-cloze-face    prepend)    ; show answer with face
-       (3 '(face nil display "") prepend)))) ; hide "}}"
-  "Font-lock keywords for {{cloze}} markers; cached for reliable add/remove.")
+       (3 '(face nil display "") prepend))  ; hide "}}"
+      ("⌈"
+       (0 'shadow prepend))                 ; dim "⌈" delimiter
+      (org-sm--match-extracted
+       (2 'org-sm-extracted-face prepend)))) ; highlight extracted span
+  "Font-lock keywords for {{cloze}} and extracted spans.")
 
 (defun org-sm--cloze-overlays ()
   "Return all org-sm cloze overlays in the current entry."
@@ -857,39 +881,63 @@ Point-relative and excursion-agnostic: the caller owns buffer/point state
   (insert body "\n")
   id)
 
+(defun org-sm--strip-extract-marks (str)
+  "Remove parent extraction markers (`⌈' and `[[id:...][<T>/<C>]]') from STR."
+  (replace-regexp-in-string
+   "⌈\\|\\[\\[id:[^]\n]+\\]\\[<[TC]>\\]\\]" "" str))
+
 (defun org-sm-extract (type selected sel-start sel-end)
   "Create a child SRS card of TYPE from the parent at point.
 Point must be on the parent heading.  SELECTED is the extracted text.
 SEL-START and SEL-END are its character offsets within the parent body
-\(as returned by `org-sm-body-bounds').  Insert a back-reference at the
-selection, append a scheduled + inited child heading, and return the new
-child's id.  Pure buffer logic: no region, no prompt, no overlay/UI.
+\(as returned by `org-sm-body-bounds').  Mark the extracted span in the
+parent as `⌈...[[id:CHILD][<T>/<C>]]', append a scheduled + inited child
+heading, and return the new child's id.  Pure buffer logic: no region,
+no prompt, no overlay/UI.
 
 - topic: child body is SELECTED verbatim; title is the topic prefix +
          first N chars of SELECTED.
 - cloze: child body is the full parent body with SELECTED wrapped as
          {{answer}} at SEL-START; title is the cloze prefix + first N
          chars of the parent body."
-  (let* ((level    (org-current-level))
-         (bounds   (org-sm-body-bounds))
-         (body-raw (buffer-substring-no-properties (car bounds) (cdr bounds)))
-         (id       (org-id-new))
-         (title    (pcase type
-                     ('topic (concat org-sm-topic-prefix
-                                     (org-sm--truncate-title selected)))
-                     ('cloze (concat org-sm-cloze-prefix
-                                     (org-sm--truncate-title body-raw)))))
+  (let* ((lead      (- (length selected) (length (string-trim-left selected))))
+         (trail     (- (length selected) (length (string-trim-right selected))))
+         (selected  (string-trim selected))
+         (sel-start (+ sel-start lead))
+         (sel-end   (max sel-start (- sel-end trail)))
+         (level     (org-current-level))
+         (bounds    (org-sm-body-bounds))
+         (body-raw  (buffer-substring-no-properties (car bounds) (cdr bounds)))
+         (clean-sel (string-trim (org-sm--strip-extract-marks selected)))
+         (id        (org-id-new))
+         (title     (pcase type
+                      ('topic (concat org-sm-topic-prefix
+                                      (org-sm--truncate-title clean-sel)))
+                      ('cloze (concat org-sm-cloze-prefix
+                                      (org-sm--truncate-title
+                                       (org-sm--strip-extract-marks body-raw))))))
          (child-body (pcase type
-                       ('topic selected)
+                       ('topic clean-sel)
                        ('cloze (org-sm-body-clean
-                                (concat (substring body-raw 0 sel-start)
-                                        (format "{{%s}}" selected)
-                                        (substring body-raw sel-end)))))))
-    ;; Insert a back-reference after the selection; parent text stays intact.
+                                (org-sm--strip-extract-marks
+                                 (concat (substring body-raw 0 sel-start)
+                                         (format "{{%s}}" clean-sel)
+                                         (substring body-raw sel-end))))))))
+    (when (string-empty-p clean-sel)
+      (user-error "Empty selection"))
+    ;; Mark end before start so SEL-START is not shifted by insertion.
     (save-excursion
       (goto-char (+ (car bounds) sel-end))
       (insert (format "[[id:%s][%s]]" id (pcase type ('topic "<T>") ('cloze "<C>"))))
-      (when (looking-at-p "\\*+ ") (insert "\n")))
+      (let ((span-end (point)))
+        (when (looking-at-p "\\*+ ") (insert "\n"))
+        (goto-char (+ (car bounds) sel-start))
+        (insert "⌈")
+        ;; Tag with `font-lock-multiline' so built-in
+        ;; `font-lock-extend-region-multiline' extends single-line passes.
+        (put-text-property (1- (point)) (1+ span-end) 'font-lock-multiline t)
+        (when org-sm-mode
+          (font-lock-flush (1- (point)) (1+ span-end)))))
     ;; Append child heading at end of current subtree.
     (save-excursion
       (org-sm--insert-child level type title child-body id))
@@ -1589,7 +1637,7 @@ KEYWORD (blank = any; `@seedling'..`@elder', `@mob'..`@demon', or title regexp).
 
 ;;;###autoload
 (define-minor-mode org-sm-mode
-  "Font-lock {{cloze}} markers in org-mode buffers."
+  "Font-lock {{cloze}} markers and extracted spans in org-mode buffers."
   :lighter " SRS"
   :group 'org-sm
   (if org-sm-mode

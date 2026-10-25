@@ -186,6 +186,19 @@
     border-bottom: 2px solid var(--good);
     padding: 0 4px;
   }
+  .back-ref {
+    color: var(--dim);
+    font: 600 0.72em var(--mono);
+    opacity: 0.65;
+    margin: 0 2px;
+    user-select: none;
+  }
+  .extracted {
+    border-radius: 3px;
+    padding: 1px 0;
+  }
+  .extracted.topic { background: var(--accent-soft); }
+  .extracted.cloze { background: var(--teal-soft); }
 
   footer {
     padding: 10px 14px;
@@ -506,6 +519,7 @@ const State = {
   queue: [],
   index: 0,
   revealed: false,
+  selection: null,
   totalInitial: 0,
   busy: false,
   light: sessionStorage.getItem("org_sm_mode") !== "all",
@@ -528,17 +542,88 @@ function toast(msg, ms) {
   el._timer = setTimeout(() => el.classList.remove("show"), ms || 2000);
 }
 
-function parseCloze(text) {
+/* Split card body into tokens carrying exact Emacs character offsets [start, end],
+   so DOM selections map back to raw buffer offsets even across extracted spans
+   `⌈...[[id:...]]', standalone `[[id:...]]' back-references, and `{{cloze}}' spans. */
+function tokenizeBody(text, isCloze) {
   const parts = [];
-  const re = /\{\{([^}\n]+)\}\}/g;
-  let last = 0, m;
+  const base = "⌈([^⌈]*?)\\[\\[id:[^\\]]+\\]\\[<([TC])>\\]\\]|\\[\\[id:[^\\]]+\\]\\[<([TC])>\\]\\]";
+  const re = new RegExp(isCloze ? `${base}|\\{\\{([^}]+)\\}\\}` : base, "g");
+  let last = 0, charPos = 0, m;
   while ((m = re.exec(text)) !== null) {
-    if (m.index > last) parts.push({ text: text.slice(last, m.index) });
-    parts.push({ cloze: m[1] });
+    if (m.index > last) {
+      const seg = text.slice(last, m.index);
+      const len = Array.from(seg).length;
+      parts.push({ kind: "text", text: seg, start: charPos, end: charPos + len });
+      charPos += len;
+    }
+    const totalLen = Array.from(m[0]).length;
+    if (m[1] !== undefined) {
+      const spanText = "⌈" + m[1];
+      const refStart = charPos + Array.from(spanText).length;
+      parts.push({
+        kind: "extracted", ref: m[2], text: spanText,
+        start: charPos, end: refStart
+      });
+      parts.push({
+        kind: "ref", ref: m[2],
+        start: refStart, end: charPos + totalLen
+      });
+    } else if (m[3] !== undefined) {
+      parts.push({ kind: "ref", ref: m[3], start: charPos, end: charPos + totalLen });
+    } else {
+      parts.push({ kind: "cloze", cloze: m[4], start: charPos, end: charPos + totalLen });
+    }
+    charPos += totalLen;
     last = re.lastIndex;
   }
-  if (last < text.length) parts.push({ text: text.slice(last) });
+  if (last < text.length) {
+    const seg = text.slice(last);
+    const len = Array.from(seg).length;
+    parts.push({ kind: "text", text: seg, start: charPos, end: charPos + len });
+  }
   return parts;
+}
+
+function domPointToCharOffset(bodyEl, node, offset) {
+  if (node === bodyEl) {
+    if (offset <= 0) return 0;
+    if (offset >= bodyEl.childNodes.length) {
+      const last = bodyEl.lastElementChild;
+      return last ? Number(last.dataset.end) : 0;
+    }
+    return Number(bodyEl.childNodes[offset].dataset.start);
+  }
+  const span = (node.nodeType === 3 ? node.parentElement : node).closest("[data-start]");
+  if (!span || !bodyEl.contains(span)) return null;
+  const start = Number(span.dataset.start);
+  const end = Number(span.dataset.end);
+  if (node.nodeType !== 3) return offset <= 0 ? start : end;
+  if (span.classList.contains("back-ref") || span.classList.contains("cloze-hide")) {
+    return offset <= 0 ? start : end;
+  }
+  const prefix = Array.from(node.data.slice(0, offset)).length;
+  return (span.classList.contains("cloze-show") ? start + 2 : start) + prefix;
+}
+
+function readBodySelection() {
+  const bodyEl = document.querySelector(".card-body");
+  const sel = window.getSelection && window.getSelection();
+  if (!bodyEl || !sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+  const r = sel.getRangeAt(0);
+  if (!bodyEl.contains(r.startContainer) || !bodyEl.contains(r.endContainer)) return null;
+  const start = domPointToCharOffset(bodyEl, r.startContainer, r.startOffset);
+  const end = domPointToCharOffset(bodyEl, r.endContainer, r.endOffset);
+  if (start == null || end == null || end <= start) return null;
+  const chars = Array.from((State.current && State.current.body) || "");
+  const text = chars.slice(start, end).join("");
+  return text.trim() ? { start, end, text } : null;
+}
+
+function clearBodySelection() {
+  State.selection = null;
+  try { window.getSelection().removeAllRanges(); } catch (_) {}
+  if (State.current) renderButtons($("footer"), State.current);
 }
 
 /* Light mode samples LIGHT_SIZE cards, randomly within equal priority
@@ -559,6 +644,7 @@ function startQueue() {
   State.totalInitial = State.queue.length;
   State.index = 0;
   State.revealed = false;
+  State.selection = null;
 }
 
 /* ---------------------- Climb HUD ---------------------- */
@@ -647,30 +733,32 @@ function render() {
 
   const body = document.createElement("div");
   body.className = "card-body";
-  if (c.type === "cloze") {
-    parseCloze(c.body || "").forEach(tok => {
-      if (tok.text !== undefined) {
-        body.appendChild(document.createTextNode(tok.text));
-        return;
-      }
-      const span = document.createElement("span");
-      if (State.revealed) {
-        span.className = "cloze-show";
-        span.textContent = tok.cloze;
-      } else {
-        span.className = "cloze-hide";
-        span.textContent = "[___]";
-        span.onclick = (e) => {
-          e.stopPropagation();
-          State.revealed = true;
-          render();
-        };
-      }
-      body.appendChild(span);
-    });
-  } else {
-    body.textContent = c.body || "";
-  }
+  tokenizeBody(c.body || "", c.type === "cloze").forEach(tok => {
+    const span = document.createElement("span");
+    span.dataset.start = tok.start;
+    span.dataset.end = tok.end;
+    if (tok.kind === "text") {
+      span.textContent = tok.text;
+    } else if (tok.kind === "extracted") {
+      span.className = "extracted " + (tok.ref === "C" ? "cloze" : "topic");
+      span.textContent = tok.text;
+    } else if (tok.kind === "ref") {
+      span.className = "back-ref";
+      span.textContent = `⟨${tok.ref}⟩`;
+    } else if (State.revealed) {
+      span.className = "cloze-show";
+      span.textContent = tok.cloze;
+    } else {
+      span.className = "cloze-hide";
+      span.textContent = "[___]";
+      span.onclick = (e) => {
+        e.stopPropagation();
+        State.revealed = true;
+        render();
+      };
+    }
+    body.appendChild(span);
+  });
   box.appendChild(body);
   main.appendChild(box);
 
@@ -686,6 +774,25 @@ function ratingButton(cls, rating, label, iv) {
 function renderButtons(footer, c) {
   footer.innerHTML = "";
   const iv = c.intervals || {};
+
+  if (State.selection) {
+    const sel = State.selection;
+    footer.innerHTML = `
+      <div class="btn-row">
+        <button class="btn btn-good" id="btn-sel-topic">📖 摘为阅读卡<span class="sub">Extract 子卡</span></button>
+        <button class="btn btn-easy" id="btn-sel-cloze">🌱 挖空为填空卡<span class="sub">Cloze 子卡</span></button>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="btn-sel-clear">取消选区</button>
+      </div>`;
+    const keepSel = e => e.preventDefault();
+    $("btn-sel-topic").onpointerdown = keepSel;
+    $("btn-sel-cloze").onpointerdown = keepSel;
+    $("btn-sel-topic").onclick = () => extractSelection("topic", sel);
+    $("btn-sel-cloze").onclick = () => extractSelection("cloze", sel);
+    $("btn-sel-clear").onclick = clearBodySelection;
+    return;
+  }
 
   if (c.type === "cloze" && !State.revealed) {
     footer.innerHTML = `<div class="btn-row"><button class="btn btn-good" id="btn-show-cloze">显示答案 (空格)</button></div>`;
@@ -773,6 +880,8 @@ function skipCurrent() {
   const cur = State.queue.splice(State.index, 1)[0];
   State.queue.push(cur);
   State.revealed = false;
+  State.selection = null;
+  try { window.getSelection().removeAllRanges(); } catch (_) {}
   render();
   toast("已移至队列末尾");
 }
@@ -783,7 +892,34 @@ function advanceQueue(id) {
   State.all = State.all.filter(x => x.id !== id);
   if (State.index >= State.queue.length) State.index = 0;
   State.revealed = false;
+  State.selection = null;
+  try { window.getSelection().removeAllRanges(); } catch (_) {}
   render();
+}
+
+async function extractSelection(type, sel) {
+  const c = State.current;
+  if (!c || !sel || State.busy) return;
+  State.busy = true;
+  $("footer").querySelectorAll("button").forEach(btn => { btn.disabled = true; });
+  try {
+    const res = await API.call(`/api/extract/${encodeURIComponent(c.id)}`, {
+      start: String(sel.start), end: String(sel.end), type, revision: c.revision
+    });
+    c.body = res.parent.body;
+    c.title = res.parent.title;
+    c.badge = res.parent.badge;
+    c.revision = res.parent.revision;
+    State.selection = null;
+    try { window.getSelection().removeAllRanges(); } catch (_) {}
+    toast(type === "cloze" ? "🌱 已创建填空子卡" : "📖 已创建阅读子卡");
+    applyHud(res.hud);
+  } catch (err) {
+    toast("提取子卡失败: " + err.message);
+  } finally {
+    State.busy = false;
+    render();
+  }
 }
 
 /* ---------------------- Relic & Forest sheet ---------------------- */
@@ -871,10 +1007,10 @@ function closeRelic() {
 function openEditSheet() {
   const c = State.current;
   if (!c || State.busy) return;
+  clearBodySelection();
   $("edit-title").value = c.title || "";
   $("edit-body").value = c.body || "";
   $("edit-modal").classList.add("active");
-  $("edit-body").focus();
 }
 
 function closeEditSheet() {
@@ -1107,6 +1243,9 @@ $("btn-edit-save").onclick = async () => {
   State.busy = true;
   try { await saveEditSheet(); } finally { State.busy = false; render(); }
 };
+$("btn-tool-cloze").onpointerdown = e => e.preventDefault();
+$("btn-tool-extract-topic").onpointerdown = e => e.preventDefault();
+$("btn-tool-extract-cloze").onpointerdown = e => e.preventDefault();
 $("btn-tool-cloze").onclick = toolWrapCloze;
 $("btn-tool-extract-topic").onclick = () => toolExtract("topic");
 $("btn-tool-extract-cloze").onclick = () => toolExtract("cloze");
@@ -1115,6 +1254,18 @@ $("btn-sync-close").onclick = closeSyncModal;
 $("btn-sync-refresh").onclick = loadGitDiff;
 $("btn-sync-pull").onclick = syncPull;
 $("btn-sync-push").onclick = syncPush;
+
+document.addEventListener("selectionchange", () => {
+  if (anySheetOpen() || State.busy || !State.current) return;
+  const next = readBodySelection();
+  const prev = State.selection;
+  if (Boolean(next) === Boolean(prev) &&
+      (!next || (next.start === prev.start && next.end === prev.end))) {
+    return;
+  }
+  State.selection = next;
+  renderButtons($("footer"), State.current);
+});
 
 async function init() {
   if (API.token) sessionStorage.setItem("org_sm_token", API.token);

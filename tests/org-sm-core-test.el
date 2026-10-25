@@ -80,15 +80,39 @@
 (ert-deftest org-sm-core-edit-and-extract-notifications ()
   (with-temp-buffer
     (org-mode) (insert org-sm-test--tree) (goto-char (point-min))
-    (let (actions)
+    (let (actions child-id cloze-id)
       (let ((org-sm-after-card-change-functions
              (list (lambda (event) (push (plist-get event :action) actions)))))
         (org-sm-set-body "alpha beta\n")
         (goto-char (point-min))
         (org-sm-set-title "Renamed")
         (goto-char (point-min))
-        (should (stringp (org-sm-extract 'topic "alpha" 0 5)))
-        (should (equal actions '(extract edit edit)))))))
+        (setq child-id (org-sm-extract 'topic "alpha" 0 5))
+        (should (stringp child-id))
+        (should (equal (org-sm-body-text)
+                       (format "⌈alpha[[id:%s][<T>]] beta" child-id)))
+        (let* ((body (org-sm-body-text))
+               (bpos (string-match "beta" body)))
+          (setq cloze-id (org-sm-extract 'cloze "beta" bpos (+ bpos 4))))
+        (save-excursion
+          (re-search-forward (concat ":ID:[ \t]+" (regexp-quote cloze-id)))
+          (org-back-to-heading t)
+          (should (equal (org-sm-body-text) "alpha {{beta}}")))
+        (should (equal actions '(extract extract edit edit))))))
+  ;; Verify multiline extracted span highlights across single-line jit-lock passes:
+  (with-temp-buffer
+    (org-mode)
+    (org-sm-mode 1)
+    (insert "* Multiline\n:PROPERTIES:\n:SRS_TYPE: topic\n:END:\n第一行文字\n第二行文字\n")
+    (goto-char (point-min))
+    (org-sm-extract 'topic "第一行文字\n第二行\n" 0 9)
+    (let ((p1 (save-excursion (goto-char (point-min)) (search-forward "第一行") (1- (point))))
+          (p2 (save-excursion (goto-char (point-min)) (search-forward "第二") (1- (point)))))
+      (save-excursion
+        (goto-char p1)
+        (font-lock-fontify-region (line-beginning-position) (line-end-position)))
+      (should (memq 'org-sm-extracted-face (ensure-list (get-text-property p1 'face))))
+      (should (memq 'org-sm-extracted-face (ensure-list (get-text-property p2 'face)))))))
 
 (ert-deftest org-sm-core-grade-event-session-identity ()
   (with-temp-buffer
