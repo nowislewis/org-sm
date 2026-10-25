@@ -32,12 +32,12 @@
 (ert-deftest org-sm-core-postpone-preserves-interval-and-review-count ()
   (with-temp-buffer
     (org-mode) (insert org-sm-test--tree) (goto-char (point-min))
-    (let* ((old (org-sm-card-at-point))
-           (event (org-sm-grade-postpone 7)))
+    (let* ((event (org-sm-grade-reschedule 7)))
       (should (= (plist-get event :postpone-days) 7))
-      (should (= (plist-get event :new-days) (plist-get old :interval-days)))
+      (should (= (plist-get event :new-days) 7))
+      (should (= (plist-get (org-sm-card-at-point) :interval-days) 7))
       (should (= (plist-get (org-sm-card-at-point) :reviews) 1))
-      (should-error (org-sm-grade-postpone -1)))))
+      (should-error (org-sm-grade-reschedule -1)))))
 
 (ert-deftest org-sm-core-observer-failure-does-not-fail-dismiss ()
   (with-temp-buffer

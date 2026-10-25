@@ -228,25 +228,9 @@ now, so early/late reviews don't distort spacing."
                          1))))))
 
 (defun org-sm--topic-write (ivl)
-  "Apply IVL (days) to current topic: update SCHEDULED and SRS_LAST.
- This is a real repetition: SRS_LAST is set to now, SCHEDULED to now+IVL."
+  "Apply IVL (days) to current topic: update SCHEDULED and SRS_LAST."
   (org-sm--schedule (time-add (current-time) (days-to-time ivl)))
   (org-entry-put nil "SRS_LAST" (format-time-string "%FT%TZ" (current-time) "UTC0")))
-
-(defun org-sm--topic-postpone (days)
-  "Postpone current topic by DAYS without counting as a repetition.
-Both SRS_LAST and SCHEDULED are shifted forward by DAYS, preserving
-the interval between them so A-Factor calculation is unaffected."
-  (let* ((last-str  (org-entry-get nil "SRS_LAST"))
-         (sched     (or (org-get-scheduled-time nil) (current-time)))
-         (shift     (days-to-time days))
-         (new-sched (time-add sched shift))
-         (new-last  (if last-str
-                        (time-add (parse-iso8601-time-string last-str) shift)
-                      (time-subtract new-sched (days-to-time 1)))))
-    (org-sm--schedule new-sched)
-    (org-entry-put nil "SRS_LAST"
-                   (format-time-string "%FT%TZ" new-last "UTC0"))))
 
 ;;;; ---- Grading (buffer mutations, no UI) --------------------------------
 ;; Single source of truth for "what a review does": update scheduling, log it,
@@ -289,7 +273,9 @@ Unlike review events, this includes creation, editing and restoration.")
         (label (plist-get event :interval-label)))
     (pcase action
       ('dismiss "dismissed")
-      ('postpone (format "topic postpone → %dd" (plist-get event :postpone-days)))
+      ((or 'reschedule 'postpone)
+       (format "topic reschedule → %dd"
+               (or (plist-get event :new-days) (plist-get event :postpone-days))))
       ('cloze (if (and new (> new 0))
                   (if (and old (> old 0))
                       (format "cloze %s · %dd → %dd" rating old new)
@@ -317,17 +303,20 @@ Return a review event plist; presentation is handled by the caller."
                            :old-days (plist-get card :interval-days)
                            :new-days ivl :interval-days ivl :afactor a)))
 
-(defun org-sm-grade-postpone (days)
-  "Postpone current topic by positive DAYS without counting a repetition.
-Return a review event distinguishing shift duration from card interval."
-  (unless (and (integerp days) (> days 0)) (user-error "Days must be a positive integer"))
+(defun org-sm-grade-reschedule (days)
+  "Manually reschedule current topic to positive DAYS (SuperMemo `Ctrl+J').
+Updates the base interval to DAYS (`SRS_LAST' = now, `SCHEDULED' = now+DAYS)
+without counting as a repetition."
+  (unless (and (integerp days) (> days 0))
+    (user-error "Days must be a positive integer"))
   (let ((card (org-sm-card-at-point)))
-    (org-sm--topic-postpone days)
-    (org-sm--log-review 'postpone nil (format "%2dd" days))
-    (let ((interval (plist-get (org-sm-card-at-point) :interval-days)))
-      (org-sm--commit-action 'postpone card :postpone-days days
-                             :old-days (plist-get card :interval-days)
-                             :new-days interval :interval-days interval))))
+    (org-sm--topic-write days)
+    (org-sm--log-review 'reschedule nil (format "%2dd" days))
+    (org-sm--commit-action 'reschedule card :postpone-days days
+                           :old-days (plist-get card :interval-days)
+                           :new-days days :interval-days days)))
+
+(defalias 'org-sm-grade-postpone #'org-sm-grade-reschedule)
 
 ;;;; ---- Cloze overlays ------------------------------------------------------
 
@@ -1272,21 +1261,23 @@ When LIMIT is given, equal-priority due cards are randomly sampled."
   (org-sm-review-start org-sm-review-light-size))
 
 (defun org-sm--review-confirm-topic ()
-  "Interactive topic review: reschedule, postpone, explain, or dismiss.
+  "Interactive topic review: next repetition, reschedule, explain, or dismiss.
 Computation is delegated to the grading functions; this only collects
 the user's choice and advances the queue."
   (let* ((auto-ivl (org-sm-topic-interval (org-sm-topic-afactor)))
-         (choices  `((?r ,(format "rsch(%dd)" auto-ivl))
-                     (?p "postpone")
+         (choices  `((?r ,(format "next(%dd)" auto-ivl))
+                     (?j "reschedule")
                      (?e "explain")
                      ,@(when (fboundp 'org-sm-gptel-pick) '((?x "pick"))))))
     (org-sm--prompt-choice "Topic: " choices
       (lambda (key)
         (pcase key
-          (?r (org-sm--advance (funcall org-sm-feedback-function (org-sm-grade-topic))))
-          (?p (org-sm--advance
-               (funcall org-sm-feedback-function
-                        (org-sm-grade-postpone (read-number "Postpone days: " 7)))))
+          ((or ?r ?n)
+           (org-sm--advance (funcall org-sm-feedback-function (org-sm-grade-topic))))
+          ((or ?j ?p)
+           (org-sm--advance
+            (funcall org-sm-feedback-function
+                     (org-sm-grade-reschedule (read-number "Reschedule days: " 7)))))
           (?e (if (fboundp 'org-sm-gptel-explain)
                   (progn (org-sm--log-review 'explain)
                          (org-sm-gptel-explain))

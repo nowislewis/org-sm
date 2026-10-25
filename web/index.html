@@ -822,8 +822,8 @@ function renderButtons(footer, c) {
   const r1 = document.createElement("div");
   r1.className = "btn-row";
   r1.innerHTML = `
-    <button class="btn btn-good" id="btn-topic-rsch">已读确认<span class="sub">间隔 ${esc(iv.reschedule || "自动")}</span></button>
-    <button class="btn btn-hard" id="btn-topic-postpone">稍后<span class="sub">推迟几天</span></button>`;
+    <button class="btn btn-good" id="btn-topic-rsch">已读 · 下一轮<span class="sub">间隔 ${esc(iv.reschedule || "自动")}</span></button>
+    <button class="btn btn-hard" id="btn-topic-postpone">重排期<span class="sub">指定间隔天数</span></button>`;
   footer.appendChild(r1);
   const r2 = document.createElement("div");
   r2.className = "btn-row";
@@ -832,7 +832,7 @@ function renderButtons(footer, c) {
     <button class="btn" id="btn-topic-dismiss">不再复习</button>`;
   footer.appendChild(r2);
 
-  $("btn-topic-rsch").onclick = () => reviewTopic("reschedule");
+  $("btn-topic-rsch").onclick = () => reviewTopic("next");
   $("btn-topic-postpone").onclick = promptPostpone;
   $("btn-topic-skip").onclick = skipCurrent;
   $("btn-topic-dismiss").onclick = () => reviewTopic("dismiss");
@@ -869,14 +869,14 @@ function reviewTopic(action, days) {
 }
 
 function promptPostpone() {
-  const val = prompt("推迟几天后再读？", "7");
+  const val = prompt("指定几天后复习？（1=明天继续读，7=推迟一周）", "7");
   if (!val) return;
   const days = Number(val);
   if (!Number.isInteger(days) || days < 1 || days > 3650) {
     toast("请输入 1–3650 之间的整数天数");
     return;
   }
-  reviewTopic("postpone", days);
+  reviewTopic("reschedule", days);
 }
 
 function skipCurrent() {
@@ -1270,17 +1270,19 @@ $("btn-sync-refresh").onclick = loadGitDiff;
 $("btn-sync-pull").onclick = syncPull;
 $("btn-sync-push").onclick = syncPush;
 
-document.addEventListener("selectionchange", () => {
-  if (anySheetOpen() || State.busy || !State.current) return;
-  const next = readBodySelection();
-  const prev = State.selection;
-  if (Boolean(next) === Boolean(prev) &&
-      (!next || (next.start === prev.start && next.end === prev.end))) {
-    return;
-  }
-  State.selection = next;
-  renderButtons($("footer"), State.current);
-});
+if (document.addEventListener) {
+  document.addEventListener("selectionchange", () => {
+    if (anySheetOpen() || State.busy || !State.current) return;
+    const next = readBodySelection();
+    const prev = State.selection;
+    if (Boolean(next) === Boolean(prev) &&
+        (!next || (next.start === prev.start && next.end === prev.end))) {
+      return;
+    }
+    State.selection = next;
+    renderButtons($("footer"), State.current);
+  });
+}
 
 async function init() {
   if (API.token) sessionStorage.setItem("org_sm_token", API.token);

@@ -252,8 +252,12 @@ on a LAN-facing server it leaks absolute filesystem paths."
   (pcase (org-sm-type)
     ('cloze (org-sm-grade-cloze (org-sm-web--rating rating)))
     ('topic (pcase action
-              ("reschedule" (org-sm-grade-topic))
-              ("postpone" (org-sm-grade-postpone (org-sm-web--positive-days days)))
+              ("next" (org-sm-grade-topic))
+              ("reschedule"
+               (if (org-string-nw-p days)
+                   (org-sm-grade-reschedule (org-sm-web--positive-days days))
+                 (org-sm-grade-topic)))
+              ("postpone" (org-sm-grade-reschedule (org-sm-web--positive-days days)))
               ("dismiss" (org-sm-dismiss))
               (_ (user-error "Unknown topic action: %s" action))))
     (_ (user-error "Not an SRS card"))))
