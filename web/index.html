@@ -304,7 +304,6 @@
   .vine-row .f { width: 3.4em; text-align: right; font-weight: 700; flex: none; }
   .vine-row .r { flex: 1; min-width: 0; }
   .vine-row.cleared { color: var(--dim); opacity: 0.55; }
-  .vine-row.fog { color: var(--teal); font-weight: 600; }
   .vine-row.relic {
     color: var(--gold);
     background: var(--gold-soft);
@@ -964,9 +963,7 @@ function vineHtml(h) {
     const mini = status === "current"
       ? `<span class="mini">${pipsHtml(h)}</span>${todayf > 0 ? `<span style="margin-left:8px">今日 +${todayf} 层</span>` : ""}`
       : "";
-    const cls = status === "locked"
-      ? (relic ? "relic" : special ? "fog" : "locked")
-      : status;
+    const cls = status === "locked" && relic ? "relic" : status;
     return `<div class="vine-row ${cls}"><span>${icon}</span><span class="f">${r.floor}F</span>` +
            `<span class="r">${note}${mini}</span></div>`;
   }).join("");
