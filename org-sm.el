@@ -108,9 +108,26 @@ Keys: `:card', `:position', `:cloze-state', `:prev'.")
   "Function receiving PREV and ABORTED to present session-end feedback.")
 
 (defvar-local org-sm--mode-line nil
-  "Cached review position, displayed only in the current card's buffer.")
+  "Cached review position for the current card's buffer.")
 
-(add-to-list 'mode-line-misc-info '(org-sm--mode-line (" " org-sm--mode-line)))
+(defvar-local org-sm--header-line nil
+  "Review status string displayed at the start of `header-line-format'.")
+(put 'org-sm--header-line 'risky-local-variable t)
+
+(defconst org-sm--header-line-construct
+  '(org-sm--header-line (" " org-sm--header-line "   "))
+  "Header-line construct prepended to `header-line-format' during review.")
+
+(defun org-sm-set-header-line (text)
+  "Display TEXT at the start of `header-line-format' in the current buffer.
+Coexists with `breadcrumb-local-mode' by prepending to the existing list."
+  (setq org-sm--header-line text)
+  (when text
+    (unless (listp header-line-format)
+      (setq-local header-line-format
+                  (and header-line-format (list header-line-format))))
+    (add-to-list 'header-line-format org-sm--header-line-construct))
+  (force-mode-line-update))
 
 (defvar-local org-sm--cloze-state nil
   "Cloze review state for the current buffer: `hidden' or `revealed'.")
@@ -1070,7 +1087,12 @@ by the time the next card is shown the previous buffer is no longer current and
 would silently stay narrowed to the card just reviewed."
   (when (buffer-live-p org-sm--current-buffer)
     (with-current-buffer org-sm--current-buffer
-      (setq org-sm--mode-line nil)
+      (setq org-sm--mode-line nil
+            org-sm--header-line nil
+            header-line-format (delete org-sm--header-line-construct
+                                       header-line-format))
+      (unless header-line-format
+        (kill-local-variable 'header-line-format))
       (force-mode-line-update)
       (when (buffer-narrowed-p) (widen))
       (when org-sm--cloze-state
@@ -1125,16 +1147,19 @@ would silently stay narrowed to the card just reviewed."
            ", \\[org-sm-review-abort] abort")))
 
 (defun org-sm-default-prompt (state)
-  "Show default review hint in the echo area for STATE plist."
-  (let* ((prev   (plist-get state :prev))
-         (pre    (if prev (format "✓ %s  |  " prev) ""))
+  "Update review header line and show keybinding hint in the echo area."
+  (let* ((pos    (or (plist-get state :position) "SM"))
+         (prev   (plist-get state :prev))
          (cstate (plist-get state :cloze-state))
-         (keys   (org-sm-review-keys-hint)))
-    (pcase (plist-get (plist-get state :card) :type)
-      ('cloze (message "org-sm %scloze (%s) — %s" pre
-                       (if (eq cstate 'hidden) "hidden" "revealed") keys))
-      ('topic (message "org-sm %stopic — %s" pre keys))
-      (_      (message "org-sm: not an SRS heading")))))
+         (type   (pcase (plist-get (plist-get state :card) :type)
+                   ('cloze (format "cloze (%s)"
+                                   (if (eq cstate 'hidden) "hidden" "revealed")))
+                   ('topic "topic")
+                   (_      "not an SRS heading"))))
+    (org-sm-set-header-line
+     (string-join (delq nil (list pos type (and prev (format "✓ %s" prev))))
+                  " · "))
+    (message "%s" (org-sm-review-keys-hint))))
 
 (defun org-sm--show-prompt (&optional prev)
   "Present the active card prompt via `org-sm-prompt-function'."
