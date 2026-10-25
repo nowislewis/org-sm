@@ -946,7 +946,7 @@ function vineHtml(h) {
   const todayf = h["today-floors"] || 0;
   const head = (more && rf > top)
     ? `<div class="vine-row relic"><span>🏆</span><span class="f">${rf}F</span>` +
-      `<span class="r">遗物 #${h["unlocked-count"] + 1} · <span class="delta-gold">还差 ${left} 层</span></span></div>` +
+      `<span class="r">#${h["unlocked-count"] + 1} · <span class="delta-gold">还差 ${left} 层</span></span></div>` +
       (rf - 1 > top
         ? `<div class="vine-row cleared"><span>⋮</span><span class="f">...</span><span class="r"></span></div>`
         : "")
@@ -955,12 +955,12 @@ function vineHtml(h) {
     const relic = r["relic-done"];
     const special = r.special;
     const status = r.status;
-    const icon = status === "current" ? "🧗" : relic ? "🏆" : special ? "🏺" : "·";
+    const icon = relic ? "🏆" : special ? "🏺" : "·";
     const note = relic
-      ? `遗物 #${r.relic}${more && left > 0 ? ` · <span class="delta-gold">还差 ${left} 层</span>` : ""}`
-      : special ? `破雾 ${r.tile}/36` : "";
+      ? `#${r.relic}${more && left > 0 ? ` · <span class="delta-gold">还差 ${left} 层</span>` : ""}`
+      : special ? `${r.tile}/36` : "";
     const mini = status === "current"
-      ? `<span class="mini">${pipsHtml(h)}</span>${todayf > 0 ? `<span class="muted" style="margin-left:8px">今日 <span class="delta-good">+${todayf}</span> 层</span>` : ""}`
+      ? `<span style="margin-left:${note ? 8 : 0}px">🧗</span><span class="mini">${pipsHtml(h)}</span>${todayf > 0 ? `<span class="muted" style="margin-left:8px">今日 <span class="delta-good">+${todayf}</span> 层</span>` : ""}`
       : "";
     const cls = status === "locked" && relic ? "relic" : status;
     return `<div class="vine-row ${cls}"><span>${icon}</span><span class="f">${r.floor}F</span>` +
