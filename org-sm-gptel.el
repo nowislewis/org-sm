@@ -199,7 +199,13 @@ the last using CUSTOM as the task.  Every mode ends with
             ('simplify org-sm-gptel-system-simplify)
             ('custom (string-trim custom)))
           "\n\n" org-sm-gptel-style
-          "\n\n只输出结构化结果：{body: 改写后的正文}。"))
+          (if (or (eq type 'cloze) (eq mode 'simplify))
+              "\n\n输出结构：{body: 改写后的正文, picks: []}（picks 固定为空数组）。"
+            (concat "\n\n子卡标记规则（picks，0 到 3 条，宁缺毋滥）："
+                    "\n- 如果改写后的 body 包含两层以上独立要点，把最值得单独摘成子卡的段落放进 picks。"
+                    "\n- quote 必须逐字复制改写后 body 里连续的一段（一到三句），不改一个字。"
+                    "\n- why 用一句话说明为什么值得单独复习。"
+                    "\n- 如果整段只讲一件事，picks 返回空数组 []。"))))
 
 ;;;; ---- Internal helpers ----------------------------------------------------
 
@@ -390,8 +396,8 @@ at something the reader can see."
 ;;;###autoload
 (defun org-sm-gptel-suggest ()
   "Underline passages worth extracting in the text on screen or the region.
-The AI quotes; nothing is written.  Accept an underline with RET to extract
-it through `org-sm-extract', erase it with DEL, move on with TAB.  The
+The AI quotes; nothing is written.  Accept an underline with `M-z' to extract
+it through `org-sm-extract', erase it with `M-k', move on with `M-n'.  The
 underlines vanish with the buffer, so nothing half-decided reaches a file."
   (interactive)
   (unless (save-excursion (org-sm--goto-enclosing-card))
@@ -430,22 +436,30 @@ underlines vanish with the buffer, so nothing half-decided reaches a file."
   "Generation of the latest AI request in this workbench buffer.")
 
 (defconst org-sm-gptel--card-schema
-  '(:type "object" :properties (:body (:type "string")) :required ["body"])
-  "JSON schema for `org-sm-gptel-card-ai': the rewritten body, nothing else.")
+  '(:type "object"
+    :properties
+    (:body (:type "string")
+     :picks (:type "array"
+             :items (:type "object"
+                     :properties (:quote (:type "string") :why (:type "string"))
+                     :required ["quote" "why"])))
+    :required ["body" "picks"])
+  "JSON schema for `org-sm-gptel-card-ai': rewritten body plus verbatim picks.")
 
 (defun org-sm-gptel--parse-card-response (response)
-  "Return the trimmed body in RESPONSE, or nil when it cannot be read."
+  "Return (BODY . PICKS) in RESPONSE, or nil when it cannot be read."
   (when (stringp response)
-    (let ((body (plist-get (ignore-errors
-                             (json-parse-string response :object-type 'plist))
-                           :body)))
-      (and (stringp body) (org-string-nw-p body) (string-trim body)))))
+    (let* ((data (ignore-errors
+                   (json-parse-string response :object-type 'plist
+                                      :array-type 'list)))
+           (body (plist-get data :body)))
+      (when (and (stringp body) (org-string-nw-p body))
+        (cons (string-trim body) (org-sm-gptel--parse-picks response))))))
 
 (defun org-sm-gptel--card-request (text type mode custom callback)
   "Ask the AI to rewrite TEXT per MODE and call CALLBACK with the result.
 TYPE and MODE/CUSTOM select the system prompt (see
-`org-sm-gptel--card-system').  CALLBACK receives the new body (or nil)
-and an error string (or nil).
+`org-sm-gptel--card-system').  CALLBACK receives (BODY PICKS ERR).
 
 Context is bound here rather than inherited: with added context and agent
 tools off and no prompt transforms, this stays one plain text-in, JSON-out
@@ -458,20 +472,20 @@ request that never picks up whatever the user attached elsewhere."
       :transforms nil
       :callback
       (lambda (response info)
-        (if-let* ((body (org-sm-gptel--parse-card-response response)))
-            (funcall callback body nil)
-          (funcall callback nil (if (stringp response) "parse failed"
-                                  (format "%s" (plist-get info :status)))))))))
+        (if-let* ((parsed (org-sm-gptel--parse-card-response response)))
+            (funcall callback (car parsed) (cdr parsed) nil)
+          (funcall callback nil nil (if (stringp response) "parse failed"
+                                      (format "%s" (plist-get info :status)))))))))
 
 ;;;###autoload
 (defun org-sm-gptel-card-ai ()
-  "Rewrite the body in this card workbench with the AI.
-Choose refine (clean up, keep every causal link), 简化 (cut to the core) or
-a custom instruction.  An extract also sends the parent text around it, so
-\"it\" and \"these neurons\" can be resolved from the source rather than
-guessed.  Only the leading body text changes; `**' cards you typed below it
-are kept.  Nothing reaches the source card until
-\\<org-sm-capture-mode-map>\\[org-sm-capture-commit]."
+  "Rewrite the body in this card workbench with the AI, underlining child picks.
+Choose refine (clean up, keep every causal link, underline 0-3 passages worth
+extracting), 简化 (cut to the core) or a custom instruction.  An extract also
+sends the parent text around it, so \"it\" and \"these neurons\" can be
+resolved from the source rather than guessed.  Nothing reaches the source
+card until \\<org-sm-capture-mode-map>\\[org-sm-capture-commit], which writes
+the body back and extracts the surviving underlines in place."
   (interactive)
   (org-sm-gptel--workbench-only)
   (let* ((label  (completing-read "AI 动作：" (mapcar #'car org-sm-gptel--card-modes)
@@ -497,7 +511,7 @@ are kept.  Nothing reaches the source card until
                    "其中的其他内容不要写进正文】\n" origin)
          raw)
        org-sm-capture-card-type mode custom
-       (lambda (body err)
+       (lambda (body picks err)
          (cond
           (err (message "org-sm AI failed: %s" err))
           ((not (buffer-live-p buf)) (message "org-sm AI: buffer gone"))
@@ -507,10 +521,14 @@ are kept.  Nothing reaches the source card until
                  (/= tick (buffer-chars-modified-tick))))
            (message "org-sm AI: draft changed or newer request exists; result ignored"))
           (t
-           (with-current-buffer buf (org-sm-capture-set-preamble body))
-           (message "%s" (substitute-command-keys
-                          (format "org-sm: AI %s done — edit, then \\<org-sm-capture-mode-map>\\[org-sm-capture-commit]"
-                                  label))))))))))
+           (with-current-buffer buf
+             (org-sm-capture-set-preamble body)
+             (let ((n (org-sm-gptel--draw-picks picks (point-min) (point-max))))
+               (if (> n 0)
+                   (progn (goto-char (point-min)) (org-sm-pencil-next))
+                 (message "%s" (substitute-command-keys
+                                (format "org-sm: AI %s done — edit, then \\<org-sm-capture-mode-map>\\[org-sm-capture-commit]"
+                                        label)))))))))))))
 
 ;; Wire the AI actions into the workbench and the review repeat map.
 (with-eval-after-load 'org-sm

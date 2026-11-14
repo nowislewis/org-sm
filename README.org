@@ -208,18 +208,20 @@ then sends a desktop notification with the captured text.  Unlike
 ~org-sm-capture~, it does not open an editable buffer or require ~C-c C-c~;
 use it for one-key popup/menu capture.
 
-** ~org-sm-card-workbench~ (=C-c s A=)
+** ~org-sm-card-workbench~ (=w= during review / =SPC r w=)
 
-Run it on the card you are reading.  The card's body is copied in as leading
-text; nothing changes in the source until you commit.  Then ~C-c C-c~:
+Run it on the card you are reading.  The card's body is copied into the
+workbench; nothing changes in the source until ~C-c C-c~:
 
-- the leading text replaces the card's body in place (type / schedule / id
+- the buffer's text replaces the card's body in place (type / schedule / id
   untouched);
-- each ~**~ heading becomes a new scheduled *child* topic with a
-  back-reference appended — existing children are left alone.
+- every wavy-underlined span (~org-sm-pencils~) is extracted in place through
+  ~org-sm-extract~, leaving ~⌈…[[id:…][<T>]]~ in the parent body so the child
+  always knows where in the parent it came from.
 
-So one workbench covers a pure refine (no ~**~ headings), a pure split, or
-both at once — by hand, or with the AI actions below.
+Mark a span yourself by selecting text and pressing ~M-z~, or let ~C-c C-a~
+(~org-sm-gptel-card-ai~) rewrite the body and underline 0--3 candidate spans at
+once; ~M-n~ jumps to the next underline and ~M-k~ drops the one at point.
 
 * Extract
 
@@ -268,9 +270,10 @@ the source plus one line on why it is worth its own card.  Quotes are
 located in the text (exactly, then ignoring re-wrapped whitespace); one that
 cannot be found is dropped, so a suggestion never points at text that is not
 there.  Suggestions are drawn as wavy underlines and nothing is written:
-on an underline, ~RET~ extracts it through ~org-sm-extract~ -- the passage is
+on an underline, ~M-z~ extracts it through ~org-sm-extract~ -- the passage is
 highlighted in place and the child sits where it came from, exactly as if you
-had selected it -- ~DEL~ erases it and ~TAB~ moves to the next.  Underlines
+had selected it -- ~M-k~ erases it and ~M-n~ moves to the next (modifier keys,
+so Meow normal/insert single keys are never hijacked).  Underlines
 vanish when the review moves on or the buffer is killed.  Scope is the
 screen rather than the card, so a long article is read a screenful at a time
 and each request stays short.
@@ -287,8 +290,10 @@ chat is never sent along: the new question waits until it is gone.
 ~【需补充】~ where a conclusion lacks its why), 简化 (cut to the core) or a
 custom instruction.  An extract also sends its origin in the parent, so
 "these neurons" is resolved from the source instead of guessed; the prompt
-fences it off as reference only.  Only the leading body text is rewritten; ~**~ cards
-you typed below it are kept.  An async reply is discarded if you edited the
+fences it off as reference only.  In topic refine/custom mode, it also underlines 0--3 verbatim spans worth
+extracting into child cards (~M-n~ next, ~M-k~ drop, ~M-z~ on a region adds
+your own); ~C-c C-c~ writes the body back and extracts the surviving
+underlines in place.  An async reply is discarded if you edited the
 buffer meanwhile.  Prompts: ~org-sm-gptel-system-topic~ / ~-cloze~ /
 ~-simplify~ / ~-suggest~ / ~-explain~.
 

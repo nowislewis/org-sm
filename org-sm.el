@@ -726,9 +726,7 @@ so reading it later would see the *target* buffer's own nil value."
     (when (buffer-file-name) (let ((save-silently t)) (save-buffer)))))
 
 (defun org-sm-capture-set-preamble (body)
-  "Replace the leading text of this capture buffer with BODY.
-The `**' cards below it are left alone: they are what the reader wrote,
-and a rewrite of the body must never take them along."
+  "Replace the leading text of this capture buffer with BODY."
   (pcase-let ((`(,beg . ,end) (org-sm-capture-preamble-bounds)))
     (delete-region beg end)
     (goto-char beg)
@@ -736,61 +734,81 @@ and a rewrite of the body must never take them along."
     (goto-char (point-min))
     (org-fold-show-all)))
 
-(defun org-sm--capture-commit-body (buf)
-  "Commit BUF's preamble as a card body, if it is non-empty.
-Refine the parent card in place when BUF has one, else create a new card.
-Return a status string, or nil when there was nothing to commit.  Internal
-half of `org-sm-capture-commit'; leaves BUF current either way (see
-`org-sm-capture-card', which strands the target buffer)."
-  (let (bounds body marker)
+(defun org-sm--capture-commit-workbench (buf marker)
+  "Write BUF back to MARKER's card, then extract its underlined spans.
+Step 1 replaces the card's body with BUF's text.  Step 2 walks the
+underlined spans (`org-sm-pencils') from end to start and runs
+`org-sm-extract' on each, so every child card is highlighted in place
+with `⌈...[[id:..][<T>]]' and knows where in the parent it came from --
+the same result as extracting by hand."
+  (let (body spans)
+    (with-current-buffer buf
+      (goto-char (point-min))
+      (let ((beg (progn (skip-chars-forward " \t\n") (point)))
+            (end (progn (goto-char (point-max))
+                        (skip-chars-backward " \t\n") (point))))
+        (when (< beg end)
+          (setq body (buffer-substring-no-properties beg end)
+                spans (delq nil
+                            (mapcar (lambda (ov)
+                                      (let ((s (max beg (overlay-start ov)))
+                                            (e (min end (overlay-end ov))))
+                                        (and (< s e)
+                                             (list (buffer-substring-no-properties s e)
+                                                   (- s beg) (- e beg)))))
+                                    (nreverse (org-sm-pencils beg end))))))))
+    (when body
+      (org-sm--capture-at-marker
+       marker
+       (lambda ()
+         (org-sm-set-body body)
+         (dolist (span spans)
+           (apply #'org-sm-extract 'topic span))))
+      (set-buffer buf)
+      (erase-buffer)
+      (if spans
+          (format "refined body, extracted %d child card%s"
+                  (length spans) (if (= (length spans) 1) "" "s"))
+        "refined body"))))
+
+(defun org-sm--capture-commit-plain (buf)
+  "Commit BUF as new top-level topic card(s): preamble and any `**' headings."
+  (let (bounds body cards done)
     (with-current-buffer buf
       (setq bounds (org-sm-capture-preamble-bounds)
             body   (string-trim (buffer-substring-no-properties
                                  (car bounds) (cdr bounds)))
-            marker (org-sm--capture-live-marker)))
+            cards  (cdr (org-sm--capture-split-buffer))))
     (when (org-string-nw-p body)
-      (if marker
-          (org-sm--capture-at-marker marker (lambda () (org-sm-set-body body)))
-        (org-sm-capture-card 'topic body))
+      (org-sm-capture-card 'topic body)
       (set-buffer buf)
       (delete-region (car bounds) (cdr bounds))
-      (if marker "refined body" "captured new card"))))
-
-(defun org-sm--capture-commit-cards (buf)
-  "Commit BUF's card headings, if there are any.
-They become children of the parent card when BUF has one, else independent
-top-level cards.  Return a status string, or nil when there were none.
-Internal half of `org-sm-capture-commit'; leaves BUF current either way."
-  (let (cards marker)
-    (with-current-buffer buf
-      (setq cards  (cdr (org-sm--capture-split-buffer))
-            marker (org-sm--capture-live-marker)))
+      (push "captured new card" done))
     (when cards
-      (if marker
-          (org-sm--capture-at-marker marker (lambda () (org-sm--extract-cards cards)))
-        (dolist (c cards) (org-sm-capture-card 'topic (cdr c) nil nil (car c))))
+      (dolist (c cards) (org-sm-capture-card 'topic (cdr c) nil nil (car c)))
       (set-buffer buf)
       (org-with-wide-buffer
        (delete-region (cdr (org-sm-capture-preamble-bounds)) (point-max)))
-      (format "%s %d card%s"
-              (if marker "split into" "captured")
-              (length cards) (if (= (length cards) 1) "" "s")))))
+      (push (format "captured %d card%s"
+                    (length cards) (if (= (length cards) 1) "" "s"))
+            done))
+    (and done (string-join (nreverse done) ", "))))
 
 (defun org-sm-capture-commit ()
-  "Commit this `org-sm-capture-mode' buffer and close it when empty.
-Writes back both halves independently, whichever are present: the preamble
-as one card body, and each `**' heading as one card -- refining/extending
-the parent card in a workbench, or creating fresh top-level cards in plain
-capture (see `org-sm-capture-parent-marker', `org-sm-capture-mode').
-Signals a `user-error' only when there is nothing at all to commit."
+  "Commit this `org-sm-capture-mode' buffer and close it.
+In a card workbench (`org-sm-capture-parent-marker' set), writes the body
+back to the card and extracts every underlined span (`org-sm-pencils') into
+a child topic card in place.  In plain capture, creates new top-level topic
+card(s) from the leading text and any `**' headings."
   (interactive)
-  (let* ((buf   (current-buffer))
-         (body  (org-sm--capture-commit-body buf))
-         (cards (org-sm--capture-commit-cards buf)))
-    (unless (or body cards) (user-error "Nothing to commit"))
+  (let* ((buf    (current-buffer))
+         (marker (with-current-buffer buf (org-sm--capture-live-marker)))
+         (status (if marker
+                     (org-sm--capture-commit-workbench buf marker)
+                   (org-sm--capture-commit-plain buf))))
+    (unless status (user-error "Nothing to commit"))
     (set-buffer buf)
-    (message "org-sm: %s" (string-join (delq nil (list body cards)) ", "))
-    ;; everything committed was erased above: nothing left means we are done
+    (message "org-sm: %s" status)
     (when (string-blank-p (buffer-string)) (quit-window t))))
 
 (defun org-sm-capture-abort ()
@@ -804,38 +822,37 @@ Signals a `user-error' only when there is nothing at all to commit."
     (define-key map (kbd "C-c C-c") #'org-sm-capture-commit)
     (define-key map (kbd "C-c C-k") #'org-sm-capture-abort)
     (define-key map (kbd "C-c C-t") #'org-sm-capture-change-target)
+    (define-key map (kbd "M-n") #'org-sm-pencil-next)
+    (define-key map (kbd "M-k") #'org-sm-pencil-dismiss)
+    (define-key map (kbd "M-z") #'org-sm-item-extract)
     map)
   "Keymap for `org-sm-capture-mode'.
-The AI extension (`org-sm-gptel') adds \\`C-c C-a' in
+The AI extension (`org-sm-gptel') adds \`C-c C-a' in
 `org-sm-card-workbench' buffers; plain capture never calls AI.")
 
 (define-derived-mode org-sm-capture-mode org-mode "org-sm-cap"
-  "Lightweight capture buffer.  Edit the content, then commit.
+  "Lightweight capture and workbench buffer.  Edit the content, then commit.
 
-The buffer holds plain leading text (the card's own body/preamble) and/or
-`**' headings (one card each).  Both commit together with one command, and
-it behaves identically whether this buffer came from plain `org-sm-capture'
-(no card exists yet) or `org-sm-card-workbench' (refining/splitting an
-existing card) -- see `org-sm-capture-parent-marker'.
-\\<org-sm-capture-mode-map>\\[org-sm-capture-commit] writes back the
-leading text as a card body (if any) and turns each `**' heading into a
-card (if any); \\[org-sm-capture-abort] discards without writing anything.
-
-Capture itself never calls AI: it only stores what you grabbed.  AI enters
-later, while reviewing a card, via `org-sm-card-workbench'.")
+In a card workbench (`org-sm-card-workbench'), the buffer holds the card's
+body, and wavy underlines (`org-sm-pencils') mark spans to extract as child
+cards on commit.  In plain `org-sm-capture', leading text and `**' headings
+become independent top-level cards.
+\\<org-sm-capture-mode-map>\\[org-sm-capture-commit] commits;
+\\[org-sm-capture-abort] discards without writing anything.")
 
 (defun org-sm--capture-show-hint ()
   "Show in the header line what committing this buffer will write, and keys.
 The buffer visits no file, so the header line is free (breadcrumb only
-claims file buffers) and the hint stays put while you edit; a minibuffer
-message would be gone by the first keystroke.  It names what `**' does,
-since that is the half of the buffer nothing on screen explains."
+claims file buffers) and the hint stays put while you edit."
   (let ((hint
          (substitute-command-keys
           (concat
            "\\<org-sm-capture-mode-map>"
            (if org-sm-capture-parent-marker
-               "Top text → this card's body · ** Title → new child card · "
+               (concat "Body → this card · underlines → child cards ("
+                       "\\[org-sm-item-extract] mark, "
+                       "\\[org-sm-pencil-next] next, "
+                       "\\[org-sm-pencil-dismiss] drop) · ")
              (format "[→ %s] Top text → one card · ** Title → one card each · "
                      (or (org-sm-book-label (org-sm-capture-target-file))
                          (file-name-nondirectory (org-sm-capture-target-file)))))
@@ -1130,51 +1147,17 @@ no prompt, no overlay/UI.
     (org-sm--card-changed 'extract)
     id))
 
-(defun org-sm--extract-cards (cards)
-  "Split the parent card at point into child topic cards from CARDS.
-Point must be on the parent heading.  CARDS is a list of (TITLE . BODY).
-Each becomes a scheduled + inited child topic; a back-reference link to
-each child is appended to the parent body.  The parent is left intact
-\(not dismissed).  Returns the list of new child ids.  Pure buffer logic:
-no prompt, no AI, no save.
-
-Like `org-sm-extract' but for a whole-card split: many children, no
-selection, back-references appended at the end of the parent body."
-  (let ((level (org-current-level))
-        (end   (cdr (org-sm-body-bounds)))
-        ids links)
-    (dolist (card cards)
-      (let* ((id    (org-id-new))
-             (title (concat org-sm-topic-prefix
-                            (or (org-string-nw-p (car card))
-                                (org-sm--truncate-title (cdr card))))))
-        (push id ids)
-        (push (format "[[id:%s][<T>]]" id) links)
-        (save-excursion
-          (org-sm--insert-child level 'topic title (cdr card) id))))
-    ;; Append all back-references at the end of the (original) parent body,
-    ;; keeping a trailing newline so the first child heading stays on its
-    ;; own line.
-    (save-excursion
-      (goto-char end)
-      (insert " " (string-join (nreverse links) " "))
-      (unless (bolp) (insert "\n")))
-    (org-sm--card-changed 'extract)
-    (nreverse ids)))
-
 ;;;###autoload
 (defun org-sm-card-workbench ()
   "Open an editable workbench to refine and/or split the card at point.
 
-Run it on the card you are reading.  The body is copied into an
-`org-sm-capture-mode' buffer as leading text; nothing changes in the source
-until \\`C-c C-c' (`org-sm-capture-commit'), which writes the leading text
-back as this card's body (type/schedule/id untouched) and turns each `**'
-heading into a new scheduled child with a back-reference, leaving existing
-children alone.  \\`C-c C-k' discards.
-
-Edit by hand, or with `org-sm-gptel' loaded use \\`C-c C-a' to have the
-AI rewrite the body."
+The card's body is copied into an `org-sm-capture-mode' buffer.  Wavy
+underlines mark spans to extract as child topic cards (added by
+`org-sm-gptel-card-ai' on \`C-c C-a', or by selecting text and pressing
+\`M-z').  Nothing changes in the source until \`C-c C-c'
+(`org-sm-capture-commit'), which writes the body back to this card and
+extracts each underlined span in place via `org-sm-extract' -- leaving
+`⌈...[[id:..][<T>]]' in the parent body.  \`C-c C-k' discards."
   (interactive)
   (when (org-before-first-heading-p) (user-error "Not on an org heading"))
   (org-back-to-heading t)
@@ -1251,22 +1234,40 @@ callers needing their own buffer back must `set-buffer' it explicitly."
 
 ;;;###autoload
 (defun org-sm-item-extract ()
-  "Extract the active region as a child topic or cloze heading.
-Prompts for the card type, then delegates to `org-sm-extract'.  The
-parent body is not modified; a back-reference link is inserted at the
-selection."
+  "Extract a passage, or mark a span in the workbench, or accept a suggestion.
+One key (`M-z') handles all three:
+- In a workbench with an active region: underline the region as a child-card
+  span (committed on \\<org-sm-capture-mode-map>\\[org-sm-capture-commit]).
+- On a suggestion underline with no region (in a source card): accept it
+  into a child topic card immediately (`org-sm-pencil-accept').
+- With an active region on a source card: prompt for topic/cloze and extract
+  immediately via `org-sm-extract'."
   (interactive)
-  (unless (region-active-p) (user-error "Select text to extract first"))
-  (let* ((bounds   (org-sm-body-bounds))
-         (sel-start (- (region-beginning) (car bounds)))
-         (sel-end   (- (region-end) (car bounds)))
-         (selected  (buffer-substring-no-properties
-                     (region-beginning) (region-end)))
-         (type      (intern (completing-read "Extract as: " '("topic" "cloze") nil t))))
-    (org-sm-extract type selected sel-start sel-end))
-  (when (eq org-sm--cloze-state 'revealed)
-    (org-sm-cloze-remove-overlays)
-    (org-sm-cloze-apply-overlays)))
+  (cond
+   ((and (derived-mode-p 'org-sm-capture-mode) org-sm-capture-parent-marker)
+    (if (region-active-p)
+        (let ((beg (region-beginning)) (end (region-end)))
+          (deactivate-mark)
+          (org-sm-pencil-add beg end "手动标记")
+          (goto-char beg)
+          (message "%s" (org-sm-pencil-hint)))
+      (if (org-sm-pencils) (org-sm-pencil-next)
+        (user-error "Select text to mark as a child card, or C-c C-a for AI"))))
+   ((and (not (region-active-p)) (org-sm--pencil-here))
+    (org-sm-pencil-accept))
+   ((not (region-active-p))
+    (user-error "Select text to extract first"))
+   (t
+    (let* ((bounds    (org-sm-body-bounds))
+           (sel-start (- (region-beginning) (car bounds)))
+           (sel-end   (- (region-end) (car bounds)))
+           (selected  (buffer-substring-no-properties
+                       (region-beginning) (region-end)))
+           (type      (intern (completing-read "Extract as: " '("topic" "cloze") nil t))))
+      (org-sm-extract type selected sel-start sel-end))
+    (when (eq org-sm--cloze-state 'revealed)
+      (org-sm-cloze-remove-overlays)
+      (org-sm-cloze-apply-overlays)))))
 
 ;;;; ---- Review session ------------------------------------------------------
 
@@ -1741,24 +1742,18 @@ Point must be on the card heading."
           (match-beginning 0))))))
 
 
+
 ;;;; ---- Suggestions ("pencils") ------------------------------------------
 ;; A suggestion is a span of text that already exists, plus a reason.  It is
-;; drawn as an underline rather than turned into a card, and accepting it
-;; goes through `org-sm-extract' -- the same primitive as a manual extract --
-;; so a card always sits at a highlighted passage of its source however that
-;; passage was found.  The overlay is the whole state: it moves with the text,
-;; is never saved, and disappears with the buffer.
+;; drawn as a wavy underline with no overlay keymap -- single keys on an
+;; overlay would hijack normal/insert editing (e.g. Meow).  Instead, modifier
+;; keys in `org-sm-mode-map' and `org-sm-capture-mode-map' act on underlines:
+;; `M-n' next, `M-k' dismiss, `M-z' accept (or mark in a workbench).
 
 (defface org-sm-pencil-face
   '((t :inherit highlight :underline (:style wave)))
   "Face marking a passage suggested for extraction."
   :group 'org-sm)
-
-(defvar-keymap org-sm-pencil-map
-  :doc "Keys active while point is on a suggestion."
-  "RET" #'org-sm-pencil-accept
-  "DEL" #'org-sm-pencil-dismiss
-  "TAB" #'org-sm-pencil-next)
 
 (defun org-sm-pencil-add (beg end reason)
   "Underline BEG..END as a suggestion, explained by REASON; return it."
@@ -1766,7 +1761,6 @@ Point must be on the card heading."
     (overlay-put ov 'org-sm-pencil reason)
     (overlay-put ov 'face 'org-sm-pencil-face)
     (overlay-put ov 'help-echo reason)
-    (overlay-put ov 'keymap org-sm-pencil-map)
     (overlay-put ov 'evaporate t)
     ov))
 
@@ -1780,18 +1774,25 @@ Point must be on the card heading."
   "Remove the suggestions between BEG and END (whole buffer)."
   (mapc #'delete-overlay (org-sm-pencils beg end)))
 
+(defun org-sm--pencil-here ()
+  "Return the suggestion overlay at point, or nil."
+  (car (seq-filter (lambda (ov) (overlay-get ov 'org-sm-pencil))
+                   (overlays-at (point)))))
+
 (defun org-sm--pencil-at-point ()
   "Return the suggestion containing point, or signal a `user-error'."
-  (or (car (seq-filter (lambda (ov) (overlay-get ov 'org-sm-pencil))
-                       (overlays-at (point))))
-      (user-error "No suggestion at point")))
+  (or (org-sm--pencil-here) (user-error "No suggestion at point")))
 
 (defun org-sm-pencil-hint ()
   "Return the key hint and reason for the suggestion at point."
   (let ((all (org-sm-pencils))
-        (here (org-sm--pencil-at-point)))
+        (here (org-sm--pencil-at-point))
+        (wb (and (derived-mode-p 'org-sm-capture-mode)
+                 org-sm-capture-parent-marker)))
     (concat (substitute-command-keys
-             "\\<org-sm-pencil-map>\\[org-sm-pencil-accept] 摘为子卡  \\[org-sm-pencil-dismiss] 擦掉  \\[org-sm-pencil-next] 下一条")
+             (if wb
+                 "\\<org-sm-capture-mode-map>\\[org-sm-capture-commit] 提交时摘为子卡  \\[org-sm-pencil-dismiss] 擦掉  \\[org-sm-pencil-next] 下一条"
+               "\\[org-sm-item-extract] 摘为子卡  \\<org-sm-mode-map>\\[org-sm-pencil-dismiss] 擦掉  \\[org-sm-pencil-next] 下一条"))
             (format "  (%d/%d) 💡 %s"
                     (1+ (seq-position all here)) (length all)
                     (overlay-get here 'org-sm-pencil)))))
@@ -1808,21 +1809,25 @@ Point must be on the card heading."
 (defun org-sm-pencil-accept ()
   "Extract the suggestion at point into a child topic card.
 Goes through `org-sm-extract', so the passage is highlighted in place and
-the child records where it came from, exactly as a manual extraction."
+the child records where it came from, exactly as a manual extraction.
+In a workbench buffer, underlines are committed together on `C-c C-c', so
+this simply advances to the next underline."
   (interactive)
-  (let* ((ov (org-sm--pencil-at-point))
-         (beg (overlay-start ov))
-         (end (overlay-end ov))
-         (text (buffer-substring-no-properties beg end)))
-    (delete-overlay ov)
-    (save-excursion
-      (goto-char beg)
-      (org-sm--goto-enclosing-card)
-      (let ((body (car (org-sm-body-bounds))))
-        (org-sm-extract 'topic text (- beg body) (- end body))))
-    (if (org-sm-pencils)
-        (org-sm-pencil-next)
-      (message "org-sm: 已摘为子卡。没有剩余建议"))))
+  (if (and (derived-mode-p 'org-sm-capture-mode) org-sm-capture-parent-marker)
+      (org-sm-pencil-next)
+    (let* ((ov (org-sm--pencil-at-point))
+           (beg (overlay-start ov))
+           (end (overlay-end ov))
+           (text (buffer-substring-no-properties beg end)))
+      (delete-overlay ov)
+      (save-excursion
+        (goto-char beg)
+        (org-sm--goto-enclosing-card)
+        (let ((body (car (org-sm-body-bounds))))
+          (org-sm-extract 'topic text (- beg body) (- end body))))
+      (if (org-sm-pencils)
+          (org-sm-pencil-next)
+        (message "org-sm: 已摘为子卡。没有剩余建议")))))
 
 (defun org-sm-pencil-dismiss ()
   "Remove the suggestion at point without extracting anything."
@@ -2044,10 +2049,16 @@ KEYWORD (blank = any; `@seedling'..`@elder', `@mob'..`@demon', or title regexp).
 
 ;;;; ---- Minor modes ---------------------------------------------------------
 
+(defvar-keymap org-sm-mode-map
+  :doc "Keys for suggestion underlines in `org-sm-mode' buffers."
+  "M-n" #'org-sm-pencil-next
+  "M-k" #'org-sm-pencil-dismiss)
+
 ;;;###autoload
 (define-minor-mode org-sm-mode
   "Font-lock {{cloze}} markers and extracted spans in org-mode buffers."
   :lighter " SRS"
+  :keymap org-sm-mode-map
   :group 'org-sm
   (if org-sm-mode
       (font-lock-add-keywords nil org-sm--font-lock-keywords 'append)

@@ -126,21 +126,39 @@
       (should (string-prefix-p "这些年轻神经元更容易兴奋。\n\n【出处上下文" text))
       (should (string-match-p "幼年神经元来自齿状回" text)))))
 
-;;;; ---- Workbench rewrite ----------------------------------------------------
 
-(ert-deftest org-sm-gptel-test-rewrite-keeps-typed-cards ()
-  (with-temp-buffer
-    (org-sm-capture-mode)
-    (insert "old body\n\n** My card\nwritten by hand\n")
-    (setq-local org-sm-capture-parent-marker (point-marker))
-    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "refine"))
-              ((symbol-function 'org-sm-gptel--card-request)
-               (lambda (text _type _mode _custom cb)
-                 (should (equal text "old body"))
-                 (funcall cb "new body" nil))))
-      (org-sm-gptel-card-ai))
-    (should (equal (buffer-string) "new body\n\n** My card\nwritten by hand\n"))
-    (set-marker org-sm-capture-parent-marker nil)))
+;;;; ---- Workbench rewrite + inline underline picks --------------------------
+
+(ert-deftest org-sm-gptel-test-rewrite-draws-picks-and-commits-in-place ()
+  (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+    (org-sm-gptel-test--with-card "粗糙的原文。"
+      (goto-char (point-min))
+      (let ((card-buf (current-buffer))
+            (wb (org-sm-card-workbench)))
+        (unwind-protect
+            (progn
+              (with-current-buffer wb
+                (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "refine"))
+                          ((symbol-function 'org-sm-gptel--card-request)
+                           (lambda (text _type _mode _custom cb)
+                             (should (equal text "粗糙的原文。"))
+                             (funcall cb
+                                      "第一句铺垫。\n\n缓存子问题的解以消除重复计算。\n\n结尾。"
+                                      '(("缓存子问题的解以消除重复计算。" . "核心机制")
+                                        ("不存在的幻觉引文" . "应丢弃"))
+                                      nil))))
+                  (org-sm-gptel-card-ai))
+                (should (= (length (org-sm-pencils)) 1))
+                (org-sm-capture-commit))
+              (with-current-buffer card-buf
+                (goto-char (point-min))
+                (should (string-match-p
+                         "第一句铺垫。\n\n⌈缓存子问题的解以消除重复计算。\\[\\[id:[^]]+\\]\\[<T>\\]\\]\n\n结尾。"
+                         (org-sm-body-text)))
+                (should (= (plist-get (org-sm-card-at-point) :child-topics) 1))))
+          (when (buffer-live-p wb)
+            (with-current-buffer wb (erase-buffer))
+            (kill-buffer wb)))))))
 
 (ert-deftest org-sm-gptel-test-async-response-does-not-erase-manual-edits ()
   (with-temp-buffer
@@ -153,13 +171,14 @@
                  (lambda (_text _type _mode _custom cb) (setq callback cb))))
         (org-sm-gptel-card-ai)
         (insert " user edit")
-        (funcall callback "AI result" nil)
+        (funcall callback "AI result" nil nil)
         (should (equal (buffer-string) "draft user edit")))
       (set-marker org-sm-capture-parent-marker nil))))
 
-(ert-deftest org-sm-gptel-test-card-system-has-no-split ()
-  (dolist (mode '(refine simplify))
-    (should-not (string-match-p "cards\\|子卡数组" (org-sm-gptel--card-system 'topic mode))))
+(ert-deftest org-sm-gptel-test-card-system-uses-picks-not-cards ()
+  (should (string-match-p "picks" (org-sm-gptel--card-system 'topic 'refine)))
+  (should (string-match-p "picks 固定为空数组" (org-sm-gptel--card-system 'topic 'simplify)))
+  (should (string-match-p "picks 固定为空数组" (org-sm-gptel--card-system 'cloze 'refine)))
   (should (string-prefix-p "只做这个" (org-sm-gptel--card-system 'topic 'custom "只做这个"))))
 
 (ert-deftest org-sm-gptel-test-style-reaches-read-text-only ()

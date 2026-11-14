@@ -272,21 +272,50 @@
       (should (equal (car origin) "前文 别的摘录 后文"))
       (should (equal (cdr origin) "")))))
 
-(ert-deftest org-sm-core-workbench-hint-explains-child-cards ()
-  ;; The hint lives in the header line (the buffer has no file, so breadcrumb
-  ;; does not own it) and says what `**' does in each kind of buffer.
+(ert-deftest org-sm-core-workbench-hint-and-commit-extracts-in-place ()
+  ;; The workbench header line explains underlines (M-z / M-n / M-k), and
+  ;; committing writes the body back then extracts each underline via
+  ;; `org-sm-extract', leaving `⌈...[[id:..][<T>]]' in the parent body.
   (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
     (with-temp-buffer
       (org-mode)
-      (insert "* [T] Card\n:PROPERTIES:\n:SRS_TYPE: topic\n:END:\nbody 100%\n")
+      (insert "* [T] Card\n:PROPERTIES:\n:SRS_TYPE: topic\n:END:\nold body 100%\n")
       (goto-char (point-min))
-      (let ((buf (org-sm-card-workbench)))
+      (let ((card-buf (current-buffer))
+            (buf (org-sm-card-workbench)))
         (unwind-protect
-            (with-current-buffer buf
-              (should (string-match-p "\\*\\* Title → new child card" header-line-format))
-              (should (string-match-p "C-c C-c commit" header-line-format)))
-          (with-current-buffer buf (erase-buffer))
-          (kill-buffer buf)))))
+            (progn
+              (with-current-buffer buf
+                (should (string-match-p "underlines → child cards" header-line-format))
+                (should (string-match-p "M-z mark" header-line-format))
+                (should (string-match-p "M-n next" header-line-format))
+                (should (string-match-p "M-k drop" header-line-format))
+                ;; No overlay keymap: normal/insert single keys are untouched.
+                (erase-buffer)
+                (insert "引言。\n\n核心机制是缓存子问题的解。\n\n再加一段值得摘的结论。\n")
+                (goto-char (point-min))
+                (search-forward "核心机制")
+                (set-mark (match-beginning 0))
+                (search-forward "的解。")
+                (activate-mark)
+                (org-sm-item-extract)
+                (should-not (overlay-get (car (org-sm-pencils)) 'keymap))
+                (search-forward "值得摘的结论。")
+                (org-sm-pencil-add (match-beginning 0) (match-end 0) "第二条")
+                ;; Dismiss the second underline with M-k (`org-sm-pencil-dismiss').
+                (goto-char (match-beginning 0))
+                (org-sm-pencil-dismiss)
+                (should (= (length (org-sm-pencils)) 1))
+                (org-sm-capture-commit))
+              (with-current-buffer card-buf
+                (goto-char (point-min))
+                (should (string-match-p
+                         "引言。\n\n⌈核心机制是缓存子问题的解。\\[\\[id:[^]]+\\]\\[<T>\\]\\]\n\n再加一段值得摘的结论。"
+                         (org-sm-body-text)))
+                (should (= (plist-get (org-sm-card-at-point) :child-topics) 1))))
+          (when (buffer-live-p buf)
+            (with-current-buffer buf (erase-buffer))
+            (kill-buffer buf))))))
   (let ((org-sm-capture-file "/tmp/inbox.org"))
     (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
       (let ((buf (org-sm--capture-buffer "text" "*org-sm hint test*")))
