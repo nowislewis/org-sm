@@ -272,4 +272,28 @@
       (should (equal (car origin) "前文 别的摘录 后文"))
       (should (equal (cdr origin) "")))))
 
+(ert-deftest org-sm-core-workbench-hint-explains-child-cards ()
+  ;; The hint lives in the header line (the buffer has no file, so breadcrumb
+  ;; does not own it) and says what `**' does in each kind of buffer.
+  (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+    (with-temp-buffer
+      (org-mode)
+      (insert "* [T] Card\n:PROPERTIES:\n:SRS_TYPE: topic\n:END:\nbody 100%\n")
+      (goto-char (point-min))
+      (let ((buf (org-sm-card-workbench)))
+        (unwind-protect
+            (with-current-buffer buf
+              (should (string-match-p "\\*\\* Title → new child card" header-line-format))
+              (should (string-match-p "C-c C-c commit" header-line-format)))
+          (with-current-buffer buf (erase-buffer))
+          (kill-buffer buf)))))
+  (let ((org-sm-capture-file "/tmp/inbox.org"))
+    (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+      (let ((buf (org-sm--capture-buffer "text" "*org-sm hint test*")))
+        (unwind-protect
+            (with-current-buffer buf
+              (should (string-match-p "\\*\\* Title → one card each" header-line-format)))
+          (with-current-buffer buf (erase-buffer))
+          (kill-buffer buf))))))
+
 ;;; org-sm-core-test.el ends here

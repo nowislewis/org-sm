@@ -632,6 +632,7 @@ is created if missing.  Example: \\='(\"Topics\" \"Physics\")"
   (unless (and (stringp file) (not (string-empty-p file)))
     (user-error "No capture target file selected"))
   (setq org-sm-capture-file (expand-file-name file))
+  (when (derived-mode-p 'org-sm-capture-mode) (org-sm--capture-show-hint))
   (message "org-sm: capture target → %s"
            (or (org-sm-book-label org-sm-capture-file)
                (file-name-nondirectory org-sm-capture-file))))
@@ -823,6 +824,30 @@ card (if any); \\[org-sm-capture-abort] discards without writing anything.
 Capture itself never calls AI: it only stores what you grabbed.  AI enters
 later, while reviewing a card, via `org-sm-card-workbench'.")
 
+(defun org-sm--capture-show-hint ()
+  "Show in the header line what committing this buffer will write, and keys.
+The buffer visits no file, so the header line is free (breadcrumb only
+claims file buffers) and the hint stays put while you edit; a minibuffer
+message would be gone by the first keystroke.  It names what `**' does,
+since that is the half of the buffer nothing on screen explains."
+  (let ((hint
+         (substitute-command-keys
+          (concat
+           "\\<org-sm-capture-mode-map>"
+           (if org-sm-capture-parent-marker
+               "Top text → this card's body · ** Title → new child card · "
+             (format "[→ %s] Top text → one card · ** Title → one card each · "
+                     (or (org-sm-book-label (org-sm-capture-target-file))
+                         (file-name-nondirectory (org-sm-capture-target-file)))))
+           "\\[org-sm-capture-commit] commit · "
+           (unless org-sm-capture-parent-marker
+             "\\[org-sm-capture-change-target] target · ")
+           (when (and org-sm-capture-parent-marker (fboundp 'org-sm-gptel-card-ai))
+             "\\[org-sm-gptel-card-ai] AI · ")
+           "\\[org-sm-capture-abort] abort"))))
+    ;; A header-line string is a mode-line construct: escape `%' in titles.
+    (setq header-line-format (string-replace "%" "%%" hint))))
+
 (defun org-sm--capture-buffer (content &optional name setup context)
   "Pop up an `org-sm-capture-mode' buffer named NAME, pre-filled with CONTENT.
 NAME defaults to a shared \"*org-sm capture*\" buffer.  SETUP, when given,
@@ -856,20 +881,7 @@ never changes where the next unrelated capture goes."
     (pop-to-buffer buf
                    '(display-buffer-in-side-window
                      (side . right) (window-width . 0.5)))
-    (with-current-buffer buf
-      (message "%s"
-               (substitute-command-keys
-                (concat (unless org-sm-capture-parent-marker
-                          (format "[→ %s] "
-                                  (or (org-sm-book-label (org-sm-capture-target-file))
-                                      (file-name-nondirectory (org-sm-capture-target-file)))))
-                        "Type \\[org-sm-capture-commit] to commit, "
-                        (unless org-sm-capture-parent-marker
-                          "\\[org-sm-capture-change-target] target, ")
-                        "\\[org-sm-capture-abort] to abort"
-                        (when (and org-sm-capture-parent-marker
-                                   (fboundp 'org-sm-gptel-card-ai))
-                          ", or \\[org-sm-gptel-card-ai] for AI")))))
+    (with-current-buffer buf (org-sm--capture-show-hint))
     buf))
 
 ;;;###autoload
