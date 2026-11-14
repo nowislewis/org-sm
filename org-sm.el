@@ -1475,20 +1475,21 @@ PREV is a string describing the last action."
     (org-sm--advance)))
 
 (defun org-sm-cycle-priority ()
-  "Rotate the current card's priority cookie: none -> A -> B -> C -> none.
-The one keystroke that makes the priority queue mean something.  The
-A-Factor follows the cookie (see `org-sm-topic-afactor'), so this also
-retunes how soon a topic returns."
+  "Raise the current card's priority one step: C -> B -> A, then back to C.
+A card without a cookie counts as B, as it does for queue rank and
+A-Factor, so it goes to A.  Raising is the usual move -- imports start at
+C and earn their way up -- so one press is one step up.  The A-Factor
+follows the cookie (see `org-sm-topic-afactor'), so this also retunes how
+soon a topic returns."
   (interactive)
   (unless (org-sm-type) (user-error "Not on an SRS heading"))
   (save-excursion
     (org-back-to-heading t)
     (let ((next (pcase (plist-get (org-sm-card-at-point) :priority)
-                  ('nil ?A) (?A ?B) (?B ?C) (_ nil))))
-      (org-priority (or next 'remove))
+                  (?C ?B) (?A ?C) (_ ?A))))
+      (org-priority next)
       (org-sm--card-changed 'priority)
-      (message "org-sm: priority %s"
-               (if next (format "[#%c]" next) "none")))))
+      (message "org-sm: priority [#%c]" next))))
 
 (defun org-sm-review-start (&optional limit)
   "Start a review of due cards: the first LIMIT of them, or all.

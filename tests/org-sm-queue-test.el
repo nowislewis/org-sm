@@ -136,11 +136,11 @@ appended after the property drawer."
     (insert (org-sm-queue-test--card "Parent" "topic" nil 1) "body text here\n")
     (goto-char (point-min))
     (let ((seen nil))
+      ;; No cookie counts as B, so the first step is A; then C, B, A again.
       (dotimes (_ 4)
         (org-sm-cycle-priority)
         (push (plist-get (org-sm-card-at-point) :priority) seen))
-      (should (equal (nreverse seen) '(?A ?B ?C nil))))
-    (org-sm-cycle-priority)                   ; parent now [#A]
+      (should (equal (nreverse seen) '(?A ?C ?B ?A))))
     (goto-char (point-min))
     (let ((id (org-sm-extract 'topic "body" 0 4)))
       (re-search-forward (regexp-quote id))

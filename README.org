@@ -101,7 +101,7 @@ Requires Emacs 29.1+, org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
 | ~org-sm-card-workbench~           | Rewrite the card at point, add child cards      |
 | ~org-sm-capture-commit~ | Commit a capture/workbench buffer (~C-c C-c~)   |
 | ~org-sm-capture-page~   | Capture a PDF page's text layer                  |
-| ~org-sm-cycle-priority~ | Rotate this card's priority: none → A → B → C    |
+| ~org-sm-cycle-priority~ | Raise priority one step: C → B → A → C          |
 | ~org-sm-neural-start~   | Review a card's neighbourhood, not the calendar  |
 | ~org-sm-import-file~    | Import an EPUB/HTML/Markdown as chapter cards    |
 | ~org-sm-import-url~     | Fetch an article and import it as topic cards    |
