@@ -82,3 +82,93 @@
 
 (provide 'org-sm-web-test)
 ;;; org-sm-web-test.el ends here
+
+;;;; ---- Browser reading: read point, images, priority ----------------------
+
+(ert-deftest org-sm-web-test-readpoint-roundtrip ()
+  (org-sm-web-test--with-card
+    (org-entry-put nil "ID" "card-rp")
+    (let* ((before (org-sm-body-text))
+           (offset (string-search "beta" before)))
+      ;; No anchor yet: the snapshot must say so rather than guess.
+      (should-not (org-sm-web--readpoint-offset))
+      (org-sm-web--set-readpoint offset)
+      ;; Offset is measured on the cleaned body the browser was given.
+      (should (= (org-sm-web--readpoint-offset) offset))
+      (should (string-match-p "\\[\\[rp:" (org-sm--readpoint-anchor (org-id-get))))
+      ;; Moving the anchor must not leave the old one behind.
+      (org-sm-web--set-readpoint 0)
+      (should (= (org-sm-web--readpoint-offset) 0))
+      (should (= (count-matches "\\[\\[rp:" (point-min) (point-max)) 1))
+      ;; The anchor stays in the body (the browser hides it at render time
+      ;; and reports its offset), so the two views keep one text.
+      (should (string-match-p "\\[\\[rp:" (org-sm-body-text))))))
+
+(ert-deftest org-sm-web-test-image-path-is-confined ()
+  (let* ((root (make-temp-file "org-sm-img-" t))
+         (notes (expand-file-name "notes" root))
+         (shared (expand-file-name "pics" root))
+         (org-sm-directory notes)
+         (org-sm-web-image-roots (list shared))
+         (in (expand-file-name "a.png" notes))
+         (out (expand-file-name "b.png" root))
+         (allowed (expand-file-name "c.png" shared)))
+    (make-directory notes) (make-directory shared)
+    (unwind-protect
+        (progn
+          (dolist (f (list in out allowed))
+            (with-temp-file f (insert "x")))
+          (should (equal (org-sm-web--image-path in) in))
+          (should (equal (org-sm-web--image-path allowed) allowed))
+          ;; Outside every root, or not an image: refused.
+          (should-error (org-sm-web--image-path out) :type 'user-error)
+          (should-error (org-sm-web--image-path "/etc/passwd") :type 'user-error)
+          (with-temp-file (expand-file-name "notes.txt" notes) (insert "x"))
+          (should-error (org-sm-web--image-path (expand-file-name "notes.txt" notes))
+                        :type 'user-error))
+      (delete-directory root t))))
+
+(ert-deftest org-sm-web-test-card-snapshot-carries-reading-state ()
+  (let* ((dir (make-temp-file "org-sm-snap-" t))
+         (org-sm-directory dir)
+         (org-sm-web-image-roots nil)
+         (file (expand-file-name "n.org" dir))
+         (img (expand-file-name "pic.png" dir)))
+    (unwind-protect
+        (progn
+          (with-temp-file img (insert "png"))
+          (with-temp-file file
+            (insert "* [T] Read me\n:PROPERTIES:\n:ID: card1\n:SRS_TYPE: topic\n"
+                    ":END:\n首段\n[[file:pic.png][图示]]\nsecond\n"))
+          (with-current-buffer (find-file-noselect file)
+            (goto-char (point-min))
+            (org-sm-web--set-readpoint 0)
+            (let ((card (org-sm-web--card-at-point)))
+              (should (= (plist-get card :readpoint) 0))
+              (let ((image (aref (plist-get card :images) 0)))
+                (should (= (length (plist-get card :images)) 1))
+                (should (equal (plist-get image :alt) "图示"))
+                (should (string-match-p "\\`/api/image\\?path=" (plist-get image :url)))))
+            (set-buffer-modified-p nil))
+        (when-let* ((b (get-file-buffer file))) (kill-buffer b))
+        (delete-directory dir t)))))
+
+(ert-deftest org-sm-web-test-priority-endpoint ()
+  (org-sm-web-test--with-card
+    (should-not (plist-get (org-sm-card-at-point) :priority))
+    (let ((letter (aref "A" 0)))
+      (org-priority letter))
+    (should (eq (plist-get (org-sm-card-at-point) :priority) ?A))
+    (should-error (org-priority (aref "Z" 0)) :type 'error)))
+
+(ert-deftest org-sm-web-test-readpoint-moves-forward-past-itself ()
+  ;; The browser's offset counts the old anchor; moving forward must still
+  ;; land on the tapped character, not one anchor-length too far.
+  (org-sm-web-test--with-card
+    (org-entry-put nil "ID" "card-fw")
+    (org-sm-web--set-readpoint 0)
+    (let* ((body (org-sm-body-text))
+           (target (string-search "beta" body)))
+      (org-sm-web--set-readpoint target)
+      (should (string-match-p "alpha \\[\\[rp:card-fw\\]\\[📖\\]\\]beta"
+                              (org-sm-body-text))))))

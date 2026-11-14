@@ -11,25 +11,23 @@
 ;;   (with-eval-after-load 'gptel (require 'org-sm-gptel))
 ;;
 ;; Commands:
-;;   org-sm-gptel-explain       - AI explains a heading TO you (why-before-what,
-;;                                3 layers).  Persistent side-window chat.
-;;   org-sm-gptel-pick          - While reviewing a topic (x): AI picks ONE passage
-;;                                to extract as a child card, with a one-line
-;;                                reason; never rewrites the source body.
-;;   org-sm-gptel-card-ai       - In an `org-sm-card-workbench' buffer (C-c C-a):
-;;                                prompts for a mode (refine / refine+subcard /
-;;                                simplify / custom instruction), then ONE AI
-;;                                call refines the leading body text and
-;;                                proposes child cards per that mode (empty
-;;                                cards unless the mode asks for a split);
-;;                                re-rendered as body + `**' headings.  C-c C-c
-;;                                commits whatever is present, turning every
-;;                                `**' heading into a child card regardless of
-;;                                mode.  Call again to re-run, any mode.
+;;   org-sm-gptel-suggest   - (x while reviewing a topic) the AI underlines up
+;;                            to three passages worth extracting in the text
+;;                            on screen or the region, each with a reason.
+;;                            It quotes; it never writes a card.  RET on an
+;;                            underline extracts it with `org-sm-extract',
+;;                            DEL erases it, TAB moves to the next.
+;;   org-sm-gptel-explain   - (?) explain the paragraph or region you are stuck
+;;                            on, with the surrounding text and the source
+;;                            page as context.  Persistent side-window chat.
+;;   org-sm-gptel-card-ai   - (C-c C-a in a card workbench) rewrite the body
+;;                            you are editing: refine, simplify, or a custom
+;;                            instruction.  Cards you typed below are kept.
 ;;
-;; Capture never calls AI: `org-sm-capture' only stores the raw material.
-;; Every AI action here operates on an existing card, i.e. while you read or
-;; review it.
+;; Division of labour: the AI points at text and rewrites prose on request;
+;; deciding what becomes a card, and cloze deletion, stay with the reader,
+;; since generating the item is where encoding happens.  Capture never calls
+;; AI.
 
 ;;; Code:
 
@@ -40,11 +38,13 @@
 (declare-function gptel-context-add-file "gptel-context")
 (declare-function org-sm-set-body "org-sm")
 (declare-function org-sm-capture-preamble-bounds "org-sm")
-(declare-function org-sm-capture-fill-body-and-cards "org-sm")
+(declare-function org-sm-capture-set-preamble "org-sm")
 (declare-function gptel--apply-preset "gptel")
 (declare-function gptel-get-preset "gptel")
 (declare-function gptel-agent-update "gptel-agent")
 (defvar gptel-context)
+(defvar gptel-use-context)
+(defvar gptel-use-tools)
 (defvar gptel-system-prompt)
 
 ;;;; ---- Customization -------------------------------------------------------
@@ -64,46 +64,65 @@ nil = plain `gptel' (no tools); any registered preset symbol also works."
                  (symbol :tag "Preset name"))
   :group 'org-sm-gptel)
 
+(defcustom org-sm-gptel-style
+  "写法要求：
+1. 动作用动词。写「分析日志」，不写「对日志进行分析」。
+2. 一句只说一件事。不用分号或破折号把几件事连成一句。
+3. 同一个概念全文只用一个名字。
+4. 直接陈述。不写「不是 X 而是 Y」，除非读者确实持有 X 这个看法。
+5. 不加收尾句。不用「这说明了……的重要性」之类的话重复上文。
+6. 说重要性时写具体后果：不这样会怎样。不写「至关重要」「核心」。
+7. 删掉套话和营销词。不凑三项排比，不给列表项加粗标签。
+8. 保留语气强弱。原文写「可能」「通常」，照写，不升格成定论。
+9. 因为、所以、导致、从而是内容，保留，不拆散因果链。
+10. 不添加原文没有的事实、例子或数字。"
+  "Writing rules appended to every prompt whose output a person reads.
+Distilled from controlled technical Chinese (ASD-STE100: verbs over
+nominalisations, one name per concept, no semicolon chains) and from the
+catalogue of AI writing tells behind Wikipedia's \"Signs of AI writing\"
+\(staged contrasts, closers, inflated importance).  One name per concept
+matters twice in a card: synonyms rotated across reviews interfere in
+memory.  Causal connectives are exempt from sentence splitting, the same
+way the source rules treat modality as content.  Not applied to suggestion
+quotes, which must stay verbatim to be located."
+  :type 'string :group 'org-sm-gptel)
+
 (defcustom org-sm-gptel-system-explain
-  "你是专注于帮助深度理解概念的学习导师。
+  "你是学习导师。用户在渐进阅读中读到一段看不懂的文字，你帮他理解这一段。
 
-你的角色：解释者。用户在渐进阅读复习中遇到了看不懂的内容，你负责帮他建立理解。
+按三层回答，每层一到两句。重点放在第二、三层，第一层一句带过：
+① 是什么：一句话定义，需要时配一个类比。
+② 为什么会这样：原文从 A 直接跳到 C 时，补出原文省略的中间步骤 B。
+③ 不这样会怎样：它解决什么问题，没有它会出什么具体后果，它在更大的体系里接在哪里。
+   这一层把孤立的知识接回主线，所以不能省。只停在定义，读者记住的是一个容易忘、也用不上的事实。
 
-【输出结构】每次按三层，每层 1-2 句，重心在②③，①一句带过、不凑字：
-  ① 是什么（一句话定义，需要时配一个类比）—— 只是地基锚点，别展开。
-  ② 为什么会这样—— 原文从 A 跳到 C 时，把被省略的因果中间步骤 B 补出来。
-  ③ 为什么它重要（★最高价值，必须有）—— 解决什么问题？不要会怎样？在更大体系里的位置？
-     这一层把孤立知识「挂回主线」，绝不能略。先抛定义并停在定义，只会让人记住一个易忘、不可迁移的事实。
-
-【工具（若具备 Skill/Read）】
-- 解释前先 Skill 读 「learning-coach」拿学习偏好（method.md）并遵守。
-- 遇领域知识就 Skill 读对应书 skill（ai-processor-architecture 等）查证，不凭空猜。
-- 只读不写：可 Skill/Read/Grep 搜知识，绝不 Edit/Write 改文件。制卡是另一个流程。
+可以用工具查资料（若具备 Skill / Read）：
+- 遇到领域知识，先读对应的书 skill（例如 ai-processor-architecture）核对，不凭空猜。
+- 只读不写。可以用 Skill、Read、Grep 查资料，不用 Edit、Write 改文件。
 
 约束：
-- 只解释，不制卡，不生成填空/卡片格式/总结。
-- 某层不适用时（纯约定/纯事实无②③），明说「这是纯约定，没有为什么」，不编造因果。
-- 需类比时给 2-3 个不同领域（日常/工程/自然）供用户选；有层次/流程/对比关系时用 ASCII 图或 org 表格。
-- 解释完问一句：「哪个词去掉了这句话就不成立？」等用户自答，不提示。
-  用户答后一句话确认/指正是否抓住核心，不展开，制卡留给用户。"
+- 只解释。不制卡，不写填空，不写总结。
+- 某一层不适用时（纯约定、纯事实），直说「这是约定，没有为什么」，不编造因果。
+- 需要类比时，给两到三个不同领域的类比供用户挑选。有层次、流程或对比关系时，用 ASCII 图或 org 表格。
+- 解释完问一句：「哪个词去掉了，这句话就不成立？」然后等用户回答，不给提示。
+  用户回答后，用一句话确认或纠正，不展开。制卡留给用户。"
   "System prompt for `org-sm-gptel-explain'."
   :type 'string :group 'org-sm-gptel)
 
 (defcustom org-sm-gptel-system-topic
-  "你是 SuperMemo 渐进阅读专家，处理阶段一（Topic）材料。任务：
-1. 剥离废话、营销语气和过度修辞，保留核心事实。
-2. 每段限定一个独立主题；消除代词歧义（替换为具体名词）。
-3. 保持段落完整可读性——不要压缩成摘要，用户需要在阅读中理解后才制卡。
-4. 集合式列举（「特点有：A、B、C」）改写为有因果逻辑的叙述。
-5. 严禁删除因果链。原文中的「因为」「导致」「所以」「才能」等连接词及其前后内容必须完整保留。
-   这类材料的核心价值正是「为什么」，删掉因果链等于把活知识变成死记忆。
-6. 【显式化隐含逻辑】原文里藏着、但没明说的因果关系，把它显式写出来：
-   补上被省略的主语、补上「因为…所以…」这类连接词、把「特点是A、B」改写成「A 导致 B」。
-   目的：让用户重读时逻辑链是显式、连贯的，不用在脑子里重建。
-   【硬约束】只能显式化原文已有、但隐含的逻辑；绝不引入原文没有的新解释、新事实、新推导。
-   （那是 explain 的活；refine 只负责把原文藏的逻辑摔到表面，不替用户思考。）
-7. 如果原文只有结论没有说明原因（且原文里也推不出来），在段末加注：「【需补充】为什么是这个结论？」
-   提示用户主动去寻找原因，而不是直接给出。"
+  "你是渐进阅读编辑，整理一段阅读材料（topic），让用户重读时更容易理解。
+
+1. 删掉废话、营销语气和过度修辞，保留全部事实。
+2. 每段只讲一个主题。把有歧义的代词换成具体名词。
+3. 保持段落完整可读，不压缩成摘要。用户读懂之后才会制卡。
+4. 把罗列式写法（「特点有 A、B、C」）改成带因果的叙述。
+5. 保留因果链。原文里的「因为」「导致」「所以」「才能」以及它们连接的内容，一个都不删。
+   这类材料的价值就在「为什么」，删掉因果链，读者只能死记结论。
+6. 原文隐含但没写明的因果，写成明文：补出省略的主语，补上「因为……所以……」，
+   把「特点是 A、B」改成「A 导致 B」。这样用户重读时不必自己在脑子里重建逻辑。
+   只能写明原文已有的逻辑，不引入原文没有的解释、事实或推导。补充解释是 explain 的工作。
+7. 原文只有结论、没有原因，而且原文里也推不出原因时，在段末加注：「【需补充】为什么是这个结论？」
+   让用户自己去找原因，你不代答。"
   "System prompt for topic refine operations."
   :type 'string :group 'org-sm-gptel)
 
@@ -132,105 +151,56 @@ nil = plain `gptel' (no tools); any registered preset symbol also works."
   "System prompt for cloze refine operations."
   :type 'string :group 'org-sm-gptel)
 
-(defcustom org-sm-gptel-system-split
-  (concat
-   "\n\n【子卡拆分（可选）】完成上面的正文优化后，再判断原文是否包含值得独立拆出的\n"
-   "原子概念/论断——复用价值高、能被其他卡引用、能单独主动回忆的内容。\n\n"
-   "拆分倒向（soft）：\n"
-   "1. 优先按「一个概念 / 一条论断」原子化拆：这类卡复用价值最高，优先产出。\n"
-   "2. 不强行概念化：内容本质是流程/叙事/并列事实时，按其自然结构拆，不硬套。\n"
-   "3. 原子但不碎：一张只讲一件事，但要讲完整；同一推理链留在同一张子卡。\n"
-   "4. 没有值得拆的内容就返回空数组 cards: []，不要为了拆而拆——大多数卡不需要子卡。\n\n"
-   "子卡【标题 = API】优先用可被其他卡引用的句柄：首选完整论断，其次问句，\n"
-   "仅核心术语用名词，不含 [T] 前缀。\n"
-   "子卡【正文】遵循与正文相同的清理规则（剥离废话、消除代词歧义、不压缩成摘要、\n"
-   "不删因果链、显式化隐含逻辑、不引入新事实）；拆出的内容不必从正文里删除，\n"
-   "正文与子卡各自独立存在，允许重叠。")
-  "Child-splitting instructions appended after the per-type refine prompt
-\(`org-sm-gptel-system-topic' / `org-sm-gptel-system-cloze') to build the
-combined `org-sm-card-workbench' system prompt -- see
-`org-sm-gptel--card-system'.  Biases toward concept/claim atoms (high
-memory-reuse value) but stays flexible, and explicitly allows an empty
-result when nothing is worth splitting off."
-  :type 'string :group 'org-sm-gptel)
-
 (defcustom org-sm-gptel-system-simplify
-  "你是内容精简专家。任务：把正文压缩到只剩必须记住的核心，比精炼（refine）更激进。
+  "你把一段正文精简到只剩必须记住的核心，删得比 refine 更多。
 
-1. 只保留结论/核心事实/关键因果链，删除一切背景铺垫、例子、重复表述。
-2. 允许合并同类项、删除次要限定语；但不能删掉因果链本身（为什么），
-   只删多余的解释性文字。
-3. 目标长度：明显短于原文，一般是原文的三分之一到一半。
-4. 不引入原文没有的新事实、新结论；只做删减和合并，不做扩写。
-5. 输出仍是完整可读的正文，不是关键词罗列。"
+1. 只保留结论、核心事实和关键因果链。删掉背景铺垫、重复的表述，以及不支撑结论的例子。
+2. 可以合并同类项，可以删次要的限定语。因果链本身（为什么）必须保留，只删多余的解释文字。
+3. 篇幅一般是原文的三分之一到一半。
+4. 只删减与合并，不扩写，不引入原文没有的事实或结论。
+5. 输出仍是完整可读的正文，不是关键词列表。"
   "System prompt for the `simplify' `org-sm-gptel-card-ai' mode.
 More aggressive than `org-sm-gptel-system-topic'/`-cloze': cuts length, not
-just noise.  Never combined with `org-sm-gptel-system-split' -- simplify
-never proposes child cards."
+just noise."
   :type 'string :group 'org-sm-gptel)
 
-(defcustom org-sm-gptel-system-pick
-  "你是 SuperMemo 渐进阅读专家。用户正在复习一张较长的 topic 卡，不知道该先提取什么。
-任务：只挑出【一段】最值得单独提取成子 topic 的内容。一次只做一步，剩下的内容留在原卡，下次再挑。
+(defcustom org-sm-gptel-system-suggest
+  "你是 SuperMemo 渐进阅读专家。用户正在读一段较长的文字，想知道哪些地方值得摘录成独立的阅读卡。
 
-挑选优先级：
-1. 作者的核心主张 / 结论。
-2. 关键定义。
-3. 关键因果链（为什么）。
-细节、例子、铺垫不挑。
+任务：从给定原文中挑出 0 到 3 段最值得单独摘录的文字。
+挑选优先级：作者的核心主张/结论 > 关键定义 > 关键因果链（为什么）。细节、例子、铺垫不挑。
 
-子卡要求：
-- 正文从原文摘取（提取是复制），保持原意和因果连接词；只做最小改动：把代词替换为具体名词、
-  删掉与本段无关的半句，使它脱离原文仍能读懂。不扩写、不总结、不引入新事实。
-- 标题用一句完整论断（可被其他卡引用），不含 [T] 前缀。
-- 只挑一段，宁缺毋滥。
-
-如果原文已经足够短、或没有值得单独提取的内容，cards 返回空数组，
-并在理由里建议「直接推后」或「可以 dismiss」。
-
-只输出结构化结果：{body: 一句话理由（为什么挑这段，或为什么不挑）, cards: 至多一个子卡}。"
-  "System prompt for `org-sm-gptel-pick' (the `pick' mode).
-Unlike the refine modes, BODY in the response is a one-line reason, not a
-refined body: the source card's text is never rewritten.  Answers the
-review-time question \"what do I extract from this long topic?\" one step at
-a time, so the user never has to plan a whole card's split up front."
+硬约束：
+1. quote 必须逐字复制原文中连续的一段（一到三句），不改一个字、不加省略号、不拼接。
+   程序会丢弃对不上原文的引文。
+2. why 用一句话说明它为什么值得单独复习，不复述原文。
+3. 宁缺毋滥：没有值得摘的就返回空数组。"
+  "System prompt for `org-sm-gptel-suggest'.
+Asks for verbatim quotes only, which are then located in the source: a
+quote that cannot be found is dropped, so a suggestion can never point at
+text that is not there."
   :type 'string :group 'org-sm-gptel)
 
 (defconst org-sm-gptel--card-modes
-  '(("refine"         . refine)
-    ("refine+subcard" . refine+subcard)
-    ("简化"           . simplify)
-    ("自定义提示词")) ; . custom, filled in with the typed prompt at call time
+  '(("refine" . refine)
+    ("简化"   . simplify)
+    ("自定义提示词"))   ; . custom, filled in with the typed prompt at call time
   "Choices for `org-sm-gptel-card-ai''s mode prompt.
 Alist of (LABEL . SYMBOL); the last entry's cdr is left nil as a marker for
 \='custom, whose actual system prompt is whatever the user types.")
 
 (defun org-sm-gptel--card-system (type mode &optional custom)
-  "Return the system prompt for TYPE (`topic'/`cloze'/nil) and MODE.
-MODE is one of:
-- `refine'          -- per-type refine prompt alone; cards always empty.
-- `refine+subcard'  -- per-type refine prompt + child-splitting addendum
-                        \(`org-sm-gptel-system-split'); the original combined
-                        behaviour, cards may be non-empty.
-- `simplify'        -- `org-sm-gptel-system-simplify' alone; cards always
-                        empty, more aggressive cut than `refine'.
-- `custom'          -- CUSTOM verbatim as the entire system prompt (no
-                        preset refine/split rules at all); cards empty
-                        unless CUSTOM itself asks for a split.
-All modes end with the same JSON-contract line, since every mode is
-requested through the same `org-sm-gptel--card-schema'.  Used by
-`org-sm-gptel-card-ai' for `org-sm-card-workbench' buffers."
-  (let ((refine (if (eq type 'cloze) org-sm-gptel-system-cloze org-sm-gptel-system-topic))
-        (contract "\n\n只输出结构化结果：{body: 优化后的正文, cards: 子卡数组（可为空）}。"))
-    (pcase mode
-      ;; pick carries its own contract: BODY is a reason, not a body.
-      ('pick org-sm-gptel-system-pick)
-      (_ (concat (pcase mode
-                   ('refine         refine)
-                   ('refine+subcard (concat refine org-sm-gptel-system-split))
-                   ('simplify       org-sm-gptel-system-simplify)
-                   ('custom         (string-trim custom)))
-                 contract)))))
+  "Return the system prompt rewriting a body of TYPE in MODE.
+TYPE is `topic', `cloze' or nil; MODE is `refine', `simplify' or `custom',
+the last using CUSTOM as the task.  Every mode ends with
+`org-sm-gptel-style', since every result becomes text the reader rereads."
+  (concat (pcase mode
+            ('refine (if (eq type 'cloze) org-sm-gptel-system-cloze
+                       org-sm-gptel-system-topic))
+            ('simplify org-sm-gptel-system-simplify)
+            ('custom (string-trim custom)))
+          "\n\n" org-sm-gptel-style
+          "\n\n只输出结构化结果：{body: 改写后的正文}。"))
 
 ;;;; ---- Internal helpers ----------------------------------------------------
 
@@ -252,35 +222,48 @@ is what tells the two apart."
            (replace-regexp-in-string "[^[:alnum:][:blank:]-]" "" heading)
            40 nil nil t)))
 
-(defun org-sm-gptel--current-subtree ()
-  "Return heading line and body text, excluding metadata and child headings."
+(defcustom org-sm-gptel-explain-context 1500
+  "Characters of surrounding text sent with the passage being explained.
+Enough for the argument the passage belongs to, short enough that a long
+article does not drown the question."
+  :type 'integer :group 'org-sm-gptel)
+
+(defun org-sm-gptel--passage ()
+  "Return (PASSAGE . CONTEXT) for the text the reader is stuck on.
+PASSAGE is the region, else the paragraph at point; CONTEXT is up to
+`org-sm-gptel-explain-context' characters of the card body around it."
+  (let* ((span (if (use-region-p)
+                   (cons (region-beginning) (region-end))
+                 (org-sm-paragraph-bounds)))
+         (body (org-sm-body-bounds))
+         (from (max (car body) (- (car span) org-sm-gptel-explain-context)))
+         (to   (min (cdr body) (+ (cdr span) org-sm-gptel-explain-context))))
+    (cons (string-trim (buffer-substring-no-properties (car span) (cdr span)))
+          (concat (buffer-substring-no-properties from (car span))
+                  "【……】"
+                  (buffer-substring-no-properties (cdr span) to)))))
+
+(defun org-sm-gptel--draft-p ()
+  "Return non-nil when the chat ends with text typed but not yet sent.
+A new question is appended at the end of the chat, so it must not be glued
+onto, and sent along with, half a sentence the user was still writing."
   (save-excursion
-    (org-back-to-heading t)
-    (concat (org-get-heading t t t t) "\n" (org-sm-body-text))))
+    (goto-char (point-max))
+    (let* ((match (text-property-search-backward 'gptel 'response t))
+           (tail (string-trim (buffer-substring-no-properties
+                               (if match (prop-match-end match) (point-min))
+                               (point-max)))))
+      (not (member tail (list "" (string-trim (gptel-prompt-prefix-string))))))))
 
-(defun org-sm-gptel--open-chat (kind system intro)
-  "Open or reuse a persistent gptel chat buffer for KIND on the current heading.
-
-KIND   - string (\"explain\"), used in the buffer name.
-SYSTEM - system prompt defining the AI role.
-INTRO  - one-line task description; prepended to the opening message.
-
-Opening message (sent automatically on first open):
-  <intro>
-
-  当前 heading：<heading>
-
-  #+begin_quote
-  <subtree>
-  #+end_quote
-
-Subsequent calls redisplay the existing buffer without sending again."
+(defun org-sm-gptel--open-chat (kind system message)
+  "Open the KIND chat for the current card and send MESSAGE to it.
+SYSTEM is the system prompt.  One chat per card, reused across calls, so
+a second question about another paragraph continues the conversation
+instead of starting over."
   (let* ((heading  (save-excursion
                      (org-back-to-heading t)
                      (org-get-heading t t t t)))
-         (subtree  (org-sm-gptel--current-subtree))
          (buf-name (org-sm-gptel--buf-name kind heading))
-         (new-p    (not (get-buffer buf-name)))
          (chat-buf (gptel buf-name))
          (src-file (buffer-file-name)))
     (with-current-buffer chat-buf
@@ -301,10 +284,11 @@ Subsequent calls redisplay the existing buffer without sending again."
         (require 'gptel-context)
         (setq-local gptel-context nil)
         (gptel-context-add-file src-file))
-      (when new-p
+      (if (org-sm-gptel--draft-p)
+          (message "org-sm: 聊天里有未发送的草稿，先发送或删除它")
         (goto-char (point-max))
-        (insert (format "%s\n\n#+begin_quote\n%s\n#+end_quote"
-                        intro subtree))
+        (unless (bolp) (insert "\n"))
+        (insert message)
         (gptel-send)))
     (display-buffer chat-buf
                     '(display-buffer-in-side-window
@@ -312,176 +296,210 @@ Subsequent calls redisplay the existing buffer without sending again."
 
 ;;;; ---- Commands ------------------------------------------------------------
 
+(defun org-sm-gptel--source-quote ()
+  "Return the page text behind the `page:' link in the current card, or nil.
+A card extracted from a PDF keeps only the sentence that mattered; the
+reasoning around it stayed on the page."
+  (when-let* ((link (org-sm-source-page-link (org-sm-body-text)))
+              (text (org-sm-source-page-text-now (car link) (cdr link))))
+    (truncate-string-to-width
+     (replace-regexp-in-string "\n\\{3,\\}" "\n\n" text) 4000 nil nil "…")))
+
 ;;;###autoload
 (defun org-sm-gptel-explain ()
-  "Open a persistent explanation chat for the current heading.
-AI explains TO you (why-first, 3 layers).  Use when stuck.
-Applies `org-sm-gptel-agent-preset' so the AI can read book skills and
-`learning-coach' via the Skill tool.  Buffer reused on re-invoke."
+  "Explain the paragraph at point, or the region, in this card's chat.
+Sends the passage itself, the text around it and, when the card has a
+`page:' link, that page of the source: the step the passage skips is
+usually in the neighbourhood, not in the passage.  Applies
+`org-sm-gptel-agent-preset' so the AI can consult book skills."
   (interactive)
-  (org-sm-gptel--open-chat
-   "explain" org-sm-gptel-system-explain
-   "我在复习以下内容时看不懂，请按三层极简解释：
-① 是什么（一句话定义，需要时配一个类比）
-② 为什么会这样（补上原文跳过的因果中间步骤）
-③ 为什么它重要（它解决什么问题、不要会怎样、在更大体系里的位置）
+  (pcase-let ((`(,passage . ,context) (org-sm-gptel--passage))
+              (page (ignore-errors (org-sm-gptel--source-quote))))
+    (org-sm-gptel--open-chat
+     "explain" (concat org-sm-gptel-system-explain "\n\n" org-sm-gptel-style)
+     (concat
+      "我读到这一段卡住了，请按三层极简解释（重点②③，①一句带过，不要制卡、不要总结）：\n\n"
+      "#+begin_quote\n" passage "\n#+end_quote\n\n"
+      "【前后文，供理解，不必解释】\n#+begin_example\n" context "\n#+end_example"
+      (when page
+        (concat "\n\n【原书那一页】\n#+begin_example\n" page "\n#+end_example"))))))
 
-重点放在②③，①一句带过。不要替我制卡，不要生成总结。"))
+;;;; ---- Suggestions: the AI underlines, the reader extracts ------------------
 
-;;;; ---- AI card action (refine + optional child split, one call) ------------
+(defconst org-sm-gptel--suggest-schema
+  '(:type "object"
+    :properties
+    (:picks (:type "array"
+             :items (:type "object"
+                     :properties (:quote (:type "string") :why (:type "string"))
+                     :required ["quote" "why"])))
+    :required ["picks"])
+  "JSON schema for `org-sm-gptel-suggest': verbatim quotes with reasons.")
+
+(defun org-sm-gptel--locate (quote beg end)
+  "Return (START . END) of QUOTE between BEG and END, or nil.
+Exact text first, then with whitespace runs matched loosely, since models
+often re-wrap lines.  Extract markers inside the source are ignored too,
+so an already highlighted passage can still be found."
+  (let ((quote (string-trim quote)))
+    (when (>= (length quote) 4)
+      (save-excursion
+        (goto-char beg)
+        (or (and (search-forward quote end t)
+                 (cons (match-beginning 0) (match-end 0)))
+            (progn
+              (goto-char beg)
+              (and (re-search-forward
+                    (mapconcat (lambda (part) (regexp-quote part))
+                               (split-string quote "[ \t\n]+" t)
+                               "[ \t\n]*")
+                    end t)
+                   (cons (match-beginning 0) (match-end 0)))))))))
+
+(defun org-sm-gptel--parse-picks (response)
+  "Return the (QUOTE . WHY) pairs in RESPONSE, nil when it cannot be read."
+  (when (stringp response)
+    (let ((data (ignore-errors
+                  (json-parse-string response :object-type 'plist
+                                     :array-type 'list))))
+      (delq nil (mapcar (lambda (p)
+                          (let ((q (plist-get p :quote)) (w (plist-get p :why)))
+                            (and (stringp q) (stringp w) (cons q w))))
+                        (plist-get data :picks))))))
+
+(defun org-sm-gptel--draw-picks (picks beg end)
+  "Underline PICKS found between BEG and END; return how many were drawn.
+A pick whose quote is not in the text is dropped: a suggestion must point
+at something the reader can see."
+  (org-sm-pencils-clear beg end)
+  (let ((n 0))
+    (dolist (pick picks)
+      (when-let* ((span (org-sm-gptel--locate (car pick) beg end)))
+        (org-sm-pencil-add (car span) (cdr span) (cdr pick))
+        (setq n (1+ n))))
+    n))
+
+;;;###autoload
+(defun org-sm-gptel-suggest ()
+  "Underline passages worth extracting in the text on screen or the region.
+The AI quotes; nothing is written.  Accept an underline with RET to extract
+it through `org-sm-extract', erase it with DEL, move on with TAB.  The
+underlines vanish with the buffer, so nothing half-decided reaches a file."
+  (interactive)
+  (unless (save-excursion (org-sm--goto-enclosing-card))
+    (user-error "Not inside an org-sm card"))
+  (let* ((span (org-sm-reading-bounds))
+         (beg (copy-marker (car span)))
+         (end (copy-marker (cdr span) t))
+         (text (buffer-substring-no-properties beg end))
+         (buf (current-buffer)))
+    (when (string-blank-p text) (user-error "Nothing to read here"))
+    (message "org-sm: 找值得摘的段落...")
+    (let ((gptel-use-context nil)
+          (gptel-use-tools nil))
+      (gptel-request text
+        :system org-sm-gptel-system-suggest
+        :schema org-sm-gptel--suggest-schema
+        :transforms nil
+        :callback
+        (lambda (response info)
+          (cond
+           ((not (buffer-live-p buf)) nil)
+           ((not (stringp response))
+            (message "org-sm AI failed: %s" (plist-get info :status)))
+           (t
+            (with-current-buffer buf
+              (let ((n (org-sm-gptel--draw-picks
+                        (org-sm-gptel--parse-picks response) beg end)))
+                (if (zerop n)
+                    (message "org-sm: 这一屏没有值得单独摘的")
+                  (goto-char beg)
+                  (org-sm-pencil-next)))))))))))
+
+;;;; ---- Rewriting a body in the workbench -------------------------------------
 
 (defvar-local org-sm-gptel--request-serial 0
   "Generation of the latest AI request in this workbench buffer.")
 
 (defconst org-sm-gptel--card-schema
-  '(:type "object"
-    :properties
-    (:body  (:type "string")
-     :cards (:type "array"
-             :items
-             (:type "object"
-              :properties
-              (:title (:type "string")
-               :body  (:type "string"))
-              :required ["title" "body"])))
-    :required ["body" "cards"])
-  "JSON schema: model returns {body, cards:[{title,body}]} for the combined
-refine+split action used by `org-sm-card-workbench'.")
+  '(:type "object" :properties (:body (:type "string")) :required ["body"])
+  "JSON schema for `org-sm-gptel-card-ai': the rewritten body, nothing else.")
 
 (defun org-sm-gptel--parse-card-response (response)
-  "Parse RESPONSE JSON into (BODY . CARDS); nil on failure or missing BODY.
-CARDS is a list of (TITLE . BODY), the format `org-sm-capture-render-cards'
-consumes."
+  "Return the trimmed body in RESPONSE, or nil when it cannot be read."
   (when (stringp response)
-    (let* ((data  (ignore-errors
-                    (json-parse-string response :object-type 'plist
-                                       :array-type 'list)))
-           (body  (plist-get data :body))
-           (cards (plist-get data :cards)))
-      (when (and (stringp body) (org-string-nw-p body))
-        (cons (string-trim body)
-              (delq nil
-                    (mapcar (lambda (c)
-                              (let ((title (plist-get c :title))
-                                    (b     (plist-get c :body)))
-                                (when (and (stringp b) (org-string-nw-p b))
-                                  (cons (and (stringp title) (string-trim title))
-                                        (string-trim b)))))
-                            cards)))))))
+    (let ((body (plist-get (ignore-errors
+                             (json-parse-string response :object-type 'plist))
+                           :body)))
+      (and (stringp body) (org-string-nw-p body) (string-trim body)))))
 
 (defun org-sm-gptel--card-request (text type mode custom callback)
-  "Ask the AI to refine TEXT per MODE, possibly proposing child cards.
-TYPE (`topic'/`cloze'/nil) and MODE/CUSTOM select the system prompt (see
-`org-sm-gptel--card-system').  CALLBACK receives three args: the refined
-body string (or nil), the cards list (or nil, possibly empty), and an
-error string (or nil).  The single owner of the schema and request flow
-for `org-sm-card-workbench''s AI action."
-  (gptel-request text
-    :system (org-sm-gptel--card-system type mode custom)
-    :schema org-sm-gptel--card-schema
-    :callback
-    (lambda (response info)
-      (if (stringp response)
-          (let ((parsed (org-sm-gptel--parse-card-response response)))
-            (if parsed
-                (funcall callback (car parsed) (cdr parsed) nil)
-              (funcall callback nil nil "parse failed")))
-        (funcall callback nil nil (format "%s" (plist-get info :status)))))))
+  "Ask the AI to rewrite TEXT per MODE and call CALLBACK with the result.
+TYPE and MODE/CUSTOM select the system prompt (see
+`org-sm-gptel--card-system').  CALLBACK receives the new body (or nil)
+and an error string (or nil).
+
+Context is bound here rather than inherited: with added context and agent
+tools off and no prompt transforms, this stays one plain text-in, JSON-out
+request that never picks up whatever the user attached elsewhere."
+  (let ((gptel-use-context nil)
+        (gptel-use-tools nil))
+    (gptel-request text
+      :system (org-sm-gptel--card-system type mode custom)
+      :schema org-sm-gptel--card-schema
+      :transforms nil
+      :callback
+      (lambda (response info)
+        (if-let* ((body (org-sm-gptel--parse-card-response response)))
+            (funcall callback body nil)
+          (funcall callback nil (if (stringp response) "parse failed"
+                                  (format "%s" (plist-get info :status)))))))))
 
 ;;;###autoload
 (defun org-sm-gptel-card-ai ()
-  "Refine this `org-sm-card-workbench' buffer with the AI, in place.
-
-Prompts for a mode first, then makes ONE AI call:
-- refine          -- clean up the leading body text only; cards stay empty.
-- refine+subcard  -- refine, and also judge what is worth splitting off into
-                      child cards (empty is normal when nothing is worth it).
-- 简化 (simplify)   -- cut the body down to its essential core, more
-                      aggressively than refine; cards stay empty.
-- 自定义提示词 (custom) -- type your own instruction; used verbatim as the
-                      whole system prompt instead of any preset rules.
-
-The buffer is re-rendered as leading text + `**' headings; edit by hand,
-or call this again (any mode) to re-run.  Nothing is written to the source
-card until \\`C-c C-c' (`org-sm-capture-commit'), which always refines the
-body from the leading text and turns every `**' heading into a child card,
-regardless of which mode produced them.  Workbench only, see
-`org-sm-gptel--workbench-only'."
+  "Rewrite the body in this card workbench with the AI.
+Choose refine (clean up, keep every causal link), 简化 (cut to the core) or
+a custom instruction.  Only the leading body text changes; `**' cards you
+typed below it are kept.  Nothing reaches the source card until
+\\<org-sm-capture-mode-map>\\[org-sm-capture-commit]."
   (interactive)
   (org-sm-gptel--workbench-only)
   (let* ((label  (completing-read "AI 动作：" (mapcar #'car org-sm-gptel--card-modes)
                                   nil t))
          (mode   (or (cdr (assoc label org-sm-gptel--card-modes)) 'custom))
          (custom (and (eq mode 'custom) (read-string "提示词："))))
-    (when (and (eq mode 'custom) (string-empty-p (string-trim (or custom ""))))
+    (when (and (eq mode 'custom) (string-blank-p (or custom "")))
       (user-error "Custom mode needs a prompt"))
-    (org-sm-gptel--card-run mode label custom)))
+    (let* ((bounds (org-sm-capture-preamble-bounds))
+           (raw    (string-trim (buffer-substring-no-properties
+                                 (car bounds) (cdr bounds))))
+           (buf    (current-buffer))
+           (tick   (buffer-chars-modified-tick))
+           (serial (cl-incf org-sm-gptel--request-serial)))
+      (when (string-empty-p raw) (user-error "No body text to rewrite"))
+      (message "org-sm: asking AI (%s)..." label)
+      (org-sm-gptel--card-request
+       raw org-sm-capture-card-type mode custom
+       (lambda (body err)
+         (cond
+          (err (message "org-sm AI failed: %s" err))
+          ((not (buffer-live-p buf)) (message "org-sm AI: buffer gone"))
+          ;; An async reply must never clobber what the user typed meanwhile.
+          ((with-current-buffer buf
+             (or (/= serial org-sm-gptel--request-serial)
+                 (/= tick (buffer-chars-modified-tick))))
+           (message "org-sm AI: draft changed or newer request exists; result ignored"))
+          (t
+           (with-current-buffer buf (org-sm-capture-set-preamble body))
+           (message "%s" (substitute-command-keys
+                          (format "org-sm: AI %s done — edit, then \\<org-sm-capture-mode-map>\\[org-sm-capture-commit]"
+                                  label))))))))))
 
-(defun org-sm-gptel--card-run (mode label custom)
-  "Send this workbench's text to the AI in MODE and render the result.
-LABEL names the mode in messages; CUSTOM is the prompt for `custom'.
-Shared by `org-sm-gptel-card-ai' and `org-sm-gptel-pick'.  Discards a
-response if the buffer was edited or a newer request was sent meanwhile,
-so an async reply never clobbers manual edits."
-  (let* ((raw    (string-trim (buffer-substring-no-properties
-                               (point-min) (point-max))))
-         (type   org-sm-capture-card-type)
-         (buf    (current-buffer))
-         (tick   (buffer-chars-modified-tick))
-         (serial (cl-incf org-sm-gptel--request-serial)))
-    (when (string-empty-p raw) (user-error "Buffer is empty"))
-    (message "org-sm: asking AI (%s)..." label)
-    (org-sm-gptel--card-request
-     raw type mode custom
-     (lambda (body cards err)
-       (cond
-        (err (message "org-sm AI failed: %s" err))
-        ((not (buffer-live-p buf)) (message "org-sm AI: buffer gone"))
-        ((with-current-buffer buf
-           (or (/= serial org-sm-gptel--request-serial)
-               (/= tick (buffer-chars-modified-tick))))
-         (message "org-sm AI: draft changed or newer request exists; result ignored"))
-        ((eq mode 'pick)
-         (with-current-buffer buf (org-sm-gptel--render-pick body cards)))
-        (t
-         (with-current-buffer buf (org-sm-capture-fill-body-and-cards body cards))
-         (message "org-sm: AI %s done%s — edit, then C-c C-c" label
-                  (if cards
-                      (format " + %d card%s"
-                              (length cards) (if (= (length cards) 1) "" "s"))
-                    ""))))))))
-
-(defun org-sm-gptel--render-pick (reason cards)
-  "Render a `pick' result: at most one card, REASON in the header line.
-The preamble is left empty, so \\`C-c C-c' only adds the child card and
-never rewrites the source card's body.  REASON stays out of the buffer
-text for the same reason: header-line text is never committed."
-  (org-sm-capture-fill-body-and-cards "" (seq-take cards 1))
-  (setq-local header-line-format (concat " 💡 " reason))
-  (message (if cards
-               "org-sm: 挑了一段 — 可以改，C-c C-c 提交，C-c C-k 放弃"
-             "org-sm: 没有值得提取的 — C-c C-k 返回")))
-
-;;;###autoload
-(defun org-sm-gptel-pick ()
-  "Ask the AI to pick ONE passage of the topic at point to extract.
-Opens `org-sm-card-workbench' on the card and requests the `pick' mode:
-the result is at most one child card plus a one-line reason (header line).
-Edit it freely; \\`C-c C-c' adds it as a child card, leaving the source
-body untouched, and returns you to the card -- continue the review
-yourself.  \\`C-c C-k' discards.  One step per review: what is not picked
-now stays in the card for next time."
-  (interactive)
-  (unless (eq (org-sm-type) 'topic) (user-error "Pick works on topic cards"))
-  (with-current-buffer (org-sm-card-workbench)
-    (org-sm-gptel--card-run 'pick "挑一段" nil)))
-
-;; Wire the AI action into the core capture workbench and review repeat map.
+;; Wire the AI actions into the workbench and the review repeat map.
 (with-eval-after-load 'org-sm
-  (when (boundp 'org-sm-capture-mode-map)
-    (define-key org-sm-capture-mode-map (kbd "C-c C-a") #'org-sm-gptel-card-ai))
-  (when (boundp 'org-sm-review-repeat-map)
-    (define-key org-sm-review-repeat-map (kbd "?") #'org-sm-gptel-explain)))
+  (keymap-set org-sm-capture-mode-map "C-c C-a" #'org-sm-gptel-card-ai)
+  (keymap-set org-sm-review-repeat-map "?" #'org-sm-gptel-explain)
+  (keymap-set org-sm-review-repeat-map "x" #'org-sm-gptel-suggest))
 
 (provide 'org-sm-gptel)
 ;;; org-sm-gptel.el ends here

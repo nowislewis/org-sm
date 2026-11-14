@@ -198,6 +198,28 @@
     padding: 1px 0;
   }
   .extracted.topic { background: var(--accent-soft); }
+  .readpoint {
+    display: inline-block;
+    margin: 0 2px;
+    padding: 0 4px;
+    border-radius: 6px;
+    background: var(--gold-soft);
+    font-size: 0.85em;
+    user-select: none;
+    scroll-margin: 40vh;
+  }
+  .card-body.markable { touch-action: manipulation; }
+  .body-link { color: var(--teal); border-bottom: 1px dotted var(--teal); cursor: pointer; }
+  .body-image { display: block; max-width: 100%; height: auto; margin: 10px auto; border-radius: 8px; }
+  .read-tools { align-items: center; }
+  .prio-group { display: inline-flex; gap: 6px; flex: none; }
+  .prio {
+    width: 40px; min-height: 52px;
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--card); color: var(--dim);
+    font: 700 15px/1 var(--mono); cursor: pointer;
+  }
+  .prio.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   .extracted.cloze { background: var(--teal-soft); }
 
   footer {
@@ -526,6 +548,7 @@ const State = {
   totalInitial: 0,
   busy: false,
   light: sessionStorage.getItem("org_sm_mode") !== "all",
+  scrolledFor: null,
   hud: null,
   get current() {
     return this.queue[this.index] || null;
@@ -550,41 +573,55 @@ function toast(msg, ms) {
    `⌈...[[id:...]]', standalone `[[id:...]]' back-references, and `{{cloze}}' spans. */
 function tokenizeBody(text, isCloze) {
   const parts = [];
-  const base = "⌈([^⌈]*?)\\[\\[id:[^\\]]+\\]\\[<([TC])>\\]\\]|\\[\\[id:[^\\]]+\\]\\[<([TC])>\\]\\]";
-  const re = new RegExp(isCloze ? `${base}|\\{\\{([^}]+)\\}\\}` : base, "g");
+  /* Order matters: id back-references and read points are specific forms
+     of the generic [[target][desc]] link and must win before it. */
+  const re = new RegExp(
+    "⌈([^⌈]*?)\\[\\[id:[^\\]]+\\]\\[<([TC])>\\]\\]" +      // 1,2 extracted span
+    "|\\[\\[id:[^\\]]+\\]\\[<([TC])>\\]\\]" +              // 3 bare back-ref
+    "|\\{\\{([^}]+)\\}\\}" +                                // 4 cloze
+    "|(\\[\\[rp:[^\\]]+\\]\\[📖\\]\\])" +                   // 5 read point
+    /* A `]' not followed by another `]' is literal, as org-link-make-string
+       writes it: titles like "[美] 作者" must not end the link early. */
+    "|\\[\\[((?:[^\\]\\n]|\\](?!\\]))+?)\\](?:\\[((?:[^\\]\\n]|\\](?!\\]))*)\\])?\\]",  // 6,7 any link
+    "g");
   let last = 0, charPos = 0, m;
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > last) {
-      const seg = text.slice(last, m.index);
-      const len = Array.from(seg).length;
+  const plain = seg => {
+    if (!seg) return;
+    const len = Array.from(seg).length;
+    const prev = parts[parts.length - 1];
+    /* Adjacent plain text is one span: separate ones would let a click
+       resolve to a boundary instead of the character under the finger. */
+    if (prev && prev.kind === "text" && prev.end === charPos) {
+      prev.text += seg;
+      prev.end = charPos + len;
+    } else {
       parts.push({ kind: "text", text: seg, start: charPos, end: charPos + len });
-      charPos += len;
     }
+    charPos += len;
+  };
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) plain(text.slice(last, m.index));
     const totalLen = Array.from(m[0]).length;
+    const start = charPos, end = charPos + totalLen;
     if (m[1] !== undefined) {
       const spanText = "⌈" + m[1];
-      const refStart = charPos + Array.from(spanText).length;
-      parts.push({
-        kind: "extracted", ref: m[2], text: spanText,
-        start: charPos, end: refStart
-      });
-      parts.push({
-        kind: "ref", ref: m[2],
-        start: refStart, end: charPos + totalLen
-      });
+      const refStart = start + Array.from(spanText).length;
+      parts.push({ kind: "extracted", ref: m[2], text: spanText, start, end: refStart });
+      parts.push({ kind: "ref", ref: m[2], start: refStart, end });
     } else if (m[3] !== undefined) {
-      parts.push({ kind: "ref", ref: m[3], start: charPos, end: charPos + totalLen });
+      parts.push({ kind: "ref", ref: m[3], start, end });
+    } else if (m[4] !== undefined) {
+      if (isCloze) parts.push({ kind: "cloze", cloze: m[4], start, end });
+      else plain(m[0]);
+    } else if (m[5] !== undefined) {
+      parts.push({ kind: "rp", start, end });
     } else {
-      parts.push({ kind: "cloze", cloze: m[4], start: charPos, end: charPos + totalLen });
+      parts.push({ kind: "link", target: m[6], desc: m[7], start, end });
     }
-    charPos += totalLen;
+    charPos = end;
     last = re.lastIndex;
   }
-  if (last < text.length) {
-    const seg = text.slice(last);
-    const len = Array.from(seg).length;
-    parts.push({ kind: "text", text: seg, start: charPos, end: charPos + len });
-  }
+  if (last < text.length) plain(text.slice(last));
   return parts;
 }
 
@@ -602,7 +639,8 @@ function domPointToCharOffset(bodyEl, node, offset) {
   const start = Number(span.dataset.start);
   const end = Number(span.dataset.end);
   if (node.nodeType !== 3) return offset <= 0 ? start : end;
-  if (span.classList.contains("back-ref") || span.classList.contains("cloze-hide")) {
+  if (span.classList.contains("back-ref") || span.classList.contains("cloze-hide")
+      || span.classList.contains("atomic")) {
     return offset <= 0 ? start : end;
   }
   const prefix = Array.from(node.data.slice(0, offset)).length;
@@ -629,17 +667,11 @@ function clearBodySelection() {
   if (State.current) renderButtons($("footer"), State.current);
 }
 
-/* Light mode samples LIGHT_SIZE cards, randomly within equal priority
-   (lower Org priority value = more important), mirroring
-   `org-sm-review-start-light'.  Full mode keeps the server's stalest-first
-   order. */
+/* The server sends due cards already in review order (`org-sm-queue-order'):
+   a light session is its head, a full session all of it.  Keeping the order
+   on one side means Emacs and the phone never disagree about what is next. */
 function buildQueue() {
-  if (!State.light) return State.all.slice();
-  const shuffled = State.all
-    .map(c => ({ c, k: [c.priority == null ? 0 : -c.priority, Math.random()] }))
-    .sort((a, b) => a.k[0] - b.k[0] || a.k[1] - b.k[1])
-    .map(x => x.c);
-  return shuffled.slice(0, LIGHT_SIZE);
+  return State.light ? State.all.slice(0, LIGHT_SIZE) : State.all.slice();
 }
 
 function startQueue() {
@@ -749,6 +781,27 @@ function render() {
     } else if (tok.kind === "ref") {
       span.className = "back-ref";
       span.textContent = `⟨${tok.ref}⟩`;
+    } else if (tok.kind === "rp") {
+      /* The anchor marks where reading stopped; it is a control, not text. */
+      span.className = "readpoint atomic";
+      span.textContent = "📖";
+      span.title = "阅读位置：点正文任意处可移动";
+      span.onclick = e => { e.stopPropagation(); toast("点正文任意处即可把阅读位置移过去"); };
+    } else if (tok.kind === "link") {
+      span.className = "body-link atomic";
+      const isImage = /\.(png|jpe?g|gif|svg|webp)$/i.test(tok.target);
+      if (isImage) {
+        const img = document.createElement("img");
+        const found = (c.images || []).find(x => x.link === tok.target);
+        img.className = "body-image";
+        img.alt = tok.desc || tok.target;
+        img.loading = "lazy";
+        if (found) img.src = found.url;
+        span.appendChild(img);
+      } else {
+        span.textContent = tok.desc || tok.target;
+        span.onclick = e => { e.stopPropagation(); showLinkDetails(tok); };
+      }
     } else if (State.revealed) {
       span.className = "cloze-show";
       span.textContent = tok.cloze;
@@ -768,6 +821,89 @@ function render() {
 
   renderButtons(footer, c);
   footer.querySelectorAll("button").forEach(btn => { btn.disabled = State.busy; });
+  attachReadingControls(c, body);
+}
+
+/* Long topics are read, not recited: the browser restores the read point so
+   a phone session resumes where Emacs left off.  Double-tap moves it --
+   single taps happen by accident while scrolling. */
+function attachReadingControls(c, bodyEl) {
+  if (c.type === "topic") {
+    bodyEl.classList.add("markable");
+    bodyEl.ondblclick = e => {
+      if (State.busy) return;
+      const [node, offset] = caretAt(e.clientX, e.clientY);
+      const off = node ? domPointToCharOffset(bodyEl, node, offset) : null;
+      if (off == null) return;
+      try { window.getSelection().removeAllRanges(); } catch (_) {}
+      moveReadpoint(c, off);
+    };
+  }
+  if (c.readpoint != null && State.scrolledFor !== c.id) {
+    State.scrolledFor = c.id;
+    const mark = bodyEl.querySelector(".readpoint");
+    if (mark) mark.scrollIntoView({ block: "center" });
+  }
+}
+
+/* DOM position under a screen point; Safari only has caretRangeFromPoint. */
+function caretAt(x, y) {
+  if (document.caretPositionFromPoint) {
+    const p = document.caretPositionFromPoint(x, y);
+    return p ? [p.offsetNode, p.offset] : [null, 0];
+  }
+  if (document.caretRangeFromPoint) {
+    const r = document.caretRangeFromPoint(x, y);
+    return r ? [r.startContainer, r.startOffset] : [null, 0];
+  }
+  return [null, 0];
+}
+
+/* The first character visible at the top of the reading pane. */
+function topVisibleOffset(bodyEl) {
+  const pane = $("main").getBoundingClientRect();
+  const box = bodyEl.getBoundingClientRect();
+  const y = Math.max(pane.top, box.top) + 12;
+  const [node, offset] = caretAt(box.left + 8, y);
+  return node ? domPointToCharOffset(bodyEl, node, offset) : null;
+}
+
+async function moveReadpoint(c, offset) {
+  if (State.busy) return;
+  State.busy = true;
+  try {
+    c.readpoint = offset;
+    render();
+    const res = await API.call(`/api/readpoint/${encodeURIComponent(c.id)}`,
+                               { offset: String(offset), revision: c.revision });
+    c.body = res.body;
+    c.revision = res.revision;
+    c.readpoint = res.readpoint;
+  } catch (e) {
+    toast("阅读位置保存失败: " + e.message);
+  } finally {
+    State.busy = false;
+    render();
+  }
+}
+
+function showLinkDetails(tok) {
+  const target = tok.target;
+  if (/^https?:/.test(target)) { window.open(target, "_blank", "noopener"); return; }
+  toast(target);
+}
+
+/* Reading aids belong to topics: a cloze has nothing to resume. */
+function readingToolbar(c) {
+  if (c.type !== "topic") return "";
+  const cookie = c.cookie || "";
+  const prio = ["A", "B", "C"].map(letter =>
+    `<button class="prio${cookie === letter ? " on" : ""}" data-prio="${letter}">${letter}</button>`
+  ).join("");
+  return `<div class="btn-row read-tools">
+      <button class="btn" id="btn-rp-now">📍 记到屏幕顶部<span class="sub">双击正文可精确标记</span></button>
+      <span class="prio-group" title="优先级：A 最常回看">${prio}</span>
+    </div>`;
 }
 
 function ratingButton(cls, rating, label, iv) {
@@ -831,6 +967,36 @@ function renderButtons(footer, c) {
     <button class="btn" id="btn-topic-skip">跳过本卡</button>
     <button class="btn" id="btn-topic-dismiss">不再复习</button>`;
   footer.appendChild(r2);
+  const tools = document.createElement("div");
+  tools.innerHTML = readingToolbar(c);
+  footer.appendChild(tools.firstElementChild || document.createElement("div"));
+  const rpNow = $("btn-rp-now");
+  if (rpNow) {
+    rpNow.onclick = () => {
+      const bodyEl = document.querySelector(".card-body");
+      const off = bodyEl && topVisibleOffset(bodyEl);
+      if (off == null) { toast("双击正文某处来标记阅读位置"); return; }
+      moveReadpoint(c, off);
+    };
+  }
+  footer.querySelectorAll(".prio").forEach(btn => {
+    btn.onclick = async () => {
+      if (State.busy) return;
+      State.busy = true;
+      try {
+        const res = await API.call(`/api/priority/${encodeURIComponent(c.id)}`,
+                                   { cookie: btn.dataset.prio, revision: c.revision });
+        c.cookie = res.cookie;
+        c.revision = res.revision;
+        toast("优先级 [#" + btn.dataset.prio + "]");
+      } catch (e) {
+        toast("优先级保存失败: " + e.message);
+      } finally {
+        State.busy = false;
+        render();
+      }
+    };
+  });
 
   $("btn-topic-rsch").onclick = () => reviewTopic("next");
   $("btn-topic-postpone").onclick = promptPostpone;

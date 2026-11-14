@@ -99,20 +99,74 @@ Requires Emacs 29.1+, org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
 | ~org-sm-capture-clipboard-notify~ | Save clipboard immediately and send notification |
 | ~org-sm-card-workbench~           | Refine and/or split the card at point           |
 | ~org-sm-capture-commit~ | Commit a capture/workbench buffer (~C-c C-c~)   |
+| ~org-sm-capture-page~   | Capture a PDF page (text layer, else OCR)        |
+| ~org-sm-cycle-priority~ | Rotate this card's priority: none → A → B → C    |
+| ~org-sm-neural-start~   | Review a card's neighbourhood, not the calendar  |
+| ~org-sm-import-file~    | Import an EPUB/HTML/Markdown as chapter cards    |
+| ~org-sm-import-url~     | Fetch an article and import it as topic cards    |
 
 * Review Flow
 
 - *topic:* ~review-start~ → read → ~review-confirm~ (reschedules, next item).
-  Press ~x~ instead of ~r~ to have the AI pick one passage to extract into a
-  child card (optional, needs ~org-sm-gptel~); it does not advance the queue.
+  Press ~x~ instead of ~r~ to have the AI underline passages worth
+  extracting in the text on screen (optional, needs ~org-sm-gptel~); it does
+  not advance the queue.
 - *cloze:* ~review-start~ (hidden) → ~review-confirm~ (reveals) →
   ~review-confirm~ (rate).
 
 Every prompt also offers *skip* (no change; stays due) and *dismiss*.
 With Emacs `repeat-mode' enabled, after starting a review you can repeatedly
-press ~r~ to confirm, ~d~ to dismiss, or ~a~ to abort; ~r~ and ~d~ remain
-available after moving to the next card.  Intervals are computed from the
-scheduled date, so early/late reviews don't distort spacing.
+press ~r~ to confirm, ~d~ to dismiss, ~p~ to cycle priority, or ~a~ to abort.
+Intervals are computed from the scheduled date, so early/late reviews don't
+distort spacing.
+
+** What a session contains, and in what order (org-sm-queue)
+
+One ordering serves every entry point; a light session is its first six
+cards and a full session all of them, so Emacs and the phone cannot
+disagree about what comes next.
+
+- *Clozes lead.*  A late cloze loses recall along a forgetting curve; a late
+  topic loses only the chance to read it.  Review clozes are served first,
+  most at risk first, where risk is days past due over interval days -- the
+  poor man's `1 - retrievability'.
+- *New clozes queue behind review clozes.*  A card never reviewed has no
+  memory to lose, so it belongs with new material rather than ahead of recall.
+- *Topics fill `org-sm-review-topic-proportion' (0.34) of the slots*,
+  longest waiting first.  A share rather than "after all clozes", or a recall
+  backlog would stop new material from ever arriving; and capped rather than
+  unlimited, or reading would starve recall.
+- *Priority wins inside a lane.*  `[#A]`/`[#B]`/`[#C]` reorder cards of the
+  same type; they never move a topic ahead of the cloze stream.
+
+Nothing is written.  The due pool is derived on every call, so a card left
+over simply takes part in the next ordering.  There is deliberately no
+auto-postpone: SuperMemo needs one because its outstanding queue is stored
+state, while here a nightly rewrite would only add diffs, sync conflicts and
+a counter to tune.  Simulated on a 199-topic backlog, postponing got 81 cards
+read in 180 days where plain oldest-first reading got through 505.
+
+** Lifecycle: stalled topics and leeches
+
+Two predicates in =org-sm-card.el= keep a card from quietly wasting slots:
+
+- ~org-sm-stalled-p~: a topic repassed ~org-sm-stall-review-threshold~ (4)
+  times with no children.  Four passes without an extract or a dismissal is
+  avoidance, not reading; the review prompt says so and offers the keys that
+  actually resolve it (suggest, workbench, dismiss).
+- ~org-sm-leech-p~: a cloze rated ~again~ ~org-sm-leech-again-threshold~ (2)
+  times.  One lapse is noise; two means the card tests something never encoded,
+  so the prompt offers a rewrite instead of another rating round.
+
+** Neural review (org-sm-neural)
+
+~org-sm-neural-start~ (~N~ in the review and tree maps) ignores dates and walks
+one neighbourhood: the seed, its parent, children, siblings and linked cards,
+capped at ~org-sm-neural-size~.  Dismissed cards are walked *through* but not
+shown -- the usual workflow extracts clozes and dismisses the source topic, so
+that topic is the bridge between sibling clozes.  Grading works as an early
+review; press ~s~ to read a card without touching its schedule.  This is the
+answer to fragmentation: cards that are retrievable but never meet.
 
 * Capture and card workbench
 
@@ -187,67 +241,92 @@ The selection in the parent gains an ~[[id:...][title]]~ back-reference.
 Optional, powered by [[https://github.com/karthink/gptel][gptel]]:
 
 #+begin_src elisp
-(with-eval-after-load 'gptel
-  (require 'org-sm-gptel)
-  (define-key org-mode-map (kbd "C-c s ?") #'org-sm-gptel-explain))
+(with-eval-after-load 'gptel (require 'org-sm-gptel))
 #+end_src
 
-All commands act on an *existing* card.  The workbench key is bound in
-~org-sm-capture-mode-map~ but refuses to run in a plain capture buffer.
+One division of labour: *the AI points at text and rewrites prose on
+request; deciding what becomes a card, and cloze deletion, stay with you.*
+Generating the item is where encoding happens; an AI that writes your cards
+leaves you recognising its sentences instead of recalling yours.
 
-| Key       | Command                     | Action                                    |
-|-----------+-----------------------------+-------------------------------------------|
-| ~C-c s ?~ | ~org-sm-gptel-explain~      | Chat that explains this heading *to you*  |
-| ~C-c C-a~ | ~org-sm-gptel-card-ai~      | Workbench: pick a mode, AI refines/splits |
-| ~x~       | ~org-sm-gptel-pick~         | Review: extract ONE passage from this topic |
+| Key       | Command                  | Acts on                         | Result                         |
+|-----------+--------------------------+---------------------------------+--------------------------------|
+| ~x~       | ~org-sm-gptel-suggest~   | the region, else the text on screen | up to 3 underlined passages |
+| ~?~       | ~org-sm-gptel-explain~   | the region, else the paragraph at point | an explanation in the card's chat |
+| ~C-c C-a~ | ~org-sm-gptel-card-ai~   | the body in a card workbench    | the body rewritten             |
 
-*explain* — persistent side-window chat, why-before-what: motive and causal
-chain first, definition second; ends by asking which word the sentence can't
-live without.  It never makes cards for you.  Buffer reused on re-invoke.
+*suggest* — the AI may only quote: each suggestion is a verbatim passage of
+the source plus one line on why it is worth its own card.  Quotes are
+located in the text (exactly, then ignoring re-wrapped whitespace); one that
+cannot be found is dropped, so a suggestion never points at text that is not
+there.  Suggestions are drawn as wavy underlines and nothing is written:
+on an underline, ~RET~ extracts it through ~org-sm-extract~ -- the passage is
+highlighted in place and the child sits where it came from, exactly as if you
+had selected it -- ~DEL~ erases it and ~TAB~ moves to the next.  Underlines
+vanish when the review moves on or the buffer is killed.  Scope is the
+screen rather than the card, so a long article is read a screenful at a time
+and each request stays short.
 
-*card-ai* — prompts for a mode, then ONE call does that mode's job:
+*explain* -- one chat per card, reused, so a second question about another
+paragraph continues the conversation.  The message carries the passage, up
+to ~org-sm-gptel-explain-context~ characters around it, and the source page
+when the card has a ~page:~ link.  A half-written draft at the end of the
+chat is never sent along: the new question waits until it is gone.
 
-- *refine* — clean up the leading body text only; cards always stay empty.
-- *refine+subcard* — refine, and also judge whether anything is worth
-  splitting off into child cards (empty is normal — most cards don't need
-  any).  This was the previous, only, behaviour of this key.
-- *简化 (simplify)* — cut the body to its essential core, more aggressively
-  than refine; cards always stay empty.
-- *自定义提示词 (custom)* — type your own instruction on the spot; used
-  verbatim as the whole system prompt instead of any preset rule, still
-  returning the same ~{body, cards}~ shape.
+*card-ai* -- refine (clean prose, keep every causal link, flag
+~【需补充】~ where a conclusion lacks its why), 简化 (cut to the core) or a
+custom instruction.  Only the leading body text is rewritten; ~**~ cards
+you typed below it are kept.  An async reply is discarded if you edited the
+buffer meanwhile.  Prompts: ~org-sm-gptel-system-topic~ / ~-cloze~ /
+~-simplify~ / ~-suggest~ / ~-explain~.
 
-Every mode re-renders the buffer as leading text + ~**~ headings for you to
-edit, then ~C-c C-c~ — which behaves identically regardless of mode: the
-leading text always replaces the card's body, and every ~**~ heading always
-becomes a child card.  Async; press ~C-c C-a~ again (any mode) to re-run.
+* Provenance: capturing from PDF, EPUB and web (org-sm-source)
 
-Prompts are chosen by card type: *cloze* enforces the minimum-information
-principle (one ~{{}}~, answer ≤ 5 words, why-type over what-type); *topic*
-cleans prose for incremental reading (strip filler, resolve pronouns, keep
-paragraphs and causal links, flag ~【需补充】~ when a conclusion lacks its
-why).  Customize via ~org-sm-gptel-system-topic~ / ~-cloze~ (refine),
-~-split~ (the child-splitting addendum used by refine+subcard),
-~-simplify~ (the simplify prompt), ~-pick~ and ~-explain~.
+Capture records where the text came from, so a card can be traced back years
+later.  Nothing here calls AI.
 
-** ~org-sm-gptel-pick~ (=x= while reviewing a topic)
+- In a PDF (~emureader-mode~) or EPUB (~nov-mode~) buffer, ~M-z~ appends
+  ~来源：[[page:/path/book.pdf::42][《book》p.42]]~ or a ~nov:file::doc:point~
+  link, and files the card with the rest of that document's cards
+  (=org-sm-source-target-file=: the file already linking the document, else the
+  note whose ~#+reference:~ matches its name) instead of the shared inbox.
+  Routing is buffer-local, so one book's extract never moves the next capture.
+- PDF pages are images in emureader, so ~org-sm-capture-page~ reads the page for
+  you: ~mutool draw -F txt~ for a text layer, then tesseract
+  (~org-sm-source-ocr-languages~, default =chi_sim+eng=) for scans.  OCR takes
+  seconds, so it runs in a background process and caches under
+  ~org-sm-source-cache-directory~.
+- ~C-c C-o~ on a ~page:~ link reopens the document at that page.
+- The AI explanation (~?~) adds the page text behind the card's ~page:~ link to
+  its opening message: the reasoning a card left behind is usually still on the
+  page.
 
-The answer to "this topic is long and I don't know what to extract".  Press
-~x~ in the topic review menu instead of ~r~; it opens the workbench and
-asks the AI for *one* passage worth pulling out, plus a one-line reason
-shown in the header line.
+* Importing books and articles (org-sm-import)
 
-- The source card's body is *never* rewritten — the reason lives only in the
-  header line, which is never committed.
-- At most one candidate.  Everything it did not pick stays in the card for
-  next time, so the whole split never has to be planned up front.
-- It may answer "nothing worth extracting", in which case postpone or
-  dismiss by hand.
-- Edit the candidate, then ~C-c C-c~ adds it as a child card.  You stay on
-the card: rate it with ~r~, pick another passage, or postpone.  Nothing
-advances the queue for you.
+Incremental reading needs the material inside the vault: only Org text carries
+extraction highlights, read points and child cards in both Emacs and the web
+reader.  ~org-sm-import-file~ (EPUB, HTML, Markdown, DOCX …) and
+~org-sm-import-url~ (readability, then pandoc) write one note of topic cards:
 
-* Zotero import (org-sm-zotero)
+- chapters become ~[T]~ cards at the shallowest heading level where most
+  headings carry text, so a book with parts still splits by chapter;
+- shallower headings stay as containers, deeper ones are flattened into ~§~
+  lines (a card's body ends at its first child heading);
+- chapters shorter than ~org-sm-import-min-chars~ stay as plain headings (title
+  page, copyright);
+- chapters come due in reading order, ~org-sm-import-topics-per-day~ per day;
+- embedded images are extracted next to the note and linked relatively;
+- import is idempotent: the note records ~#+source:~ and re-importing refuses.
+
+Import does no AI and makes no clozes.  PDFs are not imported: their value is
+layout, so they stay in emureader and contribute through
+~org-sm-capture-page~.
+
+* Zotero import (org-sm-zotero) — deprecated
+
+Superseded by ~org-sm-source~ and ~org-sm-import~: read in Emacs, capture with
+~M-z~, import EPUB chapters directly.  The module still works and is still
+tested, but it is no longer loaded by default and its key is unbound.
 
 Read-only client for Zotero 10's built-in Local HTTP API
 (~http://127.0.0.1:23119/api~).  Reads go through Zotero's live process without
@@ -300,6 +379,28 @@ Its core endpoints are:
 - ~POST /api/git/sync~: Pulls (only with saved notes buffers), or commits only
   paths under ~org-sm-directory~ and pushes.  These synchronous Git commands
   block Emacs until they finish; do not use this endpoint with untrusted repos.
+
+Reading in the browser (long topics):
+
+- ~POST /api/readpoint/:id~: moves the card's read-point anchor (~[[rp:ID][📖]]~)
+  to a body offset; the snapshot ships ~:readpoint~ so a phone resumes where
+  Emacs stopped.  Double-tap the body to move it, or use "记到屏幕顶部".
+- ~POST /api/priority/:id~: sets ~cookie~ to ~A~, ~B~ or ~C~.
+- ~GET /api/image?path=~: serves an image linked from a card body, restricted to
+  ~org-sm-directory~ or ~org-sm-web-image-roots~ and to image extensions, so a
+  crafted link cannot read anything else over the LAN.
+- Extracted spans (~⌈…<T>~) render highlighted; the same text is highlighted in
+  Emacs, because both views read one Org body.  Cards arrive already in
+  ~org-sm-queue-order~; the client takes the head for a light session.
+
+* Tests
+
+#+begin_src sh
+tests/run-tests.sh          # ERT (core, queue, neural, source, web, gptel, import) + node UI
+#+end_src
+
+PDF and EPUB fixtures are generated locally by =tests/make-fixtures.sh= (pandoc,
+tectonic, mutool: no downloads) and are git-ignored.
 
 * Maintenance
 

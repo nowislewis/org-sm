@@ -70,3 +70,48 @@ const element = id => context.document.getElementById(id);
   await Promise.all([first, second]);
   console.log('web review interaction tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
+
+// A light session is the head of the server's order, which the client must
+// not re-shuffle: Emacs and the phone have to agree on what comes next.
+{
+  const cards = Array.from({ length: 9 }, (_, i) => ({ id: "x" + i, type: "cloze" }));
+  evaluate(`State.all = ${JSON.stringify(cards)}; State.light = true; State.queue = buildQueue();`);
+  const light = evaluate("State.queue.map(c => c.id)");
+  assert.equal(light.length, 6);
+  assert.equal(JSON.stringify(light), JSON.stringify(["x0", "x1", "x2", "x3", "x4", "x5"]));
+  evaluate("State.light = false; State.queue = buildQueue();");
+  assert.equal(evaluate("State.queue.length"), 9);
+}
+
+// Read points, images and links tokenise as atomic spans with exact offsets.
+{
+  const body = "前[[rp:X][📖]]后 [[file:a.png][图]] [[page:/b.pdf::3][《b》p.3]] {{c}}";
+  const toks = evaluate(`tokenizeBody(${JSON.stringify(body)}, false)`);
+  const kinds = toks.map(t => t.kind);
+  assert.equal(JSON.stringify(kinds), JSON.stringify(["text", "rp", "text", "link", "text", "link", "text"]));
+  const rp = toks[1];
+  assert.equal(rp.start, 1);
+  assert.equal(rp.end, 1 + Array.from("[[rp:X][📖]]").length);
+  assert.equal(toks[3].target, "file:a.png");
+  assert.equal(toks[5].desc, "《b》p.3");
+  // {{c}} is plain text on a topic, a cloze on a cloze card.
+  assert.equal(toks[6].text.includes("{{c}}"), true);
+  const clozeToks = evaluate(`tokenizeBody("x {{c}}", true)`);
+  assert.equal(clozeToks[1].kind, "cloze");
+  // Offsets end exactly at the code-point length of the body.
+  assert.equal(toks[toks.length - 1].end, Array.from(body).length);
+}
+console.log("reading tests passed");
+
+// Link descriptions may contain single brackets, as org-link-make-string
+// leaves them: Chinese book titles such as 《[美] 作者》 must still parse.
+{
+  const body = "来源：[[page:/b.pdf::3][《[美] 作者》p.3]] 后文";
+  const toks = evaluate(`tokenizeBody(${JSON.stringify(body)}, false)`);
+  const link = toks.find(t => t.kind === "link");
+  assert.ok(link, "link token missing");
+  assert.equal(link.target, "page:/b.pdf::3");
+  assert.equal(link.desc, "《[美] 作者》p.3");
+  assert.equal(toks[toks.length - 1].end, Array.from(body).length);
+}
+console.log("bracket tests passed");

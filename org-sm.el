@@ -47,9 +47,14 @@
 (require 'org-macs)
 (require 'fsrs)
 (require 'org-sm-card)
+(require 'org-sm-queue)
+(require 'org-sm-source)
 
 (declare-function org-sm-gptel-explain "org-sm-gptel")
-(declare-function org-sm-gptel-pick "org-sm-gptel")
+(declare-function org-sm-neural-start "org-sm-neural")
+(autoload 'org-sm-neural-start "org-sm-neural" nil t)
+(autoload 'org-sm-sectionize-card "org-sm-import" nil t)
+(declare-function org-sm-gptel-suggest "org-sm-gptel")
 (declare-function org-sm-gptel-card-ai "org-sm-gptel")
 (declare-function notifications-notify "notifications")
 
@@ -69,6 +74,23 @@
   "Prefix string prepended to auto-generated cloze heading titles."
   :type 'string
   :group 'org-sm)
+
+(defcustom org-sm-stall-review-threshold 4
+  "Review count at which a childless topic is treated as stalled.
+Past this the card is not being read, it is being pushed: four passes with
+nothing extracted and nothing dismissed is the shape of avoidance."
+  :type 'integer
+  :group 'org-sm)
+
+(defcustom org-sm-leech-again-threshold 2
+  "`again' count at which a cloze is treated as a leech.
+One lapse is noise; two means the card is probably testing something the
+reader never encoded, so it wants rewriting rather than more repetitions."
+  :type 'integer
+  :group 'org-sm)
+
+;; Defined by `define-minor-mode' at the end of this file.
+(defvar org-sm-mode)
 
 ;;;; ---- Schedule helper -----------------------------------------------------
 
@@ -481,6 +503,44 @@ own `org-entry-end-position' reaches past the whole subtree, and callers like
   (let ((bounds (org-sm-body-bounds)))
     (string-trim (buffer-substring-no-properties (car bounds) (cdr bounds)))))
 
+(defun org-sm-reading-bounds ()
+  "Return the part of the current card the reader is looking at.
+The active region when there is one; otherwise the card body clipped to
+the window, i.e. the text on screen.  For a long topic that is the next
+screenful from the read point, not the whole article, which is what a
+suggestion should be about and what keeps the request short."
+  (let ((body (org-sm-body-bounds)))
+    (if (use-region-p)
+        (cons (max (car body) (region-beginning)) (min (cdr body) (region-end)))
+      (cons (max (car body) (window-start))
+            (min (cdr body) (window-end nil t))))))
+
+(defun org-sm-paragraph-bounds ()
+  "Return (START . END) of the paragraph at point, clipped to the card body.
+This is what a reader means by \"this\" when stuck: narrower than the card,
+wider than a sentence."
+  (let ((body (org-sm-body-bounds)))
+    (save-excursion
+      (save-restriction
+        (narrow-to-region (car body) (cdr body))
+        (cons (progn (forward-paragraph) (backward-paragraph)
+                     (skip-chars-forward " \t\n") (point))
+              (progn (forward-paragraph) (skip-chars-backward " \t\n") (point)))))))
+
+(defun org-sm-section-count ()
+  "Return how many plain headings the card at point holds before a child card.
+org-sm assumes every heading inside a card is itself a card: the body ends
+at the first child heading, the workbench reads `**' as a new card, and
+child counts drive stall detection.  A plain section heading breaks all
+three, so a non-zero count means `org-sm-sectionize-card' is due."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((end (save-excursion (org-end-of-subtree t t)))
+          (n 0))
+      (while (and (outline-next-heading) (< (point) end) (not (org-sm-type)))
+        (setq n (1+ n)))
+      n)))
+
 (defalias 'org-sm-body-clean #'string-trim
   "Trim surrounding whitespace from RAW.")
 
@@ -578,13 +638,15 @@ is created if missing.  Example: \\='(\"Topics\" \"Physics\")"
 
 (defun org-sm--grab-content ()
   "Return the region or clipboard text to capture, as a plain string.
-When a region is active or the buffer is in `reader-mode' (where the
-selection is not tracked by the Emacs region), copy it first via `M-w',
-then read the clipboard.  Otherwise read the clipboard directly."
-  (when (or (use-region-p) (derived-mode-p 'reader-mode))
-    (execute-kbd-macro (kbd "M-w")))
-  (substring-no-properties
-   (or (ignore-errors (current-kill 0 t)) "")))
+An active region is read directly and also put on the kill ring, so the
+clipboard agrees with what was captured; otherwise read the clipboard.
+PDF pages, which have no Emacs region, go through `org-sm-capture-page'."
+  (if (use-region-p)
+      (let ((text (buffer-substring-no-properties (region-beginning) (region-end))))
+        (kill-new text)
+        (deactivate-mark)
+        text)
+    (substring-no-properties (or (ignore-errors (current-kill 0 t)) ""))))
 
 (defun org-sm--clipboard-content ()
   "Return non-blank system clipboard text, or signal a `user-error'.
@@ -600,15 +662,6 @@ interactive editable capture flow."
     (unless (org-string-nw-p content)
       (user-error "Clipboard is empty"))
     content))
-
-(defun org-sm-capture-render-cards (cards)
-  "Insert CARDS (list of (TITLE . BODY)) as ** headings at point.
-Inverse of `org-sm--capture-split-buffer'; they share the heading format."
-  (cl-loop for (title . body) in cards
-           for n from 1
-           do (insert (format "** %s\n%s\n\n"
-                              (or (org-string-nw-p title) (format "Card %d" n))
-                              body))))
 
 (defconst org-sm--capture-card-rx "^\\*\\* "
   "Regexp matching a card heading in an `org-sm-capture-mode' buffer.")
@@ -628,7 +681,7 @@ if there is none.  The one place that locates that heading."
   "Split the current capture buffer into (PREAMBLE . CARDS).
 PREAMBLE is the trimmed preamble text (see `org-sm-capture-preamble-bounds');
 CARDS is a list of (TITLE . BODY), one per card heading, nil when there are
-none.  Inverse of `org-sm-capture-render-cards'."
+none.  Each heading is a card the reader wrote by hand."
   (org-with-wide-buffer
    (let ((end (cdr (org-sm-capture-preamble-bounds)))
          cards)
@@ -671,15 +724,16 @@ so reading it later would see the *target* buffer's own nil value."
     (save-excursion (goto-char marker) (funcall fn))
     (when (buffer-file-name) (let ((save-silently t)) (save-buffer)))))
 
-(defun org-sm-capture-fill-body-and-cards (body cards)
-  "Replace the buffer with BODY as leading text, then CARDS as ** headings.
-Used by `org-sm-card-workbench' buffers after an AI refine+split round;
-the inverse read is `org-sm--capture-split-buffer'."
-  (erase-buffer)
-  (insert (string-trim body) (if cards "\n\n" "\n"))
-  (when cards (org-sm-capture-render-cards cards))
-  (goto-char (point-min))
-  (org-fold-show-all))
+(defun org-sm-capture-set-preamble (body)
+  "Replace the leading text of this capture buffer with BODY.
+The `**' cards below it are left alone: they are what the reader wrote,
+and a rewrite of the body must never take them along."
+  (pcase-let ((`(,beg . ,end) (org-sm-capture-preamble-bounds)))
+    (delete-region beg end)
+    (goto-char beg)
+    (insert (string-trim body) (if (= end (point-max)) "\n" "\n\n"))
+    (goto-char (point-min))
+    (org-fold-show-all)))
 
 (defun org-sm--capture-commit-body (buf)
   "Commit BUF's preamble as a card body, if it is non-empty.
@@ -769,15 +823,19 @@ card (if any); \\[org-sm-capture-abort] discards without writing anything.
 Capture itself never calls AI: it only stores what you grabbed.  AI enters
 later, while reviewing a card, via `org-sm-card-workbench'.")
 
-(defun org-sm--capture-buffer (content &optional name setup)
+(defun org-sm--capture-buffer (content &optional name setup context)
   "Pop up an `org-sm-capture-mode' buffer named NAME, pre-filled with CONTENT.
 NAME defaults to a shared \"*org-sm capture*\" buffer.  SETUP, when given,
 is called with point in the new buffer after CONTENT is inserted -- use it
 to set `org-sm-capture-parent-marker' / `org-sm-capture-card-type'
-buffer-locally for callers that aren't the plain top-level capture flow."
+buffer-locally for callers that aren't the plain top-level capture flow.
+CONTEXT, from `org-sm-source-context', appends a provenance line and binds
+`org-sm-capture-file' in this buffer only, so routing one book's extract
+never changes where the next unrelated capture goes."
   (let* ((name (or name "*org-sm capture*"))
          (existing (get-buffer name))
-         (buf (or existing (get-buffer-create name))))
+         (buf (or existing (get-buffer-create name)))
+         (target (and context (org-sm--capture-target context))))
     ;; Reusing a draft name must not silently erase text typed in a prior sheet.
     (when (and existing (with-current-buffer existing
                           (not (string-blank-p (buffer-string)))))
@@ -786,9 +844,13 @@ buffer-locally for callers that aren't the plain top-level capture flow."
       (unless (derived-mode-p 'org-sm-capture-mode) (org-sm-capture-mode))
       (kill-local-variable 'org-sm-capture-parent-marker)
       (kill-local-variable 'org-sm-capture-card-type)
+      (kill-local-variable 'org-sm-capture-file)
       (kill-local-variable 'header-line-format)
       (erase-buffer)
       (insert content)
+      (when-let* ((footer (org-sm-source-footer context)))
+        (insert "\n\n" footer))
+      (when target (setq-local org-sm-capture-file target))
       (goto-char (point-min))
       (when setup (funcall setup)))
     (pop-to-buffer buf
@@ -824,11 +886,47 @@ No AI here by design -- capture only stores the raw material.  Refining and
 splitting happen later, when you review the card, via
 `org-sm-card-workbench'.
 
-Cards go to `org-sm-capture-file' / `org-sm-capture-olp' (by default an
-\"sm-cards\" heading in sm-cards.org under `org-sm-directory'), created on
-demand.  This is a single inbox; refile cards into per-topic files yourself."
+When the capture comes from a PDF, EPUB or web page, a provenance link is
+appended (see `org-sm-source') and the card is filed with the rest of that
+document's cards rather than in the shared inbox.  A PDF page cannot be
+selected inside Emacs, so there this delegates to `org-sm-capture-page'."
   (interactive)
-  (org-sm--capture-buffer (org-sm--grab-content)))
+  (let ((context (org-sm-source-context)))
+    (if (eq (plist-get context :kind) 'pdf)
+        (org-sm-capture-page)
+      (org-sm--capture-buffer (org-sm--grab-content) nil nil context))))
+
+;;;###autoload
+(defun org-sm-capture-page ()
+  "Capture the current PDF page, which cannot be selected inside Emacs.
+The page's text -- text layer, else cached OCR -- goes to the kill ring and
+to an ordinary capture buffer together with a `page:' link.  Sharpen it with
+\`C-c C-c'; OCR takes a few seconds on a first visit, then comes from cache."
+  (interactive)
+  (let* ((context (or (org-sm-source-context) (user-error "Not in a document")))
+         (file (plist-get context :file))
+         (page (plist-get context :page)))
+    (unless (and file page) (user-error "This document has no pages"))
+    (message "org-sm: reading page %d..." page)
+    (org-sm-source-page-text
+     file page
+     (lambda (text)
+       (if (not (org-string-nw-p text))
+           (message "org-sm: page %d has no text layer and OCR found nothing" page)
+         (kill-new text)
+         (org-sm--capture-buffer text nil nil context)
+         (message "%s" (substitute-command-keys
+                        (format "org-sm: page %d — trim it, then \\<org-sm-capture-mode-map>\\[org-sm-capture-commit]"
+                                page))))))))
+
+(defun org-sm--capture-target (context)
+  "Return the file to capture into for CONTEXT, falling back to the inbox.
+Filing every book's extracts into one shared inbox is how a vault ends up
+with hundreds of cards under a single heading; prefer the file already
+holding this document's cards, but never mistake the inbox for that home."
+  (or (and context
+           (org-sm-source-target-file context (org-sm-capture-target-file)))
+      (org-sm-capture-target-file)))
 
 ;;;###autoload
 (defun org-sm-capture-clipboard-notify ()
@@ -871,24 +969,39 @@ TYPE is a symbol (`topic' or `cloze'); when nil, prompt interactively."
     (org-id-get-create)
     (org-sm--init-item type)
     (org-sm--card-changed 'mark)
-    (message "org-sm: marked as %s%s — due tomorrow" type
+    (message "org-sm: marked as %s%s — due tomorrow%s" type
              (if (and (eq type 'cloze) (not (org-sm--cloze-markers-p)))
-                 " (⚠ no {{cloze}} markers found)" ""))))
+                 " (⚠ no {{cloze}} markers found)" "")
+             ;; org-sm assumes headings inside a card are cards; say so now
+             ;; rather than let a long article fail later, in the web reader.
+             (let ((n (and (eq type 'topic) (org-sm-section-count))))
+               (if (and n (> n 0))
+                   (substitute-command-keys
+                    (format " (%d plain section%s; \\[org-sm-sectionize-card] splits them)"
+                            n (if (= n 1) "" "s")))
+                 "")))))
 
-(defun org-sm--insert-child (level type title body id)
+(defun org-sm--insert-child (level type title body id &optional days)
   "Append a scheduled + inited SRS heading after point's subtree; return ID.
 Insert a heading at LEVEL+1 at the end of the current subtree, titled TITLE,
-typed TYPE, tagged with ID, scheduled for tomorrow, and filled with BODY.
+typed TYPE, tagged with ID, scheduled DAYS from now (default 1), and filled
+with BODY.
+When point's heading is a card with a priority cookie, the child inherits it:
+an extract of an [#A] passage is usually just as urgent, and retyping that on
+every extraction is how a vault ends up almost entirely unprioritized.
 Point-relative and excursion-agnostic: the caller owns buffer/point state
 (`save-excursion', `org-with-wide-buffer', etc.) and computes LEVEL."
-  (org-end-of-subtree t t)
-  (unless (bolp) (insert "\n"))
-  (org-insert-heading nil t (1+ level))
-  (insert title)
+  (let ((priority (and (org-at-heading-p)
+                       (plist-get (org-sm-card-at-point) :priority))))
+    (org-end-of-subtree t t)
+    (unless (bolp) (insert "\n"))
+    (org-insert-heading nil t (1+ level))
+    (insert title)
+    (when priority (org-priority priority)))
   ;; Schedule before org-set-property / org-sm--init-item: those move point
   ;; into the PROPERTIES drawer, after which org-schedule would climb up to
   ;; the previous sibling heading (see `org-sm--schedule').
-  (org-sm--schedule (time-add (current-time) (days-to-time 1)))
+  (org-sm--schedule (time-add (current-time) (days-to-time (or days 1))))
   (org-set-property "ID" id)
   (org-sm--init-item type)
   (org-end-of-meta-data t)
@@ -1128,20 +1241,20 @@ When PRED is non-nil, only entries for which it returns non-nil are visited."
              nil
              (org-sm-files))))
 
-(defun org-sm--collect-markers (&optional pred shuffle)
-  "Return priority-sorted markers for SRS cards satisfying PRED (all if nil).
-When SHUFFLE is non-nil, cards of equal priority are randomly shuffled;
-otherwise Cloze cards precede Topic cards."
-  (mapcar #'cdr
-          (seq-sort-by #'car (lambda (a b) (value< b a))
-                       (org-sm-map-items
-                        (lambda ()
-                          (cons (list (org-get-priority (org-get-heading t t nil t))
-                                      (if shuffle
-                                          (random)
-                                        (if (eq (org-sm-type) 'cloze) 1 0)))
-                                (point-marker)))
-                        pred))))
+(defun org-sm-due-markers (&optional pred)
+  "Return (RANK TYPE MARKER CARD) for every SRS card matching PRED.
+RANK is `org-get-priority' of the heading, larger meaning more important;
+TYPE is `topic' or `cloze'; CARD is `org-sm-card-at-point' plus
+`:late-days', how many days past due the card is.  The one place a queue
+candidate is defined, so every entry point orders the same pool."
+  (org-sm-map-items
+   (lambda ()
+     (list (org-get-priority (org-get-heading t t nil t))
+           (org-sm-type)
+           (point-marker)
+           (append (org-sm-card-at-point)
+                   (list :late-days (- (or (org-sm-sched-day-delta) 0))))))
+   pred))
 
 (defun org-sm--cleanup-buffer ()
   "Clear review progress, narrowing, overlays, and state in previous buffer.
@@ -1158,6 +1271,7 @@ would silently stay narrowed to the card just reviewed."
         (kill-local-variable 'header-line-format))
       (force-mode-line-update)
       (when (buffer-narrowed-p) (widen))
+      (org-sm-pencils-clear)
       (when org-sm--cloze-state
         (org-sm-cloze-remove-overlays)
         (setq org-sm--cloze-state nil))))
@@ -1219,15 +1333,28 @@ would silently stay narrowed to the card just reviewed."
     (_ "confirm")))
 
 (defun org-sm-review-keys-hint ()
-  "Return keybinding hint string for an active review session."
-  (substitute-command-keys
-   (concat "\\<org-sm-review-repeat-map>"
-           "\\[org-sm-review-confirm] " (org-sm--confirm-key-label)
-           ", \\[org-sm-card-workbench] workbench"
-           (when (fboundp 'org-sm-gptel-explain)
-             ", \\[org-sm-gptel-explain] explain")
-           ", \\[org-sm-item-dismiss] dismiss"
-           ", \\[org-sm-review-abort] abort")))
+  "Return keybinding hint string for an active review session.
+Leads with the action that actually resolves the current card: a stalled
+topic or a leech offers `w', everything else confirms."
+  (let* ((card    (org-sm-card-at-point))
+         (stalled (and card (org-sm-stalled-p card org-sm-stall-review-threshold)))
+         (leech   (and card (org-sm-leech-p card org-sm-leech-again-threshold)))
+         (plain   (and card (eq (plist-get card :type) 'topic)
+                       (> (org-sm-section-count) 0))))
+    (substitute-command-keys
+     (concat "\\<org-sm-review-repeat-map>"
+             (if stalled "⚠ " "")
+             (if leech "↻ " "")
+             (if plain "¶ " "")
+             "\\[org-sm-review-confirm] " (org-sm--confirm-key-label)
+             ", \\[org-sm-card-workbench] workbench"
+             (when plain
+               (concat ", \\[org-sm-sectionize-card] 拆小节"))
+             (when (fboundp 'org-sm-gptel-explain)
+               ", \\[org-sm-gptel-explain] explain")
+             ", \\[org-sm-item-dismiss] dismiss"
+             ", \\[org-sm-cycle-priority] priority"
+             ", \\[org-sm-review-abort] abort"))))
 
 (defun org-sm-default-prompt (state)
   "Update review header line and show keybinding hint in the echo area."
@@ -1289,13 +1416,31 @@ PREV is a string describing the last action."
   :type 'integer
   :group 'org-sm)
 
-(defun org-sm-review-start (&optional limit)
-  "Collect due SRS items and start a review session, optionally limited to LIMIT.
-When LIMIT is given, equal-priority due cards are randomly sampled."
+(defun org-sm-cycle-priority ()
+  "Rotate the current card's priority cookie: none -> A -> B -> C -> none.
+The one keystroke that makes the priority queue mean something.  The
+A-Factor follows the cookie (see `org-sm-topic-afactor'), so this also
+retunes how soon a topic returns."
   (interactive)
-  (let ((markers (org-sm--collect-markers #'org-sm-due-p (and limit t))))
-    (org-sm--review-markers (if limit (seq-take markers limit) markers)
-                            (if limit (format "light, max %d" limit) "due"))))
+  (unless (org-sm-type) (user-error "Not on an SRS heading"))
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((next (pcase (plist-get (org-sm-card-at-point) :priority)
+                  ('nil ?A) (?A ?B) (?B ?C) (_ nil))))
+      (org-priority (or next 'remove))
+      (org-sm--card-changed 'priority)
+      (message "org-sm: priority %s"
+               (if next (format "[#%c]" next) "none")))))
+
+(defun org-sm-review-start (&optional limit)
+  "Start a review of due cards: the first LIMIT of them, or all.
+Order comes from `org-sm-queue-order': clozes most at risk first, topics
+interleaved up to `org-sm-review-topic-proportion', so a light session is
+simply the head of the same queue a full session walks through."
+  (interactive)
+  (org-sm--review-markers
+   (mapcar #'caddr (org-sm-queue-order (org-sm-due-markers #'org-sm-due-p) limit))
+   (if limit (format "light, max %d" limit) "due")))
 
 ;;;###autoload
 (defun org-sm-review-start-light ()
@@ -1307,20 +1452,35 @@ When LIMIT is given, equal-priority due cards are randomly sampled."
   (org-sm-review-start org-sm-review-light-size))
 
 (defun org-sm--review-confirm-topic ()
-  "Interactive topic review: next repetition, reschedule, explain, or dismiss.
+  "Interactive topic review: next repetition, dismiss, reschedule, explain.
 Computation is delegated to the grading functions; this only collects
-the user's choice and advances the queue."
+the user's choice and advances the queue.  A stalled topic (see
+`org-sm-stalled-p') gets the same keys but different emphasis: the prompt
+says so and `r'--the key that never helped--is labelled as such.
+
+Selection is excluded from the menu on purpose.  Reading topics is where
+backlog actually shrinks (a dismissed card is gone; a postponed one just
+waits), so it must cost one keystroke, not a confirmation."
   (let* ((auto-ivl (org-sm-topic-interval (org-sm-topic-afactor)))
-         (choices  `((?r ,(format "next(%dd)" auto-ivl))
+         (card     (org-sm-card-at-point))
+         (stalled  (org-sm-stalled-p card org-sm-stall-review-threshold))
+         (choices  `((?r ,(format "%s(%dd)"
+                                 (if stalled "push again" "next") auto-ivl))
                      (?j "reschedule")
                      (?e "explain")
-                     ,@(when (fboundp 'org-sm-gptel-pick) '((?x "pick"))))))
-    (org-sm--prompt-choice "Topic: " choices
+                     ,@(when (fboundp 'org-sm-gptel-suggest) '((?x "suggest")))
+                     ,@(when (fboundp 'org-sm-card-workbench)
+                         '((?w "workbench"))))))
+    (org-sm--prompt-choice (if stalled
+                               (format "Topic (⚠ 空读 %d 次、无子卡，建议 d 或 x): "
+                                       (plist-get card :reviews))
+                             "Topic: ")
+                           choices
       (lambda (key)
         (pcase key
           ((or ?r ?n)
            (org-sm--advance (funcall org-sm-feedback-function (org-sm-grade-topic))))
-          ((or ?j ?p)
+          (?j
            (org-sm--advance
             (funcall org-sm-feedback-function
                      (org-sm-grade-reschedule (read-number "Reschedule days: " 7)))))
@@ -1328,9 +1488,12 @@ the user's choice and advances the queue."
                   (progn (org-sm--log-review 'explain)
                          (org-sm-gptel-explain))
                 (user-error "org-sm-gptel not loaded")))
-          ;; Pick does not advance: the user may still edit the draft, then
-          ;; continues the review with `r' themselves.
-          (?x (org-sm-gptel-pick)))))))
+          (?w (org-sm-card-workbench))
+          ;; Suggest does not advance: the suggestions are drawn on this card
+          ;; and the reader decides about each before moving on.
+          (?x (if (fboundp 'org-sm-gptel-suggest)
+                  (org-sm-gptel-suggest)
+                (user-error "org-sm-gptel not loaded"))))))))
 
 (defun org-sm--cloze-rating-label (rating secs)
   "Format a menu LABEL for RATING with interval SECS."
@@ -1348,18 +1511,32 @@ Rating computation is delegated to `org-sm-preview-cloze' and
     ('revealed
      (org-sm-cloze-remove-overlays)
      (let* ((preview (org-sm-preview-cloze))
+            (card    (org-sm-card-at-point))
+            (leech   (org-sm-leech-p card org-sm-leech-again-threshold))
             ;; Map menu key → rating symbol; keys stay stable (r = reveal, r = good).
             (keymap  '((?a . :again) (?h . :hard) (?r . :good) (?e . :easy)))
-            (choices (mapcar
-                      (lambda (kr)
-                        (let ((secs (plist-get (cdr (assq (cdr kr) preview)) :interval-secs)))
-                          (list (car kr) (org-sm--cloze-rating-label (cdr kr) secs))))
-                      keymap)))
-       (org-sm--prompt-choice "Rate: " choices
+            (choices (append
+                      (mapcar
+                       (lambda (kr)
+                         (let ((secs (plist-get (cdr (assq (cdr kr) preview)) :interval-secs)))
+                           (list (car kr) (org-sm--cloze-rating-label (cdr kr) secs))))
+                       keymap)
+                      ;; A leech has failed recall twice already; offer the
+                      ;; repair instead of another rating round.
+                      (when leech '((?w "rewrite"))))))
+       (org-sm--prompt-choice
+        (if leech
+            (format "Rate (↻ 已 again %d 次，建议 %s 改写): "
+                    (plist-get card :again-count)
+                    (substitute-command-keys "\\[org-sm-card-workbench]"))
+          "Rate: ")
+        choices
          (lambda (key)
-           (let* ((rating (cdr (assq key keymap)))
-                  (r      (org-sm-grade-cloze rating preview)))
-             (org-sm--advance (funcall org-sm-feedback-function r)))))))))
+           (if (eq key ?w)
+               (org-sm-card-workbench)
+             (let* ((rating (cdr (assq key keymap)))
+                    (r      (org-sm-grade-cloze rating preview)))
+               (org-sm--advance (funcall org-sm-feedback-function r))))))))))
 
 ;;;###autoload
 (defun org-sm-review-confirm ()
@@ -1441,6 +1618,21 @@ other key, call ACTION-FN with it."
       (while (re-search-forward (regexp-quote (org-sm--readpoint-anchor id)) end t)
         (replace-match "")))))
 
+(defun org-sm--readpoint-move (id pos)
+  "Place card ID's read-point anchor at POS, removing the previous one.
+Point must be inside the card.  A marker carries POS across the removal,
+so moving the anchor forward past its old position still lands on the
+intended character.  Shared by Emacs and the web reader."
+  (let ((target (copy-marker pos)))
+    (unwind-protect
+        (progn
+          (org-sm--readpoint-remove id)
+          (save-excursion
+            (goto-char target)
+            (insert (org-sm--readpoint-anchor id))))
+      (set-marker target nil))
+    (org-sm--card-changed 'readpoint)))
+
 ;;;###autoload
 (defun org-sm-set-readpoint ()
   "Set the read point of the nearest enclosing SRS card at point.
@@ -1451,8 +1643,7 @@ any previous read point.  Clear it by deleting its 📖 anchor."
               (unless (org-sm--goto-enclosing-card)
                 (user-error "org-sm: no enclosing SRS card found"))
               (org-id-get-create))))
-    (org-sm--readpoint-remove id)
-    (insert (org-sm--readpoint-anchor id))
+    (org-sm--readpoint-move id (point))
     (message "org-sm: read point set")))
 
 (defun org-sm--readpoint-target ()
@@ -1464,6 +1655,97 @@ Point must be on the card heading."
         (when (search-forward (org-sm--readpoint-anchor id) end t)
           (match-beginning 0))))))
 
+
+;;;; ---- Suggestions ("pencils") ------------------------------------------
+;; A suggestion is a span of text that already exists, plus a reason.  It is
+;; drawn as an underline rather than turned into a card, and accepting it
+;; goes through `org-sm-extract' -- the same primitive as a manual extract --
+;; so a card always sits at a highlighted passage of its source however that
+;; passage was found.  The overlay is the whole state: it moves with the text,
+;; is never saved, and disappears with the buffer.
+
+(defface org-sm-pencil-face
+  '((t :inherit highlight :underline (:style wave)))
+  "Face marking a passage suggested for extraction."
+  :group 'org-sm)
+
+(defvar-keymap org-sm-pencil-map
+  :doc "Keys active while point is on a suggestion."
+  "RET" #'org-sm-pencil-accept
+  "DEL" #'org-sm-pencil-dismiss
+  "TAB" #'org-sm-pencil-next)
+
+(defun org-sm-pencil-add (beg end reason)
+  "Underline BEG..END as a suggestion, explained by REASON; return it."
+  (let ((ov (make-overlay beg end nil t nil)))
+    (overlay-put ov 'org-sm-pencil reason)
+    (overlay-put ov 'face 'org-sm-pencil-face)
+    (overlay-put ov 'help-echo reason)
+    (overlay-put ov 'keymap org-sm-pencil-map)
+    (overlay-put ov 'evaporate t)
+    ov))
+
+(defun org-sm-pencils (&optional beg end)
+  "Return the suggestions between BEG and END (whole buffer), in order."
+  (seq-sort-by #'overlay-start #'<
+               (seq-filter (lambda (ov) (overlay-get ov 'org-sm-pencil))
+                           (overlays-in (or beg (point-min)) (or end (point-max))))))
+
+(defun org-sm-pencils-clear (&optional beg end)
+  "Remove the suggestions between BEG and END (whole buffer)."
+  (mapc #'delete-overlay (org-sm-pencils beg end)))
+
+(defun org-sm--pencil-at-point ()
+  "Return the suggestion containing point, or signal a `user-error'."
+  (or (car (seq-filter (lambda (ov) (overlay-get ov 'org-sm-pencil))
+                       (overlays-at (point))))
+      (user-error "No suggestion at point")))
+
+(defun org-sm-pencil-hint ()
+  "Return the key hint and reason for the suggestion at point."
+  (let ((all (org-sm-pencils))
+        (here (org-sm--pencil-at-point)))
+    (concat (substitute-command-keys
+             "\\<org-sm-pencil-map>\\[org-sm-pencil-accept] 摘为子卡  \\[org-sm-pencil-dismiss] 擦掉  \\[org-sm-pencil-next] 下一条")
+            (format "  (%d/%d) 💡 %s"
+                    (1+ (seq-position all here)) (length all)
+                    (overlay-get here 'org-sm-pencil)))))
+
+(defun org-sm-pencil-next ()
+  "Move to the next suggestion, wrapping around, and show its reason."
+  (interactive)
+  (let* ((all (or (org-sm-pencils) (user-error "No suggestions left")))
+         (next (or (seq-find (lambda (ov) (> (overlay-start ov) (point))) all)
+                   (car all))))
+    (goto-char (overlay-start next))
+    (message "%s" (org-sm-pencil-hint))))
+
+(defun org-sm-pencil-accept ()
+  "Extract the suggestion at point into a child topic card.
+Goes through `org-sm-extract', so the passage is highlighted in place and
+the child records where it came from, exactly as a manual extraction."
+  (interactive)
+  (let* ((ov (org-sm--pencil-at-point))
+         (beg (overlay-start ov))
+         (end (overlay-end ov))
+         (text (buffer-substring-no-properties beg end)))
+    (delete-overlay ov)
+    (save-excursion
+      (goto-char beg)
+      (org-sm--goto-enclosing-card)
+      (let ((body (car (org-sm-body-bounds))))
+        (org-sm-extract 'topic text (- beg body) (- end body))))
+    (if (org-sm-pencils)
+        (org-sm-pencil-next)
+      (message "org-sm: 已摘为子卡。没有剩余建议"))))
+
+(defun org-sm-pencil-dismiss ()
+  "Remove the suggestion at point without extracting anything."
+  (interactive)
+  (delete-overlay (org-sm--pencil-at-point))
+  (if (org-sm-pencils)
+      (org-sm-pencil-next)
+    (message "org-sm: 没有剩余建议")))
 
 ;;;; ---- Source navigation ---------------------------------------------------
 ;; A card's source is wherever its own ID is linked — `org-sm-extract' leaves an
@@ -1494,13 +1776,17 @@ Point must be on the card heading."
   "r" #'org-sm-review-confirm
   "w" #'org-sm-card-workbench
   "d" #'org-sm-item-dismiss
+  "p" #'org-sm-cycle-priority
+  "s" #'org-sm-sectionize-card
   "a" #'org-sm-review-abort)
 
 (dolist (command '(org-sm-review-start
                    org-sm-review-start-light
                    org-sm-tree-review
                    org-sm-review-confirm
-                   org-sm-item-dismiss))
+                   org-sm-item-dismiss
+                   org-sm-cycle-priority
+                   org-sm-sectionize-card))
   (put command 'repeat-map 'org-sm-review-repeat-map))
 
 ;;;; ---- Tree view -----------------------------------------------------------
@@ -1543,11 +1829,12 @@ Point must be on the card heading."
 (defvar org-sm-tree-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map special-mode-map)
-    (define-key map (kbd "RET") #'org-sm-tree-goto)
-    (define-key map (kbd "TAB") #'outline-cycle)
-    (define-key map (kbd "<backtab>") #'outline-cycle-buffer)
-    (define-key map "r" #'org-sm-tree-review)
-    (define-key map "g" #'org-sm-tree-revert)
+    (keymap-set map "RET" #'org-sm-tree-goto)
+    (keymap-set map "TAB" #'outline-cycle)
+    (keymap-set map "<backtab>" #'outline-cycle-buffer)
+    (keymap-set map "r" #'org-sm-tree-review)
+    (keymap-set map "n" #'org-sm-neural-start)
+    (keymap-set map "g" #'org-sm-tree-revert)
     map)
   "Keymap for `org-sm-tree-mode'.")
 
@@ -1560,7 +1847,7 @@ Point must be on the card heading."
                                 (1+ (/ (- (match-end 0) (match-beginning 0)) 2))))
               header-line-format
               (substitute-command-keys
-               " \\[org-sm-tree-review] 复习当前(C-u全部)  \\[outline-cycle] 折叠  \\[org-sm-tree-goto] 跳转原文  \\[org-sm-tree-revert] 刷新"))
+               " \\[org-sm-tree-review] 复习当前(C-u全部)  \\[org-sm-neural-start] 关联漫游  \\[outline-cycle] 折叠  \\[org-sm-tree-goto] 跳转原文  \\[org-sm-tree-revert] 刷新"))
   (outline-minor-mode 1))
 
 (defvar-local org-sm--tree-pred nil "Filter predicate for the current tree, or nil for all.")

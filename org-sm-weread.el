@@ -270,7 +270,7 @@ Existing text is never replaced.  A new associated thought is appended once."
           (let ((counts (org-sm-weread--import-book book index)))
             (cl-incf created (car counts)) (cl-incf appended (cdr counts))))
       (maphash (lambda (_ marker) (set-marker marker nil)) index))
-    (message "WeRead: 新增 %d 张卡片，补充 %d 条想法；已有 ID 跳过" created appended)))
+    (message "WeRead: 新增 %d 张卡片，补充 %d 条想法。已有 ID 跳过" created appended)))
 
 (provide 'org-sm-weread)
 ;;; org-sm-weread.el ends here

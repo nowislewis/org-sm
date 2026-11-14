@@ -70,7 +70,7 @@
                     "* Medium\n:PROPERTIES:\n:SRS_TYPE: topic\n:END:\n"
                     "* [#A] High\n:PROPERTIES:\n:SRS_TYPE: topic\n:END:\n"))
           (cl-letf (((symbol-function 'org-sm-files) (lambda () (list file))))
-            (let* ((markers (org-sm--collect-markers nil t))
+            (let* ((markers (mapcar #'caddr (org-sm-queue-order (org-sm-due-markers))))
                    (titles (mapcar (lambda (m)
                                      (org-with-point-at m
                                        (org-get-heading t t t t)))

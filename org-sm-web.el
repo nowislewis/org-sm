@@ -160,8 +160,11 @@ addressed back by the review endpoint, so it is skipped instead."
           ;; negate it: days late is a positive number here.
           :overdue (max 0 (- (or (org-sm-sched-day-delta) 0)))
           :priority (org-get-priority (org-get-heading t t nil t))
+          :cookie (when-let* ((p (plist-get meta :priority))) (char-to-string p))
           :badge (and (functionp org-sm-web-badge-function)
                       (funcall org-sm-web-badge-function meta))
+          :readpoint (org-sm-web--readpoint-offset)
+          :images (vconcat (org-sm-web--images))
           :intervals (org-sm-web--intervals)
           :revision (org-sm-web--revision))))
 
@@ -185,17 +188,16 @@ addressed back by the review endpoint, so it is skipped instead."
     (signal 'org-sm-web-conflict nil)))
 
 (defun org-sm-web--session ()
-  "Return the due queue vector sorted by priority then overdue days.
-Ships body text and precomputed intervals for every due card in one reply,
-so switching cards needs no GET; each write still awaits its POST response."
-  (apply #'vector
-         (seq-sort-by (lambda (c)
-                        (list (plist-get c :priority)
-                              (plist-get c :overdue)))
-                      (lambda (a b) (value< b a))
-                      (delq nil (org-sm-map-items
-                                 #'org-sm-web--card-at-point
-                                 #'org-sm-due-p)))))
+  "Return every due card as a vector, in the order `org-sm-queue-order' gives.
+The phone takes the head of this list for a light session and walks all of
+it for a full one, so Emacs and the browser never disagree about what comes
+next.  Body text and precomputed intervals ride along, so switching cards
+needs no GET; each write still awaits its POST response."
+  (vconcat
+   (delq nil (mapcar (lambda (entry)
+                       (org-with-point-at (nth 2 entry)
+                         (org-sm-web--card-at-point)))
+                     (org-sm-queue-order (org-sm-due-markers #'org-sm-due-p))))))
 
 (defmacro org-sm-web--json-servlet (endpoint args &rest body)
   "Define token-gated JSON ENDPOINT whose BODY returns an encodable object.
@@ -452,6 +454,126 @@ Untracked files are listed in status but cannot be previewed by git diff."
     ("pull" (org-sm-web--git-pull))
     ("push" (org-sm-web--git-push msg))
     (_ (user-error "Unknown git sync action: %s" action))))
+
+;;;; ---- Reading a long topic in the browser -------------------------------
+;; The same `.org' body the phone receives is what Emacs shows, so the two
+;; views agree on extraction highlights for free.  What the browser lacks is
+;; the read-point anchor and images; these endpoints supply both.
+
+(defcustom org-sm-web-image-roots nil
+  "Extra directories whose images cards may display, besides the notes tree.
+Notes here link pictures from a shared `01-pictures' tree; listing it here
+keeps the web server able to show them without widening access to the
+whole filesystem."
+  :type '(repeat directory)
+  :group 'org-sm-web)
+
+(defun org-sm-web--readpoint-offset ()
+  "Return the read-point offset within the CLEANED body, or nil.
+The browser indexes the same trimmed text the snapshot shipped, so offsets
+are measured against that text, not the raw region."
+  (when-let* ((id (org-id-get))
+              (bounds (org-sm-body-bounds))
+              (pos (string-search (org-sm--readpoint-anchor id)
+                                  (buffer-substring-no-properties
+                                   (car bounds) (cdr bounds)))))
+    (max 0 (- pos (org-sm-web--leading-delta)))))
+
+(defun org-sm-web--set-readpoint (offset)
+  "Move the read-point anchor of the current card to OFFSET of its body.
+OFFSET indexes the cleaned body the browser holds, old anchor included;
+`org-sm--readpoint-move' carries that position across the removal."
+  (let* ((id (org-id-get-create))
+         (bounds (org-sm-body-bounds))
+         (pos (min (cdr bounds)
+                   (+ (car bounds) (org-sm-web--leading-delta)
+                      (max 0 offset)))))
+    (org-sm--readpoint-move id pos)))
+
+(defun org-sm-web--images ()
+  "Return body images of the current card as plists (:alt ALT :url URL).
+Only images `org-sm-web--image-path' would actually serve are listed; paths
+travel abbreviated to `~/' where possible."
+  (when-let* ((bounds (org-sm-body-bounds)))
+    (let ((base (file-name-directory (or (buffer-file-name) default-directory)))
+          pairs)
+      (save-excursion
+        (goto-char (car bounds))
+        (while (re-search-forward org-link-bracket-re (cdr bounds) t)
+          (let* ((target (match-string-no-properties 1))
+                 (path (expand-file-name (string-remove-prefix "file:" target) base))
+                 (alt (match-string-no-properties 2)))
+            (when (and (not (string-match-p "\\`[a-z]+:" (string-remove-prefix "file:" target)))
+                       (ignore-errors (org-sm-web--image-path path)))
+              (push (list :alt (or alt (file-name-nondirectory path))
+                          :link target
+                          :url (concat "/api/image?path="
+                                       (url-hexify-string (abbreviate-file-name path))))
+                    pairs)))))
+      (nreverse pairs))))
+
+(org-sm-web--json-servlet api/priority/:id (cookie revision)
+  (org-sm-web--with-card id
+    (org-sm-web--check-revision revision)
+    (let ((letter (and (org-string-nw-p cookie) (aref cookie 0))))
+      (unless (memq letter '(?A ?B ?C)) (user-error "Invalid priority"))
+      (org-priority letter))
+    (org-sm-web--save!)
+    (list :ok t
+          :cookie (when-let* ((p (plist-get (org-sm-card-at-point) :priority)))
+                    (char-to-string p))
+          :revision (org-sm-web--revision))))
+
+(org-sm-web--json-servlet api/readpoint/:id (offset revision)
+  (org-sm-web--with-card id
+    (org-sm-web--check-revision revision)
+    (unless (and offset (string-match-p "\\`[0-9]+\\'" offset))
+      (user-error "Invalid read point"))
+    (org-sm-web--set-readpoint (string-to-number offset))
+    (org-sm-web--save!)
+    (list :ok t :readpoint (org-sm-web--readpoint-offset)
+          :body (org-sm-body-text)
+          :revision (org-sm-web--revision))))
+
+(defun org-sm-web--image-root-p (path)
+  "Return non-nil when PATH lies inside the notes tree or an allowed root."
+  (seq-some (lambda (root)
+              (and (stringp root)
+                   (file-in-directory-p path (expand-file-name root))))
+            (cons org-sm-directory org-sm-web-image-roots)))
+
+(defun org-sm-web--image-path (requested)
+  "Return the absolute path for REQUESTED, or signal a `user-error'.
+Confined to `org-sm-directory' or `org-sm-web-image-roots' and to image
+extensions, so the LAN server cannot be used to read anything else."
+  (let ((path (expand-file-name requested)))
+    (unless (and (org-string-nw-p requested)
+                 (org-sm-web--image-root-p path)
+                 (file-readable-p path)
+                 (member (downcase (file-name-extension path))
+                         org-sm-image-extensions))
+      (user-error "Image is outside the allowed directories"))
+    path))
+
+(defun org-sm-web--image-mime (path)
+  "Return the MIME type for image PATH."
+  (pcase (downcase (file-name-extension path))
+    ("svg" 'image/svg+xml) ("png" 'image/png) ("gif" 'image/gif)
+    ("webp" 'image/webp) (_ 'image/jpeg)))
+
+(httpd-servlet api/image nil (proc _path _query _request)
+  (condition-case err
+      (progn
+        (org-sm-web--authorize!)
+        (let ((path (org-sm-web--image-path (or (org-sm-web--param "path") ""))))
+          (httpd-with-buffer proc (org-sm-web--image-mime path)
+            (set-buffer-multibyte nil)
+            (insert-file-contents-literally path))))
+    (error
+     (httpd-log `(error ,(error-message-string err)))
+     (httpd-with-buffer proc 'text/plain
+       (insert "not found")
+       (httpd-send-header proc 'text/plain 404)))))
 
 (defun org-sm-web--local-ip ()
   "Return the most likely local LAN IPv4 address as a string.
