@@ -90,6 +90,7 @@ Requires Emacs 29.1+, org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
 | ~org-sm-item-dismiss~   | Remove current item from SRS                    |
 | ~org-sm-item-undismiss~ | Restore a dismissed item                        |
 | ~org-sm-review-start~   | Start review session                            |
+| ~org-sm-review-branch~  | Review only this subtree (~C-u~: this file)     |
 | ~org-sm-review-confirm~ | Confirm topic read / advance cloze state        |
 | ~org-sm-review-abort~   | Abort current review session                    |
 | ~org-sm-tree~           | Foldable aggregated tree of all cards           |
@@ -97,9 +98,9 @@ Requires Emacs 29.1+, org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
 | ~org-sm-goto-source~    | Grep the vault for this card's source           |
 | ~org-sm-capture~                  | Capture region/clipboard into an editable buffer |
 | ~org-sm-capture-clipboard-notify~ | Save clipboard immediately and send notification |
-| ~org-sm-card-workbench~           | Refine and/or split the card at point           |
+| ~org-sm-card-workbench~           | Rewrite the card at point, add child cards      |
 | ~org-sm-capture-commit~ | Commit a capture/workbench buffer (~C-c C-c~)   |
-| ~org-sm-capture-page~   | Capture a PDF page (text layer, else OCR)        |
+| ~org-sm-capture-page~   | Capture a PDF page's text layer                  |
 | ~org-sm-cycle-priority~ | Rotate this card's priority: none → A → B → C    |
 | ~org-sm-neural-start~   | Review a card's neighbourhood, not the calendar  |
 | ~org-sm-import-file~    | Import an EPUB/HTML/Markdown as chapter cards    |
@@ -119,6 +120,13 @@ With Emacs `repeat-mode' enabled, after starting a review you can repeatedly
 press ~r~ to confirm, ~d~ to dismiss, ~p~ to cycle priority, or ~a~ to abort.
 Intervals are computed from the scheduled date, so early/late reviews don't
 distort spacing.
+
+~org-sm-review-branch~ reviews only the due cards under the heading at point
+(~C-u~: the whole file), in the same order -- SuperMemo's branch review, for a
+near goal such as an interview or one book.  The mode line counts cards done
+(~SM 12~) rather than what is left: a full session's total is the backlog, the
+queue already serves the most urgent cards first, so stopping anywhere is safe.
+A light session still shows ~SM 2/6~.
 
 ** What a session contains, and in what order (org-sm-queue)
 
@@ -269,13 +277,17 @@ and each request stays short.
 
 *explain* -- one chat per card, reused, so a second question about another
 paragraph continues the conversation.  The message carries the passage, up
-to ~org-sm-gptel-explain-context~ characters around it, and the source page
-when the card has a ~page:~ link.  A half-written draft at the end of the
+to ~org-sm-gptel-explain-context~ characters around it, the parent text
+around where an extract was taken (~org-sm-extract-origin~), and the source
+page when the card has a ~page:~ link.  No file is attached: that would
+resend the whole note on every turn.  A half-written draft at the end of the
 chat is never sent along: the new question waits until it is gone.
 
 *card-ai* -- refine (clean prose, keep every causal link, flag
 ~【需补充】~ where a conclusion lacks its why), 简化 (cut to the core) or a
-custom instruction.  Only the leading body text is rewritten; ~**~ cards
+custom instruction.  An extract also sends its origin in the parent, so
+"these neurons" is resolved from the source instead of guessed; the prompt
+fences it off as reference only.  Only the leading body text is rewritten; ~**~ cards
 you typed below it are kept.  An async reply is discarded if you edited the
 buffer meanwhile.  Prompts: ~org-sm-gptel-system-topic~ / ~-cloze~ /
 ~-simplify~ / ~-suggest~ / ~-explain~.
@@ -291,11 +303,10 @@ later.  Nothing here calls AI.
   (=org-sm-source-target-file=: the file already linking the document, else the
   note whose ~#+reference:~ matches its name) instead of the shared inbox.
   Routing is buffer-local, so one book's extract never moves the next capture.
-- PDF pages are images in emureader, so ~org-sm-capture-page~ reads the page for
-  you: ~mutool draw -F txt~ for a text layer, then tesseract
-  (~org-sm-source-ocr-languages~, default =chi_sim+eng=) for scans.  OCR takes
-  seconds, so it runs in a background process and caches under
-  ~org-sm-source-cache-directory~.
+- PDF pages are images in emureader, so ~org-sm-capture-page~ reads the page's
+  text layer for you (~mutool draw -F txt~, tens of milliseconds).  A scan has
+  no text layer and is refused: org-sm does no OCR, since a misread digit in a
+  card is worse than typing the sentence yourself.
 - ~C-c C-o~ on a ~page:~ link reopens the document at that page.
 - The AI explanation (~?~) adds the page text behind the card's ~page:~ link to
   its opening message: the reasoning a card left behind is usually still on the
@@ -318,33 +329,15 @@ reader.  ~org-sm-import-file~ (EPUB, HTML, Markdown, DOCX …) and
 - embedded images are extracted next to the note and linked relatively;
 - import is idempotent: the note records ~#+source:~ and re-importing refuses.
 
+Imported cards start at ~[#C]~ (~org-sm-import-priority~).  New material
+always feels urgent -- SuperMemo's /priority bias/ -- and a book arrives a
+chapter set at a time; at C it queues behind what has already proved itself.
+Extracting from a ~[#C]~ card is the reader vouching for the passage, so the
+child drops the C instead of inheriting it (other cookies are inherited).
+
 Import does no AI and makes no clozes.  PDFs are not imported: their value is
 layout, so they stay in emureader and contribute through
 ~org-sm-capture-page~.
-
-* Zotero import (org-sm-zotero) — deprecated
-
-Superseded by ~org-sm-source~ and ~org-sm-import~: read in Emacs, capture with
-~M-z~, import EPUB chapters directly.  The module still works and is still
-tested, but it is no longer loaded by default and its key is unbound.
-
-Read-only client for Zotero 10's built-in Local HTTP API
-(~http://127.0.0.1:23119/api~).  Reads go through Zotero's live process without
-touching ~zotero.sqlite~ on disk; newly highlighted passages are visible
-immediately and trashed items are excluded automatically.
-
-- ~M-x org-sm-zotero-import~: pick books and import new PDF/EPUB highlights (and
-  commented image/area annotations) as topic cards under ~sm-cards / <book>~,
-  ordered by Zotero's reading ~sortIndex~.
-- ~org-sm-zotero-color-rules~: maps highlight hex colors to actions (by default,
-  red ~#ff6666~ / ~#ff0000~ stamps priority ~[#A]~, gray ~#aaaaaa~ is ~ignore~
-  for pure reading marks, and other colors create standard topic cards).
-- Deduplicates vault-wide by ~ZOTERO_KEY~; adding a comment later in Zotero to
-  an already imported highlight appends ~批注：~ in place without resetting its
-  schedule.
-- Cards include a ~[[zotero://...][在 Zotero 中打开]]~ deep link (registered as
-  an Org link type so ~C-c C-o~ jumps straight to the PDF/EPUB annotation in
-  Zotero).
 
 * Web review & mobile editing (org-sm-web)
 

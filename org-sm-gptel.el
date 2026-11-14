@@ -35,7 +35,6 @@
 (require 'gptel)
 
 (declare-function gptel-request "gptel")
-(declare-function gptel-context-add-file "gptel-context")
 (declare-function org-sm-set-body "org-sm")
 (declare-function org-sm-capture-preamble-bounds "org-sm")
 (declare-function org-sm-capture-set-preamble "org-sm")
@@ -264,8 +263,7 @@ instead of starting over."
                      (org-back-to-heading t)
                      (org-get-heading t t t t)))
          (buf-name (org-sm-gptel--buf-name kind heading))
-         (chat-buf (gptel buf-name))
-         (src-file (buffer-file-name)))
+         (chat-buf (gptel buf-name)))
     (with-current-buffer chat-buf
       ;; Apply the agent preset (brings tools + skill list); SYSTEM below
       ;; then overrides the role, keeping our why-first structure.
@@ -279,11 +277,11 @@ instead of starting over."
         (gptel--apply-preset org-sm-gptel-agent-preset
                              (lambda (sym val)
                                (set (make-local-variable sym) val))))
-      (setq-local gptel-system-prompt system)
-      (when (and src-file (file-readable-p src-file))
-        (require 'gptel-context)
-        (setq-local gptel-context nil)
-        (gptel-context-add-file src-file))
+      ;; No attached files: the message already carries the passage, its
+      ;; neighbourhood, its origin and its page.  Attaching the card's file
+      ;; would resend the whole note -- 200 KB for the inbox -- every turn.
+      (setq-local gptel-system-prompt system
+                  gptel-context nil)
       (if (org-sm-gptel--draft-p)
           (message "org-sm: 聊天里有未发送的草稿，先发送或删除它")
         (goto-char (point-max))
@@ -301,19 +299,28 @@ instead of starting over."
 A card extracted from a PDF keeps only the sentence that mattered; the
 reasoning around it stayed on the page."
   (when-let* ((link (org-sm-source-page-link (org-sm-body-text)))
-              (text (org-sm-source-page-text-now (car link) (cdr link))))
+              (text (org-sm-source-page-text (car link) (cdr link))))
     (truncate-string-to-width
      (replace-regexp-in-string "\n\\{3,\\}" "\n\n" text) 4000 nil nil "…")))
+
+(defun org-sm-gptel--origin-block (origin)
+  "Return ORIGIN, from `org-sm-extract-origin', as a labelled message block.
+nil when ORIGIN is nil, so callers can `concat' it unconditionally."
+  (when origin
+    (concat "#+begin_example\n" (car origin) "\n【……这张卡摘自这里……】\n"
+            (cdr origin) "\n#+end_example")))
 
 ;;;###autoload
 (defun org-sm-gptel-explain ()
   "Explain the paragraph at point, or the region, in this card's chat.
-Sends the passage itself, the text around it and, when the card has a
-`page:' link, that page of the source: the step the passage skips is
-usually in the neighbourhood, not in the passage.  Applies
+Sends the passage itself, the text around it, the parent text this card
+was extracted from and, when the card has a `page:' link, that page of the
+source: the step the passage skips is usually in the neighbourhood, not in
+the passage.  Applies
 `org-sm-gptel-agent-preset' so the AI can consult book skills."
   (interactive)
   (pcase-let ((`(,passage . ,context) (org-sm-gptel--passage))
+              (origin (org-sm-gptel--origin-block (org-sm-extract-origin)))
               (page (ignore-errors (org-sm-gptel--source-quote))))
     (org-sm-gptel--open-chat
      "explain" (concat org-sm-gptel-system-explain "\n\n" org-sm-gptel-style)
@@ -321,6 +328,7 @@ usually in the neighbourhood, not in the passage.  Applies
       "我读到这一段卡住了，请按三层极简解释（重点②③，①一句带过，不要制卡、不要总结）：\n\n"
       "#+begin_quote\n" passage "\n#+end_quote\n\n"
       "【前后文，供理解，不必解释】\n#+begin_example\n" context "\n#+end_example"
+      (when origin (concat "\n\n【这张卡在原文里的位置】\n" origin))
       (when page
         (concat "\n\n【原书那一页】\n#+begin_example\n" page "\n#+end_example"))))))
 
@@ -459,8 +467,10 @@ request that never picks up whatever the user attached elsewhere."
 (defun org-sm-gptel-card-ai ()
   "Rewrite the body in this card workbench with the AI.
 Choose refine (clean up, keep every causal link), 简化 (cut to the core) or
-a custom instruction.  Only the leading body text changes; `**' cards you
-typed below it are kept.  Nothing reaches the source card until
+a custom instruction.  An extract also sends the parent text around it, so
+\"it\" and \"these neurons\" can be resolved from the source rather than
+guessed.  Only the leading body text changes; `**' cards you typed below it
+are kept.  Nothing reaches the source card until
 \\<org-sm-capture-mode-map>\\[org-sm-capture-commit]."
   (interactive)
   (org-sm-gptel--workbench-only)
@@ -473,13 +483,20 @@ typed below it are kept.  Nothing reaches the source card until
     (let* ((bounds (org-sm-capture-preamble-bounds))
            (raw    (string-trim (buffer-substring-no-properties
                                  (car bounds) (cdr bounds))))
+           (origin (org-sm-gptel--origin-block
+                    (when-let* ((card (org-sm--capture-live-marker)))
+                      (org-with-point-at card (org-sm-extract-origin)))))
            (buf    (current-buffer))
            (tick   (buffer-chars-modified-tick))
            (serial (cl-incf org-sm-gptel--request-serial)))
       (when (string-empty-p raw) (user-error "No body text to rewrite"))
       (message "org-sm: asking AI (%s)..." label)
       (org-sm-gptel--card-request
-       raw org-sm-capture-card-type mode custom
+       (if origin
+           (concat raw "\n\n【出处上下文：只用来补全正文里的代词和省略的主语，"
+                   "其中的其他内容不要写进正文】\n" origin)
+         raw)
+       org-sm-capture-card-type mode custom
        (lambda (body err)
          (cond
           (err (message "org-sm AI failed: %s" err))

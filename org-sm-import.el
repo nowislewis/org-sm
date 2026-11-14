@@ -50,6 +50,15 @@ review slot of their own."
   :type 'integer
   :group 'org-sm)
 
+(defcustom org-sm-import-priority ?C
+  "Priority cookie for imported articles and their sections, or nil.
+New material always feels urgent -- SuperMemo calls it priority bias --
+and an import arrives a whole book at a time.  At [#C] it waits behind
+what has already proved itself; an extract from it drops the C (see
+`org-sm-extract'), and `org-sm-cycle-priority' raises a chapter by hand."
+  :type '(choice (const :tag "None" nil) character)
+  :group 'org-sm)
+
 (defcustom org-sm-import-topics-per-day 1
   "How many section cards from one import come due per day.
 Importing a long article must not dump all its sections into tomorrow."
@@ -294,6 +303,8 @@ imported note obeys the same invariant.  Return (FILE . CARD-COUNT)."
       (goto-char (point-min))
       (re-search-forward "^\\* ")
       (org-sm-item-mark 'topic)
+      ;; Before sectionizing, so every section card inherits the cookie.
+      (when org-sm-import-priority (org-priority org-sm-import-priority))
       (let ((n (org-sm-sectionize-card)))
         (let ((save-silently t)) (save-buffer))
         (cons file n)))))

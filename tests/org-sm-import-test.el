@@ -153,6 +153,10 @@
                                      (org-sm-cards-in-file note))
                              '("[T] 一篇 文章" "[T] 第一节" "[T] 第二节")))
               (org-sm-import-test--no-plain-heading-in-cards note)
+              ;; Imports start unproven: the article and every section at [#C].
+              (should (equal (mapcar (lambda (c) (plist-get c :priority))
+                                     (org-sm-cards-in-file note))
+                             '(?C ?C ?C)))
               (should (string-match "\\[\\[file:\\([^]]+\\.png\\)\\]" text))
               (should (file-exists-p (expand-file-name (match-string 1 text) dir))))
             ;; The same URL fetched later is recognised as already imported.
@@ -205,7 +209,7 @@
       (let ((text (org-sm-import-test--text (org-sm-import-test--note dir))))
         (should (string-match-p "^#\\+title: +An Article" text))
         ;; The heading repeating the title is dropped: two section cards.
-        (should (= (org-sm-import-test--count "^\\*\\* \\[T\\]" text) 2))
+        (should (= (org-sm-import-test--count "^\\*\\* \\[#C\\] \\[T\\]" text) 2))
         (should-not (string-match-p "Login\\|copyright footer" text))
         ;; Relative link made absolute; lazy image fetched and localised.
         (should (string-match-p "\\[\\[https://example.org/rel/page\\]" text))

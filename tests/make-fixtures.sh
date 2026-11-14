@@ -55,7 +55,7 @@ EOF
 pandoc nested.md -o nested.epub --metadata title="Nested Book"
 rm -f fig.png nested.md
 # A scanned page: rasterise page 2 and wrap the image back into a PDF with no
-# text layer, so the OCR branch is exercised against known English text.
+# text layer, which org-sm must report as having no text.
 mutool draw -q -r 200 -o scan.png text.pdf 2
 mutool convert -o scan.pdf scan.png
 rm -f scan.png text.md

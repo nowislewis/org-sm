@@ -234,8 +234,8 @@ Coexists with `breadcrumb-local-mode' by prepending to the existing list."
 (defun org-sm-topic-afactor ()
   "Return A-Factor for current heading derived from org priority.
 [#A] → 1.2 (slow growth, review frequently)
-[#B] → 1.5
-[#C] or none → 1.8 (fast growth, review less)"
+[#B] or none → 1.5 (`org-entry-get' reports a missing cookie as B)
+[#C] → 1.8 (fast growth, review less)"
   (pcase (org-entry-get nil "PRIORITY")
     ("A" 1.2) ("B" 1.5) (_ 1.8)))
 
@@ -899,25 +899,20 @@ selected inside Emacs, so there this delegates to `org-sm-capture-page'."
 ;;;###autoload
 (defun org-sm-capture-page ()
   "Capture the current PDF page, which cannot be selected inside Emacs.
-The page's text -- text layer, else cached OCR -- goes to the kill ring and
-to an ordinary capture buffer together with a `page:' link.  Sharpen it with
-\`C-c C-c'; OCR takes a few seconds on a first visit, then comes from cache."
+The page's text layer goes to the kill ring and to an ordinary capture
+buffer together with a `page:' link; trim it to the passage that matters."
   (interactive)
   (let* ((context (or (org-sm-source-context) (user-error "Not in a document")))
          (file (plist-get context :file))
          (page (plist-get context :page)))
     (unless (and file page) (user-error "This document has no pages"))
-    (message "org-sm: reading page %d..." page)
-    (org-sm-source-page-text
-     file page
-     (lambda (text)
-       (if (not (org-string-nw-p text))
-           (message "org-sm: page %d has no text layer and OCR found nothing" page)
-         (kill-new text)
-         (org-sm--capture-buffer text nil nil context)
-         (message "%s" (substitute-command-keys
-                        (format "org-sm: page %d — trim it, then \\<org-sm-capture-mode-map>\\[org-sm-capture-commit]"
-                                page))))))))
+    (let ((text (or (org-sm-source-page-text file page)
+                    (user-error "Page %d has no text layer (a scan?)" page))))
+      (kill-new text)
+      (org-sm--capture-buffer text nil nil context)
+      (message "%s" (substitute-command-keys
+                     (format "org-sm: page %d — trim it, then \\<org-sm-capture-mode-map>\\[org-sm-capture-commit]"
+                             page))))))
 
 (defun org-sm--capture-target (context)
   "Return the file to capture into for CONTEXT, falling back to the inbox.
@@ -1014,6 +1009,51 @@ Point-relative and excursion-agnostic: the caller owns buffer/point state
   (replace-regexp-in-string
    "⌈\\|\\[\\[id:[^]\n]+\\]\\[<[TC]>\\]\\]" "" str))
 
+(defcustom org-sm-extract-origin-chars 800
+  "Characters of parent text kept on each side of an extract's origin."
+  :type 'integer
+  :group 'org-sm)
+
+(defun org-sm--extract-span-start (mark floor)
+  "Return the `⌈' opening the extract whose link starts at MARK, else MARK.
+Searches back to FLOOR.  A backlink appended by the workbench has no `⌈'
+of its own; the nearest one before it then opens another extract, which
+is closed before MARK."
+  (save-excursion
+    (goto-char mark)
+    (let ((open (search-backward "⌈" floor t)))
+      (if (and open
+               (progn (goto-char (1+ open))
+                      (not (re-search-forward "\\]\\[<[TC]>\\]\\]" mark t))))
+          open
+        mark))))
+
+(defun org-sm-extract-origin ()
+  "Return the parent text around where the card at point was extracted.
+The result is (BEFORE . AFTER): up to `org-sm-extract-origin-chars' of the
+parent body on each side of the extracted span, markers stripped.  nil
+when the parent is not a card or does not link this one.  An extract
+keeps the sentence that mattered; what its pronouns refer to, and the
+step it skips, stayed in the parent."
+  (save-excursion
+    (org-back-to-heading-or-point-min t)
+    (when-let* (((org-at-heading-p))
+                (id (org-entry-get nil "ID"))
+                ((org-up-heading-safe))
+                ((org-sm-type))
+                (body (org-sm-body-bounds)))
+      (goto-char (car body))
+      (when (search-forward (format "[[id:%s][" id) (cdr body) t)
+        (let* ((mark (match-beginning 0))
+               (span (org-sm--extract-span-start mark (car body)))
+               (end (or (search-forward "]]" (cdr body) t) (point)))
+               (n org-sm-extract-origin-chars)
+               (text (lambda (from to)
+                       (string-trim (org-sm--strip-extract-marks
+                                     (buffer-substring-no-properties from to))))))
+          (cons (funcall text (max (car body) (- span n)) span)
+                (funcall text end (min (cdr body) (+ end n)))))))))
+
 (defun org-sm-extract (type selected sel-start sel-end)
   "Create a child SRS card of TYPE from the parent at point.
 Point must be on the parent heading.  SELECTED is the extracted text.
@@ -1068,7 +1108,13 @@ no prompt, no overlay/UI.
           (font-lock-flush (1- (point)) (1+ span-end)))))
     ;; Append child heading at end of current subtree.
     (save-excursion
-      (org-sm--insert-child level type title child-body id))
+      (org-sm--insert-child level type title child-body id)
+      ;; [#C] marks material nobody has vouched for yet (imports start there,
+      ;; see `org-sm-import-priority').  Extracting is the reader vouching
+      ;; for a passage, so the child leaves C behind instead of inheriting it.
+      (goto-char (org-find-property "ID" id))
+      (when (eql (plist-get (org-sm-card-at-point) :priority) ?C)
+        (org-priority 'remove)))
     (org-sm--card-changed 'extract)
     id))
 
@@ -1115,8 +1161,8 @@ back as this card's body (type/schedule/id untouched) and turns each `**'
 heading into a new scheduled child with a back-reference, leaving existing
 children alone.  \\`C-c C-k' discards.
 
-Edit by hand, or with `org-sm-gptel' loaded use \\`C-c C-a' to refine the
-body and optionally propose child cards in one call."
+Edit by hand, or with `org-sm-gptel' loaded use \\`C-c C-a' to have the
+AI rewrite the body."
   (interactive)
   (when (org-before-first-heading-p) (user-error "Not on an org heading"))
   (org-back-to-heading t)
@@ -1229,9 +1275,10 @@ heading has no SCHEDULED time."
        (not (org-sm--dismissed-p))
        (when-let* ((d (org-sm-sched-day-delta))) (<= d 0))))
 
-(defun org-sm-map-items (fn &optional pred)
+(defun org-sm-map-items (fn &optional pred scope)
   "Map FN over SRS headings (skipping dismissed ones); collect non-nil results.
-When PRED is non-nil, only entries for which it returns non-nil are visited."
+When PRED is non-nil, only entries for which it returns non-nil are visited.
+SCOPE is an `org-map-entries' scope; nil means every vault file."
   (delq nil (org-map-entries
              (lambda ()
                (when (and (org-sm-type)
@@ -1239,14 +1286,15 @@ When PRED is non-nil, only entries for which it returns non-nil are visited."
                           (or (null pred) (funcall pred)))
                  (funcall fn)))
              nil
-             (org-sm-files))))
+             (or scope (org-sm-files)))))
 
-(defun org-sm-due-markers (&optional pred)
+(defun org-sm-due-markers (&optional pred scope)
   "Return (RANK TYPE MARKER CARD) for every SRS card matching PRED.
 RANK is `org-get-priority' of the heading, larger meaning more important;
 TYPE is `topic' or `cloze'; CARD is `org-sm-card-at-point' plus
-`:late-days', how many days past due the card is.  The one place a queue
-candidate is defined, so every entry point orders the same pool."
+`:late-days', how many days past due the card is.  SCOPE narrows the
+search as in `org-sm-map-items'.  The one place a queue candidate is
+defined, so every entry point orders the same pool."
   (org-sm-map-items
    (lambda ()
      (list (org-get-priority (org-get-heading t t nil t))
@@ -1254,7 +1302,7 @@ candidate is defined, so every entry point orders the same pool."
            (point-marker)
            (append (org-sm-card-at-point)
                    (list :late-days (- (or (org-sm-sched-day-delta) 0))))))
-   pred))
+   pred scope))
 
 (defun org-sm--cleanup-buffer ()
   "Clear review progress, narrowing, overlays, and state in previous buffer.
@@ -1379,6 +1427,24 @@ topic or a leech offers `w', everything else confirms."
                  :cloze-state org-sm--cloze-state
                  :prev prev)))
 
+;;;###autoload
+(defcustom org-sm-review-light-size 6
+  "Maximum number of cards in a light review session."
+  :type 'integer
+  :group 'org-sm)
+
+(defun org-sm--progress-label ()
+  "Return the mode-line progress of the running session.
+\"SM 3/6\" while the whole session fits a light one; past that, only how
+many cards are done.  A full session's total is the backlog, and a running
+count of what is left is the guilt that SuperMemo's auto-postpone exists
+to hide: the queue already serves the most urgent cards first, so stopping
+anywhere is safe."
+  (let ((done (- org-sm--review-total (length org-sm--queue))))
+    (if (<= org-sm--review-total org-sm-review-light-size)
+        (format "SM %d/%d" done org-sm--review-total)
+      (format "SM %d" done))))
+
 (defun org-sm--advance (&optional prev)
   "Advance to the next queued item, or end the session.
 PREV is a string describing the last action."
@@ -1391,9 +1457,7 @@ PREV is a string describing the last action."
           (message "org-sm: skipping stale marker"))))
     (if found
         (progn
-          (setq org-sm--mode-line
-                (format "SM %d/%d" (- org-sm--review-total (length org-sm--queue))
-                        org-sm--review-total))
+          (setq org-sm--mode-line (org-sm--progress-label))
           (force-mode-line-update)
           (org-sm--show-prompt prev))
       (org-sm--cleanup-buffer)
@@ -1409,12 +1473,6 @@ PREV is a string describing the last action."
           org-sm--review-total (length markers))
     (run-hooks 'org-sm-review-start-hook)
     (org-sm--advance)))
-
-;;;###autoload
-(defcustom org-sm-review-light-size 6
-  "Maximum number of cards in a light review session."
-  :type 'integer
-  :group 'org-sm)
 
 (defun org-sm-cycle-priority ()
   "Rotate the current card's priority cookie: none -> A -> B -> C -> none.
@@ -1441,6 +1499,20 @@ simply the head of the same queue a full session walks through."
   (org-sm--review-markers
    (mapcar #'caddr (org-sm-queue-order (org-sm-due-markers #'org-sm-due-p) limit))
    (if limit (format "light, max %d" limit) "due")))
+
+;;;###autoload
+(defun org-sm-review-branch (&optional whole-file)
+  "Review the due cards under the heading at point, in the usual order.
+With prefix argument WHOLE-FILE, or before the first heading, review the
+whole file.  SuperMemo's branch review: work toward a near goal (an
+interview, one book) without the rest of the vault competing for the time,
+while every card keeps its long-term schedule."
+  (interactive "P")
+  (unless (derived-mode-p 'org-mode) (user-error "Not in an Org buffer"))
+  (let ((scope (if (or whole-file (org-before-first-heading-p)) 'file 'tree)))
+    (org-sm--review-markers
+     (mapcar #'caddr (org-sm-queue-order (org-sm-due-markers #'org-sm-due-p scope)))
+     (if (eq scope 'file) "this file" "this branch"))))
 
 ;;;###autoload
 (defun org-sm-review-start-light ()

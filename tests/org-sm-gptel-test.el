@@ -86,7 +86,7 @@
       "前文铺垫。\n\n难懂的这一段。\n\n后文延伸。\n\n来源：[[page:/books/x.pdf::7][《x》p.7]]"
     (search-forward "难懂")
     (let (sent)
-      (cl-letf (((symbol-function 'org-sm-source-page-text-now)
+      (cl-letf (((symbol-function 'org-sm-source-page-text)
                  (lambda (file page)
                    (should (equal file "/books/x.pdf"))
                    (should (= page 7))
@@ -98,6 +98,33 @@
       (should (string-match-p "前文铺垫" sent))
       (should (string-match-p "后文延伸" sent))
       (should (string-match-p "第一段\n\n第二段" sent)))))
+
+(ert-deftest org-sm-gptel-test-extracts-carry-their-origin ()
+  (org-sm-gptel-test--with-card "幼年神经元来自齿状回。这些年轻神经元更容易兴奋。后文。"
+    (let* ((body (org-sm-body-text))
+           (from (string-match "这些" body))
+           (to (+ from (length "这些年轻神经元更容易兴奋。"))))
+      (goto-char (point-min))
+      (org-sm-extract 'topic (substring body from to) from to))
+    (re-search-forward "^\\*\\* ")
+    ;; explain: the parent text arrives with the passage.
+    (let (sent)
+      (cl-letf (((symbol-function 'org-sm-gptel--open-chat)
+                 (lambda (_kind _sys msg) (setq sent msg))))
+        (org-sm-gptel-explain))
+      (should (string-match-p "幼年神经元来自齿状回。\n【……这张卡摘自这里……】\n后文。" sent)))
+    ;; workbench refine: same context, fenced off from the body to rewrite.
+    (let ((card (point-marker)) text)
+      (with-temp-buffer
+        (org-sm-capture-mode)
+        (insert "这些年轻神经元更容易兴奋。")
+        (setq-local org-sm-capture-parent-marker card)
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "refine"))
+                  ((symbol-function 'org-sm-gptel--card-request)
+                   (lambda (tx &rest _) (setq text tx))))
+          (org-sm-gptel-card-ai)))
+      (should (string-prefix-p "这些年轻神经元更容易兴奋。\n\n【出处上下文" text))
+      (should (string-match-p "幼年神经元来自齿状回" text)))))
 
 ;;;; ---- Workbench rewrite ----------------------------------------------------
 

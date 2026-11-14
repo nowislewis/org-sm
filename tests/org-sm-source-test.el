@@ -106,49 +106,18 @@
 
 ;;;; ---- Page text ------------------------------------------------------------
 
-(defun org-sm-source-test--await (timeout)
-  "Wait for an asynchronous source callback, at most TIMEOUT seconds."
-  (let ((deadline (+ (float-time) timeout)))
-    (while (and (null org-sm-source-test--result) (< (float-time) deadline))
-      (accept-process-output nil 0.05))
-    org-sm-source-test--result))
+(ert-deftest org-sm-source-page-text-reads-the-text-layer ()
+  (skip-unless (executable-find "mutool"))
+  (skip-unless (file-exists-p (org-sm-source-test--fixture "text.pdf")))
+  (let ((text (org-sm-source-page-text (org-sm-source-test--fixture "text.pdf") 1)))
+    (should (string-match-p "动态规划" text))
+    (should-not (string-match-p "\f" text))))
 
-(defvar org-sm-source-test--result nil)
-
-(defmacro org-sm-source-test--page-text (file page timeout)
-  "Return page text for FILE's PAGE, waiting TIMEOUT seconds."
-  `(let ((org-sm-source-test--result nil))
-     (org-sm-source-page-text
-      ,file ,page (lambda (text) (setq org-sm-source-test--result text)))
-     (org-sm-source-test--await ,timeout)))
-
-(ert-deftest org-sm-source-page-text-reads-text-layer-and-caches ()
-  (let* ((pdf (org-sm-source-test--fixture "text.pdf"))
-         (org-sm-source-cache-directory (make-temp-file "org-sm-cache-" t))
-         (first (org-sm-source-test--page-text pdf 1 30)))
-    (unwind-protect
-        (progn
-          (should (stringp first))
-          (should (string-match-p "动态规划" first))
-          ;; Second read must come from cache, synchronously.
-          (let ((org-sm-source-test--result nil))
-            (org-sm-source-page-text
-             pdf 1 (lambda (t2) (setq org-sm-source-test--result t2)))
-            (should (equal org-sm-source-test--result first))))
-      (delete-directory org-sm-source-cache-directory t))))
-
-(ert-deftest org-sm-source-page-text-falls-back-to-ocr ()
-  (skip-unless (executable-find "tesseract"))
+(ert-deftest org-sm-source-page-text-is-nil-on-a-scan ()
+  ;; No OCR: a scanned page has no text layer, so there is nothing to offer.
+  (skip-unless (executable-find "mutool"))
   (skip-unless (file-exists-p (org-sm-source-test--fixture "scan.pdf")))
-  (let* ((pdf (org-sm-source-test--fixture "scan.pdf"))
-         (org-sm-source-cache-directory (make-temp-file "org-sm-cache-" t))
-         (text (org-sm-source-test--page-text pdf 1 120)))
-    (unwind-protect
-        ;; The fixture's page 2 is an image of English prose.
-        (progn (should (stringp text))
-               (should (> (length text) 40))
-               (should (string-match-p "Memoization" text)))
-      (delete-directory org-sm-source-cache-directory t))))
+  (should-not (org-sm-source-page-text (org-sm-source-test--fixture "scan.pdf") 1)))
 
 (ert-deftest org-sm-source-capture-appends-footer-and-routes ()
   (org-sm-source-test--with-vault

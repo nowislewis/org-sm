@@ -22,10 +22,10 @@
 ;;
 ;;   What does the page say?
 ;;                        `org-sm-source-page-text' -- PDF pages are images
-;;                        in emureader, so text comes from `mutool draw -F
-;;                        txt', falling back to tesseract for scans.  OCR
-;;                        takes seconds, so it runs as a background process
-;;                        and caches under `org-sm-source-cache-directory'.
+;;                        in emureader, so text comes from the PDF's own text
+;;                        layer via `mutool draw -F txt'.  Scans have none
+;;                        and yield nil: no OCR, because a misread digit in
+;;                        a card is worse than typing the sentence yourself.
 ;;
 ;; `page:FILE::N' links open the document at page N; EPUB positions reuse
 ;; nov.el's own `nov:' links.
@@ -50,31 +50,6 @@
   "Provenance and page text for org-sm captures."
   :group 'org-sm
   :prefix "org-sm-source-")
-
-(defcustom org-sm-source-cache-directory
-  (expand-file-name "org-sm/pages" (or (getenv "XDG_CACHE_HOME") "~/.cache"))
-  "Directory caching extracted PDF page text, OCR results included."
-  :type 'directory
-  :group 'org-sm-source)
-
-(defcustom org-sm-source-ocr-languages "chi_sim+eng"
-  "Tesseract languages used for PDF pages without a text layer."
-  :type 'string
-  :group 'org-sm-source)
-
-(defcustom org-sm-source-tessdata-directory
-  (let ((dir (expand-file-name "~/.local/share/tessdata")))
-    (and (file-directory-p dir) dir))
-  "Tesseract data directory, or nil for tesseract's built-in default.
-Language packs installed outside the package manager (for example
-tessdata_best `chi_sim') live here."
-  :type '(choice (const :tag "Tesseract default" nil) directory)
-  :group 'org-sm-source)
-
-(defconst org-sm-source-ocr-min-chars 40
-  "Text-layer output shorter than this triggers OCR instead.
-A scanned page still yields a page number or a stray glyph, so the test is
-volume rather than emptiness.")
 
 (defconst org-sm-image-extensions '("png" "jpg" "jpeg" "gif" "svg" "webp")
   "File extensions org-sm treats as images, lower case without the dot.
@@ -173,105 +148,18 @@ matches the document's base name (citar-managed files are named by key)."
 
 ;;;; ---- What does the page say? --------------------------------------------
 
-(defun org-sm-source--cache-file (file page)
-  "Return the cache path for FILE's PAGE, keyed by path and modification time."
-  (let* ((path (expand-file-name file))
-         (mtime (file-attribute-modification-time (file-attributes path))))
-    (expand-file-name
-     (format "%s-%d.txt" (secure-hash 'sha1 (format "%s|%S" path mtime)) page)
-     org-sm-source-cache-directory)))
-
-(defun org-sm-source--cached (file page)
-  "Return cached text for FILE's PAGE, or nil."
-  (let ((cache (org-sm-source--cache-file file page)))
-    (when (file-readable-p cache)
-      (with-temp-buffer
-        (insert-file-contents cache)
-        (buffer-string)))))
-
-(defun org-sm-source--store (file page text)
-  "Cache TEXT for FILE's PAGE when it has content; return TEXT."
-  (when (org-string-nw-p text)
-    (let ((cache (org-sm-source--cache-file file page)))
-      (make-directory (file-name-directory cache) t)
-      (with-temp-file cache (insert text))))
-  text)
-
-(defun org-sm-source--run (program args then)
-  "Run PROGRAM with ARGS in the background; call THEN with stdout or nil.
-stderr is discarded so tool chatter never leaks into card text."
-  (let ((out (generate-new-buffer " *org-sm-source*"))
-        (err (generate-new-buffer " *org-sm-source-err*")))
-    (make-process
-     :name "org-sm-source" :buffer out :stderr err
-     :command (cons program args) :noquery t
-     :coding 'utf-8
-     :sentinel
-     (lambda (proc _event)
-       (unless (process-live-p proc)
-         (let ((text (and (zerop (process-exit-status proc))
-                          (with-current-buffer out (buffer-string)))))
-           (kill-buffer out)
-           (when (buffer-live-p err) (kill-buffer err))
-           (funcall then text)))))))
-
-(defun org-sm-source--clean (text)
-  "Trim TEXT and drop the form feeds `mutool' puts between pages."
-  (string-trim (replace-regexp-in-string "\f" "" (or text ""))))
-
-(defun org-sm-source--ocr (file page then)
-  "OCR FILE's PAGE in the background and call THEN with the text or nil."
-  (let ((png (make-temp-file "org-sm-page-" nil ".png")))
-    (org-sm-source--run
-     "mutool" (list "draw" "-q" "-r" "200" "-o" png
-                    (expand-file-name file) (number-to-string page))
-     (lambda (_)
-       (org-sm-source--run
-        "tesseract"
-        (append (and org-sm-source-tessdata-directory
-                     (list "--tessdata-dir" org-sm-source-tessdata-directory))
-                (list png "-" "-l" org-sm-source-ocr-languages "--psm" "6"
-                      "-c" "preserve_interword_spaces=1"))
-        (lambda (text)
-          (ignore-errors (delete-file png))
-          (funcall then (org-sm-source--clean text))))))))
-
-(defun org-sm-source-page-text (file page callback)
-  "Call CALLBACK with the text of FILE's PAGE, or nil when none is found.
-Order: cache, then the text layer via mutool, then OCR.  Never blocks: the
-first two are fast, OCR can take ten seconds on a dense page."
-  (if-let* ((cached (org-sm-source--cached file page)))
-      (funcall callback cached)
-    (org-sm-source--run
-     "mutool" (list "draw" "-q" "-F" "txt" "-o" "-"
-                    (expand-file-name file) (number-to-string page))
-     (lambda (raw)
-       (let ((text (org-sm-source--clean raw)))
-         (if (>= (length text) org-sm-source-ocr-min-chars)
-             (funcall callback (org-sm-source--store file page text))
-           (org-sm-source--ocr
-            file page
-            (lambda (ocr)
-              (funcall callback (org-sm-source--store file page ocr))))))))))
-
-(defun org-sm-source-page-text-now (file page)
-  "Return FILE's PAGE text if it is available without waiting, else nil.
-Cache first, then the text layer, which takes tens of milliseconds.  A
-scanned page starts OCR in the background instead, so callers on an
-interactive path never stall and the next request finds it cached."
-  (or (org-sm-source--cached file page)
-      (let* ((coding-system-for-read 'utf-8)
-             (text (org-sm-source--clean
-                    (with-temp-buffer
-                      (call-process "mutool" nil '(t nil) nil
-                                    "draw" "-q" "-F" "txt" "-o" "-"
-                                    (expand-file-name file) (number-to-string page))
-                      (buffer-string)))))
-        (if (>= (length text) org-sm-source-ocr-min-chars)
-            (org-sm-source--store file page text)
-          (org-sm-source--ocr file page
-                              (lambda (ocr) (org-sm-source--store file page ocr)))
-          nil))))
+(defun org-sm-source-page-text (file page)
+  "Return the text layer of FILE's PAGE, or nil when the page has none.
+Synchronous: mutool reads one page in tens of milliseconds, so there is
+nothing to cache.  stderr is discarded so tool chatter never reaches a
+card, and the form feed mutool ends a page with is dropped."
+  (let ((coding-system-for-read 'utf-8))
+    (with-temp-buffer
+      (when (eq 0 (call-process "mutool" nil '(t nil) nil
+                                "draw" "-q" "-F" "txt" "-o" "-"
+                                (expand-file-name file) (number-to-string page)))
+        (org-string-nw-p
+         (string-trim (replace-regexp-in-string "\f" "" (buffer-string))))))))
 
 (defun org-sm-source-page-link (text)
   "Return (FILE . PAGE) for the first `page:' link in TEXT, or nil."

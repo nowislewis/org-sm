@@ -24,6 +24,16 @@ for t in tests/org-sm-*-test.el; do
     status=1
   fi
 done
+# Review must outlive every optional tool: rerun the core suite with nothing
+# but org-sm and fsrs on the load path (no gptel, nov, httpd).
+printf '%-34s ' "core, no optional packages"
+if out=$("$EMACS" --batch -Q --eval '(setq load-prefer-newer t)' -L . -L "$LIB/lisp-fsrs" \
+           -l tests/org-sm-core-test.el -f ert-run-tests-batch-and-exit 2>&1); then
+  grep -o 'Ran [0-9]* tests, [0-9]* results as expected' <<<"$out" | head -1
+else
+  echo FAILED; grep -E 'FAILED|unexpected|Error|error' <<<"$out" | head -20
+  status=1
+fi
 for t in tests/*.test.js; do
   printf '%-34s ' "$(basename "$t")"
   if node "$t" >/dev/null 2>&1; then echo ok; else echo FAILED; node "$t" || true; status=1; fi

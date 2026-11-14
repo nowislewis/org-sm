@@ -185,48 +185,91 @@
               (should (equal (org-sm-card-at-point) (car cards))))))
       (delete-file file))))
 
-(ert-deftest org-sm-zotero-create-and-late-comment-append ()
-  (require 'org-sm-zotero)
-  (let* ((dir (make-temp-file "org-sm-zotero-test-" t))
-         (org-sm-directory dir)
-         (org-sm-capture-file (expand-file-name "sm-cards.org" dir))
-         (org-sm-capture-olp '("sm-cards"))
-         (item '(:key "ITEMKEY1" :title "测试书籍"))
-         (src1 '(:key "ANNOKEY1" :type "highlight" :attachment "ATTKEY1"
-                 :text "这是一段重要摘录" :comment nil :page "12" :color "#ff6666"))
-         (img-src '(:key "ANNOIMG1" :type "image" :attachment "ATTKEY1"
-                    :text "" :comment "架构图：脉动阵列数据流" :page "15" :color "#ffd400"))
-         (index (org-sm-zotero--index))
-         (olp (org-sm-zotero--olp item))
-         (key (org-sm-zotero--key item src1))
-         (body (org-sm-zotero--body item "作者甲" src1))
-         (img-body (org-sm-zotero--body item "作者甲" img-src))
-         (action (org-sm-zotero--color-action (plist-get src1 :color))))
+;;;; ---- Branch review, progress, priority, provenance ----------------------
+
+(ert-deftest org-sm-core-branch-review-stays-in-the-subtree ()
+  (let ((file (make-temp-file "org-sm-branch-" nil ".org"))
+        (due "SCHEDULED: <2020-01-01 Wed>\n:PROPERTIES:\n:SRS_TYPE: cloze\n:END:\n")
+        queued)
     (unwind-protect
-        (progn
-          (should (eq action ?A))
-          (should (eq (org-sm-zotero--color-action "#aaaaaa") 'ignore))
-          (should (null (org-sm-zotero--color-action "#ffd400")))
-          (should (string-match-p "zotero://open-pdf/library/items/ATTKEY1\\?page=12&annotation=ANNOKEY1" body))
-          (should (string-match-p "来源：测试书籍 / 作者甲，第 12 页\n\\[\\[zotero://" body))
-          (should (string-match-p "\\`\\[图片批注\\] 架构图：脉动阵列数据流\n\n来源：" img-body))
-          (org-sm-zotero--create body key index olp nil action)
-          (let ((marker (gethash key index)))
-            (should (markerp marker))
-            ;; Late comment added in Zotero appends before 来源： and only once.
-            (should (org-sm-zotero--append-comment marker "事后补充的想法"))
-            (should-not (org-sm-zotero--append-comment marker "重复追加应被忽略"))
-            (with-current-buffer (marker-buffer marker)
-              (org-with-wide-buffer
-               (goto-char marker)
-               (should (equal (org-entry-get nil "PRIORITY") "A"))
-               (let ((card-body (org-sm-body-text)))
-                 (should (string-match-p "批注：事后补充的想法\n\n来源：测试书籍" card-body)))
-               (goto-char (point-min))
-               (re-search-forward "\\[\\[zotero://" nil t)
-               (should (equal (org-element-property :type (org-element-context)) "zotero"))))))
-      (when-let* ((buf (get-file-buffer org-sm-capture-file)))
+        (with-current-buffer (find-file-noselect file)
+          (insert "* Interview\n** [C] a\n" due "** [C] b\n" due
+                  "* Elsewhere\n** [C] c\n" due)
+          (cl-letf (((symbol-function 'org-sm--review-markers)
+                     (lambda (markers &optional _) (setq queued markers))))
+            (goto-char (point-min))
+            (org-sm-review-branch)
+            (should (equal (sort (mapcar (lambda (m) (org-with-point-at m
+                                                       (org-get-heading t t t t)))
+                                         queued)
+                                 #'string<)
+                           '("[C] a" "[C] b")))
+            (org-sm-review-branch t)
+            (should (= (length queued) 3))))
+      (when-let* ((buf (get-file-buffer file)))
+        (with-current-buffer buf (set-buffer-modified-p nil))
         (kill-buffer buf))
-      (delete-directory dir t))))
+      (delete-file file))))
+
+(ert-deftest org-sm-core-progress-hides-the-backlog ()
+  ;; A light-sized session shows done/total; a full one never shows how much
+  ;; is left, since the queue already put the urgent cards first.
+  (let ((org-sm-review-light-size 6))
+    (let ((org-sm--review-total 6) (org-sm--queue '(a a a a)))
+      (should (equal (org-sm--progress-label) "SM 2/6")))
+    (let ((org-sm--review-total 292) (org-sm--queue (make-list 290 'a)))
+      (should (equal (org-sm--progress-label) "SM 2")))))
+
+(ert-deftest org-sm-core-extract-leaves-import-priority-behind ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* [#C] Imported\n:PROPERTIES:\n:SRS_TYPE: topic\n:END:\nalpha beta\n")
+    (goto-char (point-min))
+    (org-sm-extract 'topic "alpha" 0 5)
+    (goto-char (point-min))
+    (should (eql (plist-get (org-sm-card-at-point) :priority) ?C))
+    (re-search-forward "^\\*\\* ")
+    (should-not (plist-get (org-sm-card-at-point) :priority)))
+  ;; Any other cookie is still inherited.
+  (with-temp-buffer
+    (org-mode)
+    (insert "* [#A] Urgent\n:PROPERTIES:\n:SRS_TYPE: topic\n:END:\nalpha beta\n")
+    (goto-char (point-min))
+    (org-sm-extract 'topic "alpha" 0 5)
+    (re-search-forward "^\\*\\* ")
+    (should (eql (plist-get (org-sm-card-at-point) :priority) ?A))))
+
+(ert-deftest org-sm-core-extract-origin-reads-the-parent-around-the-mark ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Parent\n:PROPERTIES:\n:SRS_TYPE: topic\n:END:\n"
+            "幼年神经元来自海马齿状回。这些年轻神经元更容易兴奋。之后才会整合进环路。\n")
+    (goto-char (point-min))
+    (let* ((body (org-sm-body-text))
+           (from (string-match "这些" body))
+           (to (+ from (length "这些年轻神经元更容易兴奋。"))))
+      (org-sm-extract 'topic (substring body from to) from to))
+    (re-search-forward "^\\*\\* ")
+    (let ((origin (org-sm-extract-origin)))
+      ;; What "these young neurons" refers to sits before the span.
+      (should (equal (car origin) "幼年神经元来自海马齿状回。"))
+      (should (equal (cdr origin) "之后才会整合进环路。")))
+    ;; A top-level card, or text before any heading, has no origin.
+    (goto-char (point-min))
+    (should-not (org-sm-extract-origin)))
+  (with-temp-buffer (insert "loose text") (should-not (org-sm-extract-origin))))
+
+(ert-deftest org-sm-core-extract-origin-ignores-another-extracts-mark ()
+  ;; Workbench children are linked at the end of the parent with no ⌈ of
+  ;; their own; the ⌈ before them belongs to a different extract.
+  (with-temp-buffer
+    (org-mode)
+    (insert "* Parent\n:PROPERTIES:\n:SRS_TYPE: topic\n:END:\n"
+            "前文 ⌈别的摘录[[id:other][<T>]] 后文 [[id:mine][<T>]]\n"
+            "** [T] mine\n:PROPERTIES:\n:ID: mine\n:SRS_TYPE: topic\n:END:\n正文\n")
+    (goto-char (point-max))
+    (let ((origin (org-sm-extract-origin)))
+      (should (equal (car origin) "前文 别的摘录 后文"))
+      (should (equal (cdr origin) "")))))
 
 ;;; org-sm-core-test.el ends here
