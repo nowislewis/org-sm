@@ -40,10 +40,11 @@
 
 (ert-deftest org-sm-gptel-test-suggest-draws-only-real-quotes ()
   (org-sm-gptel-test--with-card
-      "动态规划把问题拆成重叠子问题。\n\n缓存子问题的解，避免重复计算。\n\n例子从略。"
+      "⌈已摘过的第一句。[[id:old][<T>]]\n\n缓存子问题的解，避免重复计算。\n\n例子从略。"
     (let ((beg (point)) (end (point-max)))
       (should (= (org-sm-gptel--draw-picks
-                  '(("缓存子问题的解，避免重复计算。" . "核心机制")
+                  '(("⌈已摘过的第一句。[[id:old][<T>]]" . "已摘录应跳过")
+                    ("缓存子问题的解，避免重复计算。" . "核心机制")
                     ("原文里没有这句话。" . "幻觉"))
                   beg end)
                  1))

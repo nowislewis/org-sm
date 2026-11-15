@@ -122,7 +122,8 @@ quotes, which must stay verbatim to be located."
    只能写明原文已有的逻辑，不引入原文没有的解释、事实或推导。补充解释是 explain 的工作。
 7. 原文只有结论、没有原因，而且原文里也推不出原因时，在段末加注：「【需补充】为什么是这个结论？」
    让用户自己去找原因，你不代答。
-8. 这是阅读卡（topic），不是填空卡：禁止在 body 里写 {{}} 挖空符号。值得重点摘录的句子放进 picks 数组。"
+8. 这是阅读卡（topic），不是填空卡：禁止在 body 里写 {{}} 挖空符号。值得重点摘录的句子放进 picks 数组。
+9. 保留已有子卡标记：正文里形如 `⌈…[[id:xxx][<T>]]` 或 `[[id:xxx][<C>]]` 的标记代表该句已经摘成子卡。改写时必须原样保留 `⌈` 与 `[[id:xxx][<T>/<C>]]` 链接（ID 一个字符都不能改、不能删）。"
   "System prompt for topic refine operations."
   :type 'string :group 'org-sm-gptel)
 
@@ -145,7 +146,8 @@ quotes, which must stay verbatim to be located."
 2. 可以合并同类项，可以删次要的限定语。因果链本身（为什么）必须保留，只删多余的解释文字。
 3. 篇幅一般是原文的三分之一到一半。
 4. 只删减与合并，不扩写，不引入原文没有的事实或结论。
-5. 输出仍是完整可读的正文，不是关键词列表。"
+5. 输出仍是完整可读的正文，不是关键词列表。
+6. 正文里若已有 `⌈` 与 `[[id:xxx][<T>/<C>]]` 子卡回链标记，必须原样保留，不能删除或修改 ID。"
   "System prompt for the `simplify' `org-sm-gptel-card-ai' mode.
 More aggressive than `org-sm-gptel-system-topic'/`-cloze': cuts length, not
 just noise."
@@ -160,7 +162,8 @@ just noise."
 硬约束：
 1. quote 必须逐字复制原文中连续的一段（一到三句），不改一个字、不加省略号、不拼接。
    程序会丢弃对不上原文的引文。
-2. why 用一句话说明它为什么值得单独复习，不复述原文。"
+2. 跳过已经带有 `⌈…[[id:…][<T>/<C>]]` 标记的句子（那些已经摘成子卡了），只从未摘录的句子里挑。
+3. why 用一句话说明它为什么值得单独复习，不复述原文。"
   "System prompt for `org-sm-gptel-suggest'.
 Asks for verbatim quotes only, which are then located in the source: a
 quote that cannot be found is dropped, so a suggestion can never point at
@@ -188,8 +191,8 @@ the last using CUSTOM as the task.  Every mode ends with
           "\n\n" org-sm-gptel-style
           (if (or (eq type 'cloze) (eq mode 'simplify))
               "\n\n输出结构：{body: 改写后的正文, picks: []}（picks 固定为空数组）。"
-            (concat "\n\n重点画线规则（picks，必填 1 到 3 条）："
-                    "\n- 在改写后的 body 中，必须挑出 1 到 3 处最核心的句子放进 picks 数组（程序会给它们画上波浪下划线，供用户摘成子卡）。"
+            (concat "\n\n重点画线规则（picks，1 到 3 条）："
+                    "\n- 在改写后的 body 中，从未带有 `⌈…[[id:…][<T>/<C>]]` 标记的句子里挑出 1 到 3 处最核心的句子放进 picks 数组（程序会给它们画上波浪下划线，供用户摘成子卡）；已经带 `[[id:…]]` 标记的句子不要再挑。"
                     "\n- 挑选优先级：可迁移的规律与因果机制（什么条件下 A 导致 B） > 关键概念边界 > 核心结论或定义。"
                     "\n- quote 必须逐字复制你刚生成的 body 里连续的一段（一到两句），标点一致、一字不差，否则程序无法定位画线。"
                     "\n- why 用一句话说明为什么值得单独复习。"
@@ -394,14 +397,17 @@ so an already highlighted passage can still be found."
 
 (defun org-sm-gptel--draw-picks (picks beg end)
   "Underline PICKS found between BEG and END; return how many were drawn.
-A pick whose quote is not in the text is dropped: a suggestion must point
-at something the reader can see."
+A pick whose quote is not in the text, or that overlaps an already-extracted
+`⌈...[[id:...][<T>/<C>]]' span, is dropped: a suggestion must point at
+unextracted text the reader can see."
   (org-sm-pencils-clear beg end)
   (let ((n 0))
     (dolist (pick picks)
-      (when-let* ((span (org-sm-gptel--locate (car pick) beg end)))
-        (org-sm-pencil-add (car span) (cdr span) (cdr pick))
-        (setq n (1+ n))))
+      (when-let* ((span (org-sm-gptel--locate (car pick) beg end))
+                  (slice (buffer-substring-no-properties (car span) (cdr span))))
+        (unless (string-match-p "⌈\\|\\[\\[id:[^]\n]+\\]\\[<[TC]>\\]\\]" slice)
+          (org-sm-pencil-add (car span) (cdr span) (cdr pick))
+          (setq n (1+ n)))))
     n))
 
 ;;;###autoload
