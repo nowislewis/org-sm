@@ -176,7 +176,10 @@
       (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "refine"))
                 ((symbol-function 'org-sm-gptel--card-request)
                  (lambda (text _type _mode _custom cb)
-                   (should (equal text "第二段需要改写。"))
+                   ;; Target comes first, surrounded by the rest of the workbench
+                   ;; as reference-only context so pronouns in the region resolve.
+                   (should (string-prefix-p "第二段需要改写。\n\n【出处上下文" text))
+                   (should (string-match-p "第一段保持不变。\n【……这张卡摘自这里……】\n第三段也保持不变。" text))
                    (funcall cb "改写后的第二段，含关键机制。"
                             '(("改写后的第二段，含关键机制。" . "新标记"))
                             nil))))

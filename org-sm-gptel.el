@@ -509,17 +509,31 @@ back and extracts the surviving underlines in place."
     (when region (deactivate-mark))
     (let* ((beg    (car bounds))
            (end    (cdr bounds))
+           (full   (org-sm-capture-preamble-bounds))
+           (before (and region
+                        (string-trim
+                         (buffer-substring-no-properties
+                          (max (car full) (- beg org-sm-extract-origin-chars))
+                          beg))))
+           (after  (and region
+                        (string-trim
+                         (buffer-substring-no-properties
+                          end
+                          (min (cdr full) (+ end org-sm-extract-origin-chars))))))
+           (local  (and (or (org-string-nw-p before) (org-string-nw-p after))
+                        (org-sm-gptel--origin-block (cons (or before "") (or after "")))))
            (origin (org-sm-gptel--origin-block
                     (when-let* ((card (org-sm--capture-live-marker)))
                       (org-with-point-at card (org-sm-extract-origin)))))
+           (ctx    (string-join (delq nil (list local origin)) "\n\n"))
            (buf    (current-buffer))
            (tick   (buffer-chars-modified-tick))
            (serial (cl-incf org-sm-gptel--request-serial)))
       (message "org-sm: asking AI (%s)..." label)
       (org-sm-gptel--card-request
-       (if origin
+       (if (org-string-nw-p ctx)
            (concat raw "\n\n【出处上下文：只用来补全正文里的代词和省略的主语，"
-                   "其中的其他内容不要写进正文】\n" origin)
+                   "其中的其他内容不要写进正文】\n" ctx)
          raw)
        org-sm-capture-card-type mode custom
        (lambda (body picks err)
