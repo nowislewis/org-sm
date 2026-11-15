@@ -212,7 +212,18 @@
   (should (string-match-p "picks" (org-sm-gptel--card-system 'topic 'refine)))
   (should (string-match-p "picks 固定为空数组" (org-sm-gptel--card-system 'topic 'simplify)))
   (should (string-match-p "picks 固定为空数组" (org-sm-gptel--card-system 'cloze 'refine)))
-  (should (string-prefix-p "只做这个" (org-sm-gptel--card-system 'topic 'custom "只做这个"))))
+  (should (string-prefix-p "只做这个" (org-sm-gptel--card-system 'topic 'custom "只做这个")))
+  ;; A cloze response that dropped every `{{...}}' is rejected before it can
+  ;; overwrite the user's draft in the workbench.
+  (let (got-err)
+    (cl-letf (((symbol-function 'gptel-request)
+               (lambda (_text &rest args)
+                 (funcall (plist-get args :callback)
+                          "{\"body\":\"没有挖空的句子\",\"picks\":[]}" nil))))
+      (org-sm-gptel--card-request
+       "原句 {{空1}} → {{空2}}" 'cloze 'refine nil
+       (lambda (_body _picks err) (setq got-err err))))
+    (should (string-match-p "dropped {{cloze}}" got-err))))
 
 (ert-deftest org-sm-gptel-test-style-reaches-read-text-only ()
   ;; Every rewrite mode and the explanation carry the writing rules ...

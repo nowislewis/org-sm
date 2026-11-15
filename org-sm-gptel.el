@@ -128,14 +128,14 @@ quotes, which must stay verbatim to be located."
   :type 'string :group 'org-sm-gptel)
 
 (defcustom org-sm-gptel-system-cloze
-  "你是 SuperMemo 完形填空（cloze）编辑，按最小信息原则帮用户精简一道已有的填空卡。
+  "你是 SuperMemo 完形填空（cloze）编辑，按最小信息原则帮用户精简一道填空卡。
 
-这张卡已经有复习历史，所以你的任务只是「给题干瘦身」，不是重新出题：
-1. 锚定原考点：必须保留原卡中已有的那个 `{{...}}` 所测的知识点，绝不把 `{{A}}` 填回正文改挖另一处的 `B`（换考点会破坏已有的记忆稳定性记录）。
-2. 如果原来的 `{{...}}` 答案太长（超过 5 个词），可以只把括号里的字微调精简到最核心的 1 到 5 个词，但所测的意思不能变。
-3. 严禁新增第二个 `{{...}}`：一张卡永远只留一个空。如果原文里还有无关的第二件事，直接删掉那半句。
-4. 精简题干：只保留能唯一定位这个 `{{...}}` 答案的最短上下文（因果线索或边界条件），删掉背景铺垫、套话和多余修辞。
-5. 禁止代劳：如果这个空考的是原因或机制，题干里只保留能触发用户自己推导的最小线索，不要在题干里把答案同义复述一遍。"
+核心不变量（挖空守恒）：
+1. 原文已有 1 个或多个 `{{...}}` 时：原文有几个 `{{...}}`（无论是单空，还是递进链条/正反对比的多空），输出必须原样保留这几个 `{{...}}` 所测的考点——不删减任何一个已有的空，不把空换到别的词上，也不额外多挖新空（换考点会破坏已有的记忆稳定性记录）。
+2. 原文还没有任何 `{{...}}` 时：在最核心的因果机制（为什么/怎么做，而非名称定义）处打上 1 个 `{{...}}`。
+3. 括号内长度：如果某个 `{{...}}` 里的文字超过 5 个词，可以微调精简括号内的字词，但所测的意思不能变。
+4. 题干瘦身与线索锚点：删掉与考点无关的背景铺垫、套话和多余分句，只保留能唯一定位 `{{...}}` 的最短因果或对比结构。如果是递进多空（如 `起点 → {{步骤1}} → {{步骤2}}`），必须保留明文的「起点」锚点，保证把空遮住后读者仍知道从哪里开始推导。
+5. 禁止代劳：题干只保留能触发用户自己推导的最小线索，不要在题干里把答案同义复述一遍。"
   "System prompt for cloze refine operations."
   :type 'string :group 'org-sm-gptel)
 
@@ -489,10 +489,16 @@ request that never picks up whatever the user attached elsewhere."
       :transforms nil
       :callback
       (lambda (response info)
-        (if-let* ((parsed (org-sm-gptel--parse-card-response response)))
-            (funcall callback (car parsed) (cdr parsed) nil)
-          (funcall callback nil nil (if (stringp response) "parse failed"
-                                      (format "%s" (plist-get info :status)))))))))
+        (let ((parsed (org-sm-gptel--parse-card-response response)))
+          (cond
+           ((null parsed)
+            (funcall callback nil nil (if (stringp response) "parse failed"
+                                        (format "%s" (plist-get info :status)))))
+           ((and (eq type 'cloze)
+                 (not (string-match-p "{{[^}\n]+}}" (car parsed))))
+            (funcall callback nil nil "AI dropped {{cloze}} markers; draft kept"))
+           (t
+            (funcall callback (car parsed) (cdr parsed) nil))))))))
 
 ;;;###autoload
 (defun org-sm-gptel-card-ai ()
