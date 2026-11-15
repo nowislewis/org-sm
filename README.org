@@ -38,7 +38,7 @@ low-friction over decades.
   review queue (Review Clozes ──► 0.34 Topics ──► New Clozes)
     │
     ├──► x (suggest)     : AI underlines 1–3 verbatim spans; M-z extracts in place
-    ├──► ? (explain)     : why-first chat with local + parent + page context & coordinates
+    ├──► ? (explain)     : why-first chat with local + parent context & coordinates
     └──► w (workbench)   : edit or C-c C-a (AI rewrite + underlines) ──► C-c C-c commits
 #+end_example
 
@@ -204,7 +204,7 @@ consequences instead of "crucial", causal connectives preserved).
 | Key       | Command                | Scope in buffer                   | What it does                                                |
 |-----------+------------------------+-----------------------------------+-------------------------------------------------------------|
 | ~x~       | ~org-sm-gptel-suggest~ | active region, else screenful     | Underlines 1–3 verbatim spans; ~M-z~ extracts, ~M-k~ drops  |
-| ~?~       | ~org-sm-gptel-explain~ | active region, else paragraph     | Opens/reuses card chat; sends local + parent + page + coords |
+| ~?~       | ~org-sm-gptel-explain~ | active region, else paragraph     | Opens/reuses card chat; sends local + parent + coords       |
 | ~C-c C-a~ | ~org-sm-gptel-card-ai~ | active region, else workbench body | Rewrites prose (~refine~ / ~简化~ / custom) + underlines    |
 
 - *Prioritising rules over isolated facts:* both ~suggest~ and workbench
@@ -223,8 +223,9 @@ consequences instead of "crucial", causal connectives preserved).
   before/after the extraction mark in the parent card) with tools disabled for
   a fast single-turn JSON reply.  ~?~ (~explain~) additionally passes a
   ~【卡片坐标：文件 … 第 N 行，ID …，笔记库 …】~ line with
-  ~org-sm-gptel-agent-preset~ enabled, so the agent can call ~Read~, ~Grep~, or
-  book ~Skill~ tools on demand without attaching a 200 KB file on every turn.
+  ~org-sm-gptel-agent-preset~ enabled, so the agent can call ~Read~, ~Grep~,
+  book ~Skill~, ~zotero-skill~, or ~mutool~ on demand without pre-fetching PDF
+  pages or attaching a 200 KB file on every turn.
 
 * Provenance & Importing (=org-sm-source.el=, =org-sm-import.el=)
 

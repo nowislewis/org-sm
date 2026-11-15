@@ -41,6 +41,7 @@
 (defvar nov-metadata)
 (defvar nov-documents-index)
 (defvar eww-data)
+(declare-function org-sm-rg "org-sm-card")
 (declare-function emureader-current-doc-pagenumber "emureader")
 (declare-function emureader-goto-page "emureader")
 (declare-function doc-view-goto-page "doc-view")
@@ -160,11 +161,6 @@ card, and the form feed mutool ends a page with is dropped."
                                 (expand-file-name file) (number-to-string page)))
         (org-string-nw-p
          (string-trim (replace-regexp-in-string "\f" "" (buffer-string))))))))
-
-(defun org-sm-source-page-link (text)
-  "Return (FILE . PAGE) for the first `page:' link in TEXT, or nil."
-  (when (and text (string-match "\\[\\[page:\\([^]]+?\\)::\\([0-9]+\\)\\]" text))
-    (cons (match-string 1 text) (string-to-number (match-string 2 text)))))
 
 ;;;; ---- page: links ---------------------------------------------------------
 

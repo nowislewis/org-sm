@@ -87,34 +87,33 @@
       "前文铺垫。\n\n难懂的这一段。\n\n后文延伸。\n\n来源：[[page:/books/x.pdf::7][《x》p.7]]"
     (search-forward "难懂")
     (let (sent)
-      (cl-letf (((symbol-function 'org-sm-source-page-text)
-                 (lambda (file page)
-                   (should (equal file "/books/x.pdf"))
-                   (should (= page 7))
-                   "第一段\n\n\n\n第二段"))
-                ((symbol-function 'org-sm-gptel--open-chat)
+      (cl-letf (((symbol-function 'org-sm-gptel--open-chat)
                  (lambda (_kind _system message) (setq sent message))))
         (org-sm-gptel-explain))
       (should (string-match-p "#\\+begin_quote\n难懂的这一段。\n#\\+end_quote" sent))
       (should (string-match-p "前文铺垫" sent))
       (should (string-match-p "后文延伸" sent))
-      (should (string-match-p "第一段\n\n第二段" sent))
-      (should (string-match-p "【卡片坐标：文件 .* 第 1 行，ID art" sent)))))
+      (should (string-match-p "【卡片坐标：文件 .* 第 1 行，ID art，出处 \\[\\[page:/books/x\\.pdf::7\\]\\[《x》p\\.7\\]\\]" sent)))))
 
 (ert-deftest org-sm-gptel-test-extracts-carry-their-origin ()
-  (org-sm-gptel-test--with-card "幼年神经元来自齿状回。这些年轻神经元更容易兴奋。后文。"
+  (org-sm-gptel-test--with-card
+      "幼年神经元来自齿状回。这些年轻神经元更容易兴奋。后文。\n\n来源：[[page:/books/neuro.pdf::12][《神经》p.12]]"
     (let* ((body (org-sm-body-text))
            (from (string-match "这些" body))
            (to (+ from (length "这些年轻神经元更容易兴奋。"))))
       (goto-char (point-min))
       (org-sm-extract 'topic (substring body from to) from to))
     (re-search-forward "^\\*\\* ")
-    ;; explain: the parent text arrives with the passage.
+    ;; Even when narrowed to the child (as in a review session), explain still
+    ;; resolves both the parent extract origin and the ancestor's provenance.
+    (org-narrow-to-subtree)
     (let (sent)
       (cl-letf (((symbol-function 'org-sm-gptel--open-chat)
                  (lambda (_kind _sys msg) (setq sent msg))))
         (org-sm-gptel-explain))
-      (should (string-match-p "幼年神经元来自齿状回。\n【……这张卡摘自这里……】\n后文。" sent)))
+      (should (string-match-p "幼年神经元来自齿状回。\n【……这张卡摘自这里……】\n后文。" sent))
+      (should (string-match-p "出处 \\[\\[page:/books/neuro\\.pdf::12\\]\\[《神经》p\\.12\\]\\]" sent)))
+    (widen)
     ;; workbench refine: same context, fenced off from the body to rewrite.
     (let ((card (point-marker)) text)
       (with-temp-buffer
@@ -127,6 +126,23 @@
           (org-sm-gptel-card-ai)))
       (should (string-prefix-p "这些年轻神经元更容易兴奋。\n\n【出处上下文" text))
       (should (string-match-p "幼年神经元来自齿状回" text)))))
+
+(ert-deftest org-sm-gptel-test-provenance-falls-back-to-file-reference ()
+  (let ((file (make-temp-file "org-sm-gptel-" nil ".org")))
+    (unwind-protect
+        (with-current-buffer (find-file-noselect file)
+          (org-mode)
+          (insert "#+title: 纳瓦尔宝典\n#+reference: naval_2022\n"
+                  "* [T] 顶层章节\n:PROPERTIES:\n:ID: root\n:SRS_TYPE: topic\n:END:\n"
+                  "正文段落。\n"
+                  "** [C] 子填空\n:PROPERTIES:\n:ID: child\n:SRS_TYPE: cloze\n:END:\n"
+                  "人生早期要在{{重大决定}}上花时间。\n")
+          (goto-char (point-min))
+          (re-search-forward "^\\*\\* ")
+          (org-narrow-to-subtree)
+          (should (equal (org-sm-gptel--card-provenance) "naval_2022")))
+      (when-let* ((b (find-buffer-visiting file))) (kill-buffer b))
+      (delete-file file))))
 
 
 ;;;; ---- Workbench rewrite + inline underline picks --------------------------

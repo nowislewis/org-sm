@@ -18,8 +18,9 @@
 ;;                            underline extracts it with `org-sm-extract',
 ;;                            DEL erases it, TAB moves to the next.
 ;;   org-sm-gptel-explain   - (?) explain the paragraph or region you are stuck
-;;                            on, with the surrounding text and the source
-;;                            page as context.  Persistent side-window chat.
+;;                            on, with the surrounding text, parent extract
+;;                            origin, and card coordinates for on-demand lookup.
+;;                            Persistent side-window chat.
 ;;   org-sm-gptel-card-ai   - (C-c C-a in a card workbench) rewrite the body
 ;;                            you are editing: refine, simplify, or a custom
 ;;                            instruction.  Cards you typed below are kept.
@@ -95,9 +96,10 @@ quotes, which must stay verbatim to be located."
 ③ 不这样会怎样：它解决什么问题，没有它会出什么具体后果，它在更大的体系里接在哪里。
    这一层把孤立的知识接回主线，所以不能省。只停在定义，读者记住的是一个容易忘、也用不上的事实。
 
-可以用工具查资料（若具备 Skill / Read）：
+可以用工具查资料（若具备 Skill / Read / Bash）：
 - 遇到领域知识，先读对应的书 skill（例如 ai-processor-architecture）核对，不凭空猜。
-- 只读不写。可以用 Skill、Read、Grep 查资料，不用 Edit、Write 改文件。
+- 若需核对原书上下文或前后页推导：看到 `page:FILE::N` 链接时可运行 `mutool draw -q -F txt -o - FILE N` 读取对应页及相邻页；看到 `zotero://`、`#+reference:` 或仅有摘录原句时，可用 `zotero-skill`（如 `locate`）在 Zotero 全文索引中检索原书与页码。
+- 只读不写。可以用 Skill、Read、Grep、只读命令查资料，不用 Edit、Write 改文件。
 
 约束：
 - 只解释。不制卡，不写填空，不写总结。
@@ -276,8 +278,9 @@ instead of starting over."
                              (lambda (sym val)
                                (set (make-local-variable sym) val))))
       ;; No attached files: the message already carries the passage, its
-      ;; neighbourhood, its origin and its page.  Attaching the card's file
-      ;; would resend the whole note -- 200 KB for the inbox -- every turn.
+      ;; neighbourhood, its origin and coordinates for on-demand lookup.
+      ;; Attaching the card's file would resend the whole note -- 200 KB for
+      ;; the inbox -- every turn.
       (setq-local gptel-system-prompt system
                   gptel-context nil)
       (if (org-sm-gptel--draft-p)
@@ -292,15 +295,6 @@ instead of starting over."
 
 ;;;; ---- Commands ------------------------------------------------------------
 
-(defun org-sm-gptel--source-quote ()
-  "Return the page text behind the `page:' link in the current card, or nil.
-A card extracted from a PDF keeps only the sentence that mattered; the
-reasoning around it stayed on the page."
-  (when-let* ((link (org-sm-source-page-link (org-sm-body-text)))
-              (text (org-sm-source-page-text (car link) (cdr link))))
-    (truncate-string-to-width
-     (replace-regexp-in-string "\n\\{3,\\}" "\n\n" text) 4000 nil nil "…")))
-
 (defun org-sm-gptel--origin-block (origin)
   "Return ORIGIN, from `org-sm-extract-origin', as a labelled message block.
 nil when ORIGIN is nil, so callers can `concat' it unconditionally."
@@ -308,39 +302,63 @@ nil when ORIGIN is nil, so callers can `concat' it unconditionally."
     (concat "#+begin_example\n" (car origin) "\n【……这张卡摘自这里……】\n"
             (cdr origin) "\n#+end_example")))
 
+(defun org-sm-gptel--heading-source ()
+  "Return the source line or `:zotero:' property of current heading."
+  (let ((body (org-sm-body-text)))
+    (cond
+     ((string-match "^[ \t]*来源：[ \t]*\\(.+\\)$" body)
+      (org-string-nw-p (string-trim (match-string 1 body))))
+     ((org-string-nw-p (org-entry-get nil "zotero"))))))
+
+(defun org-sm-gptel--card-provenance ()
+  "Resolve provenance for card at point: self -> ancestors -> file header."
+  (org-with-wide-buffer
+    (save-excursion
+      (when (org-sm--goto-enclosing-card)
+        (or (let (found)
+              (while (and (not (setq found (org-sm-gptel--heading-source)))
+                          (org-up-heading-safe)))
+              found)
+            (when-let* ((kw (org-collect-keywords
+                             '("SOURCE" "SOURCE_URL" "REFERENCE")))
+                        (val (cadr (car kw))))
+              (org-string-nw-p (string-trim (string-remove-prefix ";" val)))))))))
+
 (defun org-sm-gptel--card-coordinates ()
-  "Return a one-line location hint for the card at point, or nil.
+  "Return a one-line location and provenance hint for the card at point.
 Gives the agent in `org-sm-gptel-explain' the file path, line number, card
-ID and vault directory so it can pull wider context on demand with Read or
-Grep without attaching the whole file on every turn."
-  (save-excursion
-    (when (org-sm--goto-enclosing-card)
-      (let ((file (buffer-file-name))
-            (line (org-with-wide-buffer (line-number-at-pos)))
-            (id   (org-entry-get nil "ID"))
-            (dir  (and org-sm-directory (expand-file-name org-sm-directory))))
-        (when (or file id dir)
-          (concat "【卡片坐标："
-                  (string-join
-                   (delq nil
-                         (list (and file (format "文件 %s 第 %d 行" file line))
-                               (and id (format "ID %s" id))
-                               (and dir (format "笔记库 %s" dir))))
-                   "，")
-                  "。若以上上下文不够，可主动用 Read 读取该文件相邻部分，或用 Grep 在笔记库中搜索相关概念。】"))))))
+ID, resolved provenance (from the card, its ancestors, or file keywords),
+and vault directory so it can pull wider context on demand."
+  (org-with-wide-buffer
+    (save-excursion
+      (when (org-sm--goto-enclosing-card)
+        (let ((file (buffer-file-name))
+              (line (line-number-at-pos))
+              (id   (org-entry-get nil "ID"))
+              (src  (org-sm-gptel--card-provenance))
+              (dir  (and org-sm-directory (expand-file-name org-sm-directory))))
+          (when (or file id src dir)
+            (concat "【卡片坐标："
+                    (string-join
+                     (delq nil
+                           (list (and file (format "文件 %s 第 %d 行" file line))
+                                 (and id (format "ID %s" id))
+                                 (and src (format "出处 %s" src))
+                                 (and dir (format "笔记库 %s" dir))))
+                     "，")
+                    "。若以上上下文不够，可主动用 Read 读取该文件相邻部分、用 Grep 搜索笔记库，或按需查 PDF / Zotero 原书。】")))))))
 
 ;;;###autoload
 (defun org-sm-gptel-explain ()
   "Explain the paragraph at point, or the region, in this card's chat.
 Sends the passage itself, the text around it, the parent text this card
-was extracted from, the card's file/line coordinates for on-demand tool
-search and, when the card has a `page:' link, that page of the source.
-Applies `org-sm-gptel-agent-preset' so the AI can consult book skills and
-search the vault when the immediate neighbourhood is not enough."
+was extracted from, and the card's file/line coordinates for on-demand tool
+search.  Applies `org-sm-gptel-agent-preset' so the AI can consult book
+skills, read PDF pages or query Zotero, and search the vault when the
+immediate neighbourhood is not enough."
   (interactive)
   (pcase-let ((`(,passage . ,context) (org-sm-gptel--passage))
               (origin (org-sm-gptel--origin-block (org-sm-extract-origin)))
-              (page (ignore-errors (org-sm-gptel--source-quote)))
               (coords (org-sm-gptel--card-coordinates)))
     (org-sm-gptel--open-chat
      "explain" (concat org-sm-gptel-system-explain "\n\n" org-sm-gptel-style)
@@ -349,8 +367,6 @@ search the vault when the immediate neighbourhood is not enough."
       "#+begin_quote\n" passage "\n#+end_quote\n\n"
       "【前后文，供理解，不必解释】\n#+begin_example\n" context "\n#+end_example"
       (when origin (concat "\n\n【这张卡在原文里的位置】\n" origin))
-      (when page
-        (concat "\n\n【原书那一页】\n#+begin_example\n" page "\n#+end_example"))
       (when coords (concat "\n\n" coords))))))
 
 ;;;; ---- Suggestions: the AI underlines, the reader extracts ------------------

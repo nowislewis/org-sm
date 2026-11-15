@@ -1076,24 +1076,25 @@ parent body on each side of the extracted span, markers stripped.  nil
 when the parent is not a card or does not link this one.  An extract
 keeps the sentence that mattered; what its pronouns refer to, and the
 step it skips, stayed in the parent."
-  (save-excursion
-    (org-back-to-heading-or-point-min t)
-    (when-let* (((org-at-heading-p))
-                (id (org-entry-get nil "ID"))
-                ((org-up-heading-safe))
-                ((org-sm-type))
-                (body (org-sm-body-bounds)))
-      (goto-char (car body))
-      (when (search-forward (format "[[id:%s][" id) (cdr body) t)
-        (let* ((mark (match-beginning 0))
-               (span (org-sm--extract-span-start mark (car body)))
-               (end (or (search-forward "]]" (cdr body) t) (point)))
-               (n org-sm-extract-origin-chars)
-               (text (lambda (from to)
-                       (string-trim (org-sm--strip-extract-marks
-                                     (buffer-substring-no-properties from to))))))
-          (cons (funcall text (max (car body) (- span n)) span)
-                (funcall text end (min (cdr body) (+ end n)))))))))
+  (org-with-wide-buffer
+    (save-excursion
+      (org-back-to-heading-or-point-min t)
+      (when-let* (((org-at-heading-p))
+                  (id (org-entry-get nil "ID"))
+                  ((org-up-heading-safe))
+                  ((org-sm-type))
+                  (body (org-sm-body-bounds)))
+        (goto-char (car body))
+        (when (search-forward (format "[[id:%s][" id) (cdr body) t)
+          (let* ((mark (match-beginning 0))
+                 (span (org-sm--extract-span-start mark (car body)))
+                 (end (or (search-forward "]]" (cdr body) t) (point)))
+                 (n org-sm-extract-origin-chars)
+                 (text (lambda (from to)
+                         (string-trim (org-sm--strip-extract-marks
+                                       (buffer-substring-no-properties from to))))))
+            (cons (funcall text (max (car body) (- span n)) span)
+                  (funcall text end (min (cdr body) (+ end n))))))))))
 
 (defun org-sm-extract (type selected sel-start sel-end)
   "Create a child SRS card of TYPE from the parent at point.
@@ -1912,11 +1913,13 @@ this simply advances to the next underline."
   "w" #'org-sm-card-workbench
   "d" #'org-sm-item-dismiss
   "p" #'org-sm-cycle-priority
-  "s" #'org-sm-sectionize-card
+  "t" #'org-sm-sectionize-card
   "a" #'org-sm-review-abort)
 
 (dolist (command '(org-sm-review-start
                    org-sm-review-start-light
+                   org-sm-review-branch
+                   org-sm-neural-start
                    org-sm-tree-review
                    org-sm-review-confirm
                    org-sm-item-dismiss
