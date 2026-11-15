@@ -121,7 +121,8 @@ quotes, which must stay verbatim to be located."
    把「特点是 A、B」改成「A 导致 B」。这样用户重读时不必自己在脑子里重建逻辑。
    只能写明原文已有的逻辑，不引入原文没有的解释、事实或推导。补充解释是 explain 的工作。
 7. 原文只有结论、没有原因，而且原文里也推不出原因时，在段末加注：「【需补充】为什么是这个结论？」
-   让用户自己去找原因，你不代答。"
+   让用户自己去找原因，你不代答。
+8. 这是阅读卡（topic），不是填空卡：禁止在 body 里写 {{}} 挖空符号。值得重点摘录的句子放进 picks 数组。"
   "System prompt for topic refine operations."
   :type 'string :group 'org-sm-gptel)
 
@@ -164,16 +165,15 @@ just noise."
   :type 'string :group 'org-sm-gptel)
 
 (defcustom org-sm-gptel-system-suggest
-  "你是 SuperMemo 渐进阅读专家。用户正在读一段较长的文字，想知道哪些地方值得摘录成独立的阅读卡。
+  "你是 SuperMemo 渐进阅读专家。用户正在读一段文字，想知道哪些句子最值得画线摘录成独立的子卡。
 
-任务：从给定原文中挑出 0 到 3 段最值得单独摘录的文字。
-挑选优先级：可迁移的规律与因果机制（什么条件下 A 导致 B） > 关键概念边界 > 孤立结论或定义。细节、例子、铺垫不挑。
+任务：从给定原文中挑出 1 到 3 段最值得单独摘录的核心句子（除非原文只有一句话且毫无信息量，否则至少挑 1 条）。
+挑选优先级：可迁移的规律与因果机制（什么条件下 A 导致 B） > 关键概念边界 > 核心结论或定义。细节、铺垫不挑。
 
 硬约束：
 1. quote 必须逐字复制原文中连续的一段（一到三句），不改一个字、不加省略号、不拼接。
    程序会丢弃对不上原文的引文。
-2. why 用一句话说明它为什么值得单独复习，不复述原文。
-3. 宁缺毋滥：没有值得摘的就返回空数组。"
+2. why 用一句话说明它为什么值得单独复习，不复述原文。"
   "System prompt for `org-sm-gptel-suggest'.
 Asks for verbatim quotes only, which are then located in the source: a
 quote that cannot be found is dropped, so a suggestion can never point at
@@ -201,12 +201,12 @@ the last using CUSTOM as the task.  Every mode ends with
           "\n\n" org-sm-gptel-style
           (if (or (eq type 'cloze) (eq mode 'simplify))
               "\n\n输出结构：{body: 改写后的正文, picks: []}（picks 固定为空数组）。"
-            (concat "\n\n子卡标记规则（picks，0 到 3 条，宁缺毋滥）："
-                    "\n- 如果改写后的 body 包含两层以上独立要点，把最值得单独摘成子卡的段落放进 picks。"
-                    "\n- 挑选优先级：可迁移的规律与因果机制（什么条件下 A 导致 B） > 关键概念边界 > 孤立结论或定义。"
-                    "\n- quote 必须逐字复制改写后 body 里连续的一段（一到三句），不改一个字。"
+            (concat "\n\n重点画线规则（picks，必填 1 到 3 条）："
+                    "\n- 在改写后的 body 中，必须挑出 1 到 3 处最核心的句子放进 picks 数组（程序会给它们画上波浪下划线，供用户摘成子卡）。"
+                    "\n- 挑选优先级：可迁移的规律与因果机制（什么条件下 A 导致 B） > 关键概念边界 > 核心结论或定义。"
+                    "\n- quote 必须逐字复制你刚生成的 body 里连续的一段（一到两句），标点一致、一字不差，否则程序无法定位画线。"
                     "\n- why 用一句话说明为什么值得单独复习。"
-                    "\n- 如果整段只讲一件事，picks 返回空数组 []。"))))
+                    "\n- 禁止在 body 中使用 {{}} 挖空语法（除非原本就是填空卡）。"))))
 
 ;;;; ---- Internal helpers ----------------------------------------------------
 
