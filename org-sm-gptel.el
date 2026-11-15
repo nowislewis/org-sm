@@ -317,18 +317,40 @@ nil when ORIGIN is nil, so callers can `concat' it unconditionally."
     (concat "#+begin_example\n" (car origin) "\n【……这张卡摘自这里……】\n"
             (cdr origin) "\n#+end_example")))
 
+(defun org-sm-gptel--card-coordinates ()
+  "Return a one-line location hint for the card at point, or nil.
+Gives the agent in `org-sm-gptel-explain' the file path, line number, card
+ID and vault directory so it can pull wider context on demand with Read or
+Grep without attaching the whole file on every turn."
+  (save-excursion
+    (when (org-sm--goto-enclosing-card)
+      (let ((file (buffer-file-name))
+            (line (org-with-wide-buffer (line-number-at-pos)))
+            (id   (org-entry-get nil "ID"))
+            (dir  (and org-sm-directory (expand-file-name org-sm-directory))))
+        (when (or file id dir)
+          (concat "【卡片坐标："
+                  (string-join
+                   (delq nil
+                         (list (and file (format "文件 %s 第 %d 行" file line))
+                               (and id (format "ID %s" id))
+                               (and dir (format "笔记库 %s" dir))))
+                   "，")
+                  "。若以上上下文不够，可主动用 Read 读取该文件相邻部分，或用 Grep 在笔记库中搜索相关概念。】"))))))
+
 ;;;###autoload
 (defun org-sm-gptel-explain ()
   "Explain the paragraph at point, or the region, in this card's chat.
 Sends the passage itself, the text around it, the parent text this card
-was extracted from and, when the card has a `page:' link, that page of the
-source: the step the passage skips is usually in the neighbourhood, not in
-the passage.  Applies
-`org-sm-gptel-agent-preset' so the AI can consult book skills."
+was extracted from, the card's file/line coordinates for on-demand tool
+search and, when the card has a `page:' link, that page of the source.
+Applies `org-sm-gptel-agent-preset' so the AI can consult book skills and
+search the vault when the immediate neighbourhood is not enough."
   (interactive)
   (pcase-let ((`(,passage . ,context) (org-sm-gptel--passage))
               (origin (org-sm-gptel--origin-block (org-sm-extract-origin)))
-              (page (ignore-errors (org-sm-gptel--source-quote))))
+              (page (ignore-errors (org-sm-gptel--source-quote)))
+              (coords (org-sm-gptel--card-coordinates)))
     (org-sm-gptel--open-chat
      "explain" (concat org-sm-gptel-system-explain "\n\n" org-sm-gptel-style)
      (concat
@@ -337,7 +359,8 @@ the passage.  Applies
       "【前后文，供理解，不必解释】\n#+begin_example\n" context "\n#+end_example"
       (when origin (concat "\n\n【这张卡在原文里的位置】\n" origin))
       (when page
-        (concat "\n\n【原书那一页】\n#+begin_example\n" page "\n#+end_example"))))))
+        (concat "\n\n【原书那一页】\n#+begin_example\n" page "\n#+end_example"))
+      (when coords (concat "\n\n" coords))))))
 
 ;;;; ---- Suggestions: the AI underlines, the reader extracts ------------------
 

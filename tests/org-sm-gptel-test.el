@@ -97,7 +97,8 @@
       (should (string-match-p "#\\+begin_quote\n难懂的这一段。\n#\\+end_quote" sent))
       (should (string-match-p "前文铺垫" sent))
       (should (string-match-p "后文延伸" sent))
-      (should (string-match-p "第一段\n\n第二段" sent)))))
+      (should (string-match-p "第一段\n\n第二段" sent))
+      (should (string-match-p "【卡片坐标：文件 .* 第 1 行，ID art" sent)))))
 
 (ert-deftest org-sm-gptel-test-extracts-carry-their-origin ()
   (org-sm-gptel-test--with-card "幼年神经元来自齿状回。这些年轻神经元更容易兴奋。后文。"
