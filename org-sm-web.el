@@ -30,6 +30,10 @@
 (require 'simple-httpd)
 (require 'org-sm)
 
+(declare-function org-sm-gptel-request-suggest "org-sm-gptel")
+(declare-function org-sm-gptel-request-rewrite "org-sm-gptel")
+(declare-function org-sm-gptel-explain-card "org-sm-gptel")
+
 (defgroup org-sm-web nil
   "Web review front-end for org-sm."
   :group 'org-sm
@@ -216,7 +220,9 @@ on a LAN-facing server it leaks absolute filesystem paths."
            (unless (equal (caar httpd-request)
                           ,(if (memq endpoint '(api/session api/hud api/git/diff)) "GET" "POST"))
              (user-error "Wrong HTTP method"))
-           (insert (org-sm-web--json (progn ,@body))))
+           (let ((res (progn ,@body)))
+             (unless httpd--header-sent
+               (insert (org-sm-web--json res)))))
        (org-sm-web-denied
         (insert (org-sm-web--json (list :error "unauthorized")))
         (httpd-send-header t 'application/json 401))
@@ -231,7 +237,9 @@ on a LAN-facing server it leaks absolute filesystem paths."
         (httpd-send-header t 'application/json 400)))))
 
 (org-sm-web--json-servlet api/session ()
-  (list :cards (org-sm-web--session) :hud (org-sm-web--hud nil)))
+  (list :cards (org-sm-web--session)
+        :hud (org-sm-web--hud nil)
+        :ai (if (featurep 'org-sm-gptel) t :json-false)))
 
 (org-sm-web--json-servlet api/hud ()
   (append (list :ok t) (org-sm-web--hud t)))
@@ -295,8 +303,8 @@ extract on such a card would silently mark the wrong span."
     (- (length raw) (length (string-trim-left raw)))))
 
 (defun org-sm-web--save! ()
-  "Write the current buffer to disk if it changed, quietly."
-  (when (buffer-modified-p)
+  "Write the current buffer to disk if it visits a file and changed."
+  (when (and (buffer-file-name) (buffer-modified-p))
     (let ((save-silently t)) (save-buffer))))
 
 (defun org-sm-web--set-title (title)
@@ -353,6 +361,90 @@ extract on such a card would silently mark the wrong span."
         (let ((parent (org-sm-web--card-at-point)))
           (org-sm-web--save!)
           (list :ok t :id child :parent parent :hud (org-sm-web--hud nil))))))))
+
+;;;; ---- AI assistance (powered by org-sm-gptel) ----------------------------
+
+(defun org-sm-web--async-reply (fn)
+  "Require `org-sm-gptel', defer HTTP response, and pass responder to FN."
+  (unless (featurep 'org-sm-gptel)
+    (user-error "org-sm-gptel is not loaded"))
+  (let ((proc (httpd-discard-buffer)))
+    (setq httpd--buffer-proc nil)
+    (funcall
+     fn
+     (lambda (payload &optional err)
+       (when (process-live-p proc)
+         (httpd-with-buffer proc 'application/json
+           (if err
+               (progn
+                 (httpd-log `(error ,err org-sm-web-ai))
+                 (insert (org-sm-web--json (list :error "AI request failed")))
+                 (httpd-send-header proc 'application/json 400))
+             (insert (org-sm-web--json payload)))))))))
+
+(defun org-sm-web--natnum (str)
+  "Parse non-negative integer STR from a form body, or signal `user-error'."
+  (unless (and (stringp str) (string-match-p "\\`[0-9]+\\'" str))
+    (user-error "Invalid offset"))
+  (string-to-number str))
+
+(defun org-sm-web--body-span (&optional start end)
+  "Return buffer (BEG . END) for cleaned-body offsets START/END, or full body."
+  (let* ((bd       (org-sm-body-bounds))
+         (body-beg (+ (car bd) (org-sm-web--leading-delta)))
+         (body-end (+ body-beg (length (org-sm-body-text)))))
+    (if (and (org-string-nw-p start) (org-string-nw-p end))
+        (let ((s (+ body-beg (org-sm-web--natnum start)))
+              (e (+ body-beg (org-sm-web--natnum end))))
+          (unless (<= body-beg s e body-end)
+            (user-error "Selection out of range"))
+          (cons s e))
+      (cons body-beg body-end))))
+
+(org-sm-web--json-servlet api/ai/suggest/:id ()
+  (org-sm-web--with-card id
+    (let ((text (org-sm-body-text)))
+      (when (string-blank-p text)
+        (user-error "Nothing to read here"))
+      (org-sm-web--async-reply
+       (lambda (done)
+         (org-sm-gptel-request-suggest
+          text
+          (lambda (picks err)
+            (funcall done
+                     (and (not err) (list :ok t :picks (vconcat picks)))
+                     err))))))))
+
+(org-sm-web--json-servlet api/ai/rewrite/:id (text mode custom start end)
+  (org-sm-web--with-card id
+    (let ((s (and (org-string-nw-p start) (org-sm-web--natnum start)))
+          (e (and (org-string-nw-p end)   (org-sm-web--natnum end))))
+      (org-sm-web--async-reply
+       (lambda (done)
+         (org-sm-gptel-request-rewrite
+          text mode custom s e
+          (lambda (body picks err)
+            (funcall done
+                     (and (not err)
+                          (list :ok t :body body :picks (vconcat picks)))
+                     err))))))))
+
+(org-sm-web--json-servlet api/ai/explain/:id (start end reply)
+  (org-sm-web--with-card id
+    (let ((span (unless (org-string-nw-p reply)
+                  (org-sm-web--body-span start end))))
+      (when (and span (eq (org-sm-type) 'cloze))
+        (org-sm--log-review 'explain)
+        (org-sm-web--save!))
+      (org-sm-web--async-reply
+       (lambda (done)
+         (org-sm-gptel-explain-card
+          (car span) (cdr span) reply
+          (lambda (passage ans err)
+            (funcall done
+                     (and (not err)
+                          (list :ok t :passage passage :reply ans))
+                     err))))))))
 
 ;;;; ---- Git synchronization ------------------------------------------------
 
@@ -606,6 +698,7 @@ or localhost."
   "Start the local org-sm review server.
 If the server is already running, it restarts cleanly."
   (interactive)
+  (ignore-errors (require 'org-sm-gptel))
   (when (httpd-running-p)
     (httpd-stop))
   (setq org-sm-web--token org-sm-web-token

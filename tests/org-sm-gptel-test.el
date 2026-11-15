@@ -241,7 +241,20 @@
       (org-sm-gptel--card-request
        "原句 {{空1}} → {{空2}}" 'cloze 'refine nil
        (lambda (_body _picks err) (setq got-err err))))
-    (should (string-match-p "dropped {{cloze}}" got-err))))
+    (should (string-match-p "dropped {{cloze}}" got-err)))
+  ;; Anthropic's `response_json' tool emulation can fire the callback once with
+  ;; preamble text (while `:tool-use' is still pending) before delivering the
+  ;; actual JSON, or a model may wrap JSON in markdown fences.
+  (let (got-body)
+    (cl-letf (((symbol-function 'gptel-request)
+               (lambda (_text &rest args)
+                 (let ((cb (plist-get args :callback)))
+                   (funcall cb "好的，改写如下：" '(:tool-use ((:name "response_json"))))
+                   (funcall cb "```json\n{\"body\":\"改写后的句子\",\"picks\":[]}\n```" nil)))))
+      (org-sm-gptel--card-request
+       "原句" 'topic 'refine nil
+       (lambda (body _picks _err) (setq got-body body))))
+    (should (equal got-body "改写后的句子"))))
 
 (ert-deftest org-sm-gptel-test-style-reaches-read-text-only ()
   ;; Every rewrite mode and the explanation carry the writing rules ...

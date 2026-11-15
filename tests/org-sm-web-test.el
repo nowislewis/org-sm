@@ -4,6 +4,7 @@
 ;; Load sources explicitly: local .elc files can lag during development.
 (let ((root (file-name-directory (or load-file-name buffer-file-name))))
   (load-file (expand-file-name "../org-sm.el" root))
+  (load-file (expand-file-name "../org-sm-gptel.el" root))
   (load-file (expand-file-name "../org-sm-web.el" root)))
 
 (defmacro org-sm-web-test--with-card (&rest body)
@@ -79,9 +80,6 @@
           (should (equal "other.txt"
                          (org-sm-web--git-run root "diff" "--cached" "--name-only"))))
       (delete-directory root t))))
-
-(provide 'org-sm-web-test)
-;;; org-sm-web-test.el ends here
 
 ;;;; ---- Browser reading: read point, images, priority ----------------------
 
@@ -172,3 +170,104 @@
       (org-sm-web--set-readpoint target)
       (should (string-match-p "alpha \\[\\[rp:card-fw\\]\\[📖\\]\\]beta"
                               (org-sm-body-text))))))
+
+;;;; ---- Browser AI: suggest, rewrite, explain ------------------------------
+
+(ert-deftest org-sm-web-test-ai-suggest-returns-cleaned-body-offsets ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* [T] Suggest\n:PROPERTIES:\n:ID: s1\n:SRS_TYPE: topic\n:END:\n\n"
+            "⌈已摘录首句。[[id:c1][<T>]]\n\n缓存子问题的解以消除重复计算。\n")
+    (goto-char (point-min))
+    (let ((body (org-sm-body-text))
+          picks)
+      (cl-letf (((symbol-function 'gptel-request)
+                 (lambda (_text &rest args)
+                   (funcall (plist-get args :callback)
+                            (json-encode
+                             '(:picks [(:quote "⌈已摘录首句。[[id:c1][<T>]]" :why "跳过")
+                                       (:quote "缓存子问题的解以消除重复计算。" :why "核心机制")
+                                       (:quote "不存在的句子" :why "幻觉")]))
+                            nil))))
+        (org-sm-gptel-request-suggest body (lambda (p _err) (setq picks p))))
+      (let ((pick (car picks)))
+        (should (= (length picks) 1))
+        (should (equal (substring body (plist-get pick :start) (plist-get pick :end))
+                       "缓存子问题的解以消除重复计算。"))
+        (should (equal (plist-get pick :why) "核心机制"))))))
+
+(ert-deftest org-sm-web-test-ai-rewrite-region-splices-and-shifts-picks ()
+  (org-sm-web-test--with-card
+    (let* ((draft "第一段保持不变。\n\n第二段需要改写。\n\n第三段保持不变。")
+           (s     (string-search "第二段" draft))
+           (e     (+ s (length "第二段需要改写。")))
+           sent out-body out-picks)
+      (cl-letf (((symbol-function 'gptel-request)
+                 (lambda (text &rest args)
+                   (setq sent text)
+                   (funcall (plist-get args :callback)
+                            (json-encode
+                             '(:body "改写后的第二段，含关键机制。"
+                               :picks [(:quote "改写后的第二段，含关键机制。" :why "关键因果")]))
+                            nil))))
+        (org-sm-gptel-request-rewrite
+         draft "refine" nil s e
+         (lambda (b p _err) (setq out-body b out-picks p))))
+      (should (string-prefix-p "第二段需要改写。\n\n【出处上下文" sent))
+      (should (string-match-p "第一段保持不变。" sent))
+      (should (equal out-body
+                     "第一段保持不变。\n\n改写后的第二段，含关键机制。\n\n第三段保持不变。"))
+      (let ((pick (car out-picks)))
+        (should (equal (substring out-body
+                                  (plist-get pick :start)
+                                  (plist-get pick :end))
+                       "改写后的第二段，含关键机制。"))))))
+
+(ert-deftest org-sm-web-test-ai-explain-bridges-emacs-chat-and-strips-tools ()
+  (with-temp-buffer
+    (org-mode)
+    (insert "* [C] Cloze Card\n:PROPERTIES:\n:ID: c-exp\n:SRS_TYPE: cloze\n:END:\n"
+            "前缀条件导致{{核心结论}}。\n")
+    (goto-char (point-min))
+    (let* ((span (org-sm-web--body-span))
+           (chat (get-buffer-create "*org-sm-explain: C Cloze Card*"))
+           passage1 reply1 reply2)
+      (unwind-protect
+          (let ((fail-first t))
+            (cl-letf (((symbol-function 'gptel) (lambda (_name) chat))
+                      ((symbol-function 'gptel-send)
+                       (lambda ()
+                         (let ((beg (point)))
+                           (if fail-first
+                               ;; Simulate network failure (empty response): the
+                               ;; inserted prompt must be rolled back so retry works.
+                               (progn
+                                 (setq fail-first nil)
+                                 (run-hook-with-args 'gptel-post-response-functions beg beg))
+                             (insert
+                              (propertize
+                               (if (string-search "去掉「前缀条件」" (buffer-string))
+                                   "\n回答正确，因为前缀锁死了范围。"
+                                 (concat "\n#+begin_tool (Skill :skill \"book\")\nresult\n#+end_tool\n"
+                                         "① 定义...\n哪个词去掉了，这句话就不成立？"))
+                               'gptel 'response))
+                             (run-hook-with-args 'gptel-post-response-functions beg (point)))))))
+              (let (err0)
+                (org-sm-gptel-explain-card
+                 (car span) (cdr span) nil
+                 (lambda (_p _r err) (setq err0 err)))
+                (should err0))
+              (org-sm-gptel-explain-card
+               (car span) (cdr span) nil
+               (lambda (p r _err) (setq passage1 p reply1 r)))
+              (org-sm-gptel-explain-card
+               nil nil "去掉「前缀条件」就不成立"
+               (lambda (_p r _err) (setq reply2 r)))))
+        (when (buffer-live-p chat) (kill-buffer chat)))
+      (should (equal passage1 "前缀条件导致{{核心结论}}。"))
+      (should-not (string-match-p "begin_tool" reply1))
+      (should (string-match-p "哪个词去掉了" reply1))
+      (should (string-match-p "回答正确" reply2)))))
+
+(provide 'org-sm-web-test)
+;;; org-sm-web-test.el ends here

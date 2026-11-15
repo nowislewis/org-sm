@@ -221,6 +221,63 @@
   }
   .prio.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   .extracted.cloze { background: var(--teal-soft); }
+  .ai-pick {
+    text-decoration: underline wavy var(--gold);
+    text-underline-offset: 4px;
+    background: var(--gold-soft);
+    border-radius: 3px;
+    cursor: pointer;
+  }
+  .ai-pick.selected {
+    background: var(--teal-soft);
+    text-decoration-color: var(--teal);
+  }
+  .pick-banner {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--gold);
+    background: var(--gold-soft);
+    border: 1px solid var(--gold);
+    border-radius: 8px;
+    padding: 6px 10px;
+    margin-bottom: 8px;
+  }
+  .explain-quote {
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--dim);
+    background: var(--surface);
+    border-left: 3px solid var(--teal);
+    padding: 8px 12px;
+    border-radius: 6px;
+    white-space: pre-wrap;
+  }
+  .chat-msg {
+    padding: 12px 14px;
+    border-radius: 10px;
+    font-size: 15px;
+    line-height: 1.75;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .chat-msg.assistant {
+    background: var(--card);
+    border: 1px solid var(--border);
+  }
+  .chat-msg.user {
+    background: var(--teal-soft);
+    color: var(--text);
+    align-self: flex-end;
+    max-width: 88%;
+  }
+  .explain-footer {
+    display: flex;
+    gap: 8px;
+    padding: 10px 0;
+    border-top: 1px solid var(--border);
+  }
+  .explain-footer input { flex: 1; }
+  .explain-footer button { flex: none; min-width: 72px; min-height: 44px; padding: 8px 14px; }
 
   footer {
     padding: 10px 14px;
@@ -502,10 +559,29 @@
     <label>正文 (Org-mode 源码)</label>
     <textarea id="edit-body" class="edit-body-textarea" spellcheck="false"></textarea>
   </div>
+  <div class="edit-toolbar" id="edit-ai-toolbar">
+    <button id="btn-ai-refine">✨ 润色</button>
+    <button id="btn-ai-simplify">✂️ 简化</button>
+    <button id="btn-ai-custom">💬 自定义改写</button>
+  </div>
   <div class="edit-toolbar">
     <button id="btn-tool-cloze">选区 {{挖空}}</button>
     <button id="btn-tool-extract-topic">选区 → 新阅读卡</button>
     <button id="btn-tool-extract-cloze">选区 → 新填空卡</button>
+  </div>
+</div>
+
+<!-- Explain Sheet -->
+<div class="sheet" id="explain-modal">
+  <div class="sheet-header">
+    <button class="cancel" id="btn-explain-close">关闭</button>
+    <h3>💡 导师解释</h3>
+    <button id="btn-explain-reset">重问</button>
+  </div>
+  <div class="sheet-body" id="explain-body"></div>
+  <div class="explain-footer">
+    <input type="text" id="explain-input" class="edit-title-input" placeholder="回答导师追问，或继续提问…" autocorrect="off">
+    <button id="btn-explain-send" class="btn btn-good">发送</button>
   </div>
 </div>
 
@@ -547,6 +623,11 @@ const State = {
   selection: null,
   totalInitial: 0,
   busy: false,
+  ai: true,
+  picksByCard: {},
+  chatsByCard: {},
+  pendingEditPicks: null,
+  editAiSerial: 0,
   light: sessionStorage.getItem("org_sm_mode") !== "all",
   scrolledFor: null,
   hud: null,
@@ -629,6 +710,50 @@ function tokenizeBody(text, isCloze) {
   return parts;
 }
 
+/* Overlay non-overlapping AI suggestion picks onto plain-text tokens while
+   preserving exact [start, end] Emacs character offsets on every span. */
+function applyPicksToTokens(tokens, picks) {
+  if (!picks || !picks.length) return tokens;
+  const sorted = picks.slice().sort((a, b) => a.start - b.start);
+  const out = [];
+  for (const tok of tokens) {
+    if (tok.kind !== "text") {
+      out.push(tok);
+      continue;
+    }
+    const chars = Array.from(tok.text);
+    let cursor = tok.start;
+    for (const p of sorted) {
+      if (p.start < cursor || p.end > tok.end || p.start >= p.end) continue;
+      if (p.start > cursor) {
+        out.push({
+          kind: "text",
+          text: chars.slice(cursor - tok.start, p.start - tok.start).join(""),
+          start: cursor,
+          end: p.start
+        });
+      }
+      out.push({
+        kind: "pick",
+        text: chars.slice(p.start - tok.start, p.end - tok.start).join(""),
+        start: p.start,
+        end: p.end,
+        why: p.why
+      });
+      cursor = p.end;
+    }
+    if (cursor < tok.end) {
+      out.push({
+        kind: "text",
+        text: chars.slice(cursor - tok.start).join(""),
+        start: cursor,
+        end: tok.end
+      });
+    }
+  }
+  return out;
+}
+
 function domPointToCharOffset(bodyEl, node, offset) {
   if (node === bodyEl) {
     if (offset <= 0) return 0;
@@ -668,7 +793,7 @@ function readBodySelection() {
 function clearBodySelection() {
   State.selection = null;
   try { window.getSelection().removeAllRanges(); } catch (_) {}
-  if (State.current) renderButtons($("footer"), State.current);
+  if (State.current) render();
 }
 
 /* The server sends due cards already in review order (`org-sm-queue-order'):
@@ -773,12 +898,24 @@ function render() {
 
   const body = document.createElement("div");
   body.className = "card-body";
-  tokenizeBody(c.body || "", c.type === "cloze").forEach(tok => {
+  const picks = State.picksByCard[c.id] || [];
+  applyPicksToTokens(tokenizeBody(c.body || "", c.type === "cloze"), picks).forEach(tok => {
     const span = document.createElement("span");
     span.dataset.start = tok.start;
     span.dataset.end = tok.end;
     if (tok.kind === "text") {
       span.textContent = tok.text;
+    } else if (tok.kind === "pick") {
+      const active = State.selection &&
+        State.selection.start === tok.start && State.selection.end === tok.end;
+      span.className = "ai-pick" + (active ? " selected" : "");
+      span.textContent = tok.text;
+      span.title = tok.why || "";
+      span.onclick = e => {
+        e.stopPropagation();
+        State.selection = { start: tok.start, end: tok.end, text: tok.text, why: tok.why };
+        render();
+      };
     } else if (tok.kind === "extracted") {
       span.className = "extracted " + (tok.ref === "C" ? "cloze" : "topic");
       span.textContent = tok.text;
@@ -906,10 +1043,14 @@ function readingToolbar(c) {
   const prio = ["A", "B", "C"].map(letter =>
     `<button class="prio${cookie === letter ? " on" : ""}" data-prio="${letter}">${letter}</button>`
   ).join("");
+  const aiRow = State.ai ? `<div class="btn-row">
+      <button class="btn" id="btn-ai-suggest">✨ AI 画线建议<span class="sub">标出 1–3 处核心句</span></button>
+      <button class="btn" id="btn-ai-explain">❓ 解释本卡<span class="sub">三层因果与追问</span></button>
+    </div>` : "";
   return `<div class="btn-row read-tools">
       <button class="btn" id="btn-rp-now">📍 记到屏幕顶部<span class="sub">双击正文可精确标记</span></button>
       <span class="prio-group" title="优先级：A 最常回看">${prio}</span>
-    </div>`;
+    </div>` + aiRow;
 }
 
 function ratingButton(cls, rating, label, iv) {
@@ -923,12 +1064,15 @@ function renderButtons(footer, c) {
 
   if (State.selection) {
     const sel = State.selection;
-    footer.innerHTML = `
+    footer.innerHTML =
+      (sel.why ? `<div class="pick-banner">💡 ${esc(sel.why)}</div>` : "") + `
       <div class="btn-row">
         <button class="btn btn-good" id="btn-sel-topic">📖 摘为阅读卡<span class="sub">Extract 子卡</span></button>
         <button class="btn btn-easy" id="btn-sel-cloze">🌱 挖空为填空卡<span class="sub">Cloze 子卡</span></button>
       </div>
       <div class="btn-row">
+        ${State.ai ? `<button class="btn" id="btn-sel-explain">❓ 解释选区</button>` : ""}
+        ${sel.why ? `<button class="btn" id="btn-sel-dismiss-pick">✕ 擦掉画线</button>` : ""}
         <button class="btn" id="btn-sel-clear">取消选区</button>
       </div>`;
     const keepSel = e => e.preventDefault();
@@ -936,6 +1080,13 @@ function renderButtons(footer, c) {
     $("btn-sel-cloze").onpointerdown = keepSel;
     $("btn-sel-topic").onclick = () => extractSelection("topic", sel);
     $("btn-sel-cloze").onclick = () => extractSelection("cloze", sel);
+    if ($("btn-sel-explain")) {
+      $("btn-sel-explain").onpointerdown = keepSel;
+      $("btn-sel-explain").onclick = () => openExplainSheet(sel);
+    }
+    if ($("btn-sel-dismiss-pick")) {
+      $("btn-sel-dismiss-pick").onclick = () => dismissPick(c.id, sel);
+    }
     $("btn-sel-clear").onclick = clearBodySelection;
     return;
   }
@@ -958,6 +1109,13 @@ function renderButtons(footer, c) {
     row.querySelectorAll("button").forEach(btn => {
       btn.onclick = () => reviewCloze(btn.dataset.rating);
     });
+    if (State.ai) {
+      const aiRow = document.createElement("div");
+      aiRow.className = "btn-row";
+      aiRow.innerHTML = `<button class="btn" id="btn-ai-explain">❓ 解释这道卡（不推进队列）</button>`;
+      footer.appendChild(aiRow);
+      $("btn-ai-explain").onclick = () => openExplainSheet(null);
+    }
     return;
   }
 
@@ -975,7 +1133,7 @@ function renderButtons(footer, c) {
   footer.appendChild(r2);
   const tools = document.createElement("div");
   tools.innerHTML = readingToolbar(c);
-  footer.appendChild(tools.firstElementChild || document.createElement("div"));
+  Array.from(tools.children).forEach(child => footer.appendChild(child));
   const rpNow = $("btn-rp-now");
   if (rpNow) {
     rpNow.onclick = () => {
@@ -985,6 +1143,8 @@ function renderButtons(footer, c) {
       moveReadpoint(c, off);
     };
   }
+  if ($("btn-ai-suggest")) $("btn-ai-suggest").onclick = () => requestSuggest();
+  if ($("btn-ai-explain")) $("btn-ai-explain").onclick = () => openExplainSheet(null);
   footer.querySelectorAll(".prio").forEach(btn => {
     btn.onclick = async () => {
       if (State.busy) return;
@@ -1086,6 +1246,7 @@ async function extractSelection(type, sel) {
     c.title = res.parent.title;
     c.badge = res.parent.badge;
     c.revision = res.parent.revision;
+    delete State.picksByCard[c.id];
     State.selection = null;
     try { window.getSelection().removeAllRanges(); } catch (_) {}
     toast(type === "cloze" ? "🌱 已创建填空子卡" : "📖 已创建阅读子卡");
@@ -1195,12 +1356,15 @@ function openEditSheet() {
   const c = State.current;
   if (!c || State.busy) return;
   clearBodySelection();
+  State.pendingEditPicks = null;
   $("edit-title").value = c.title || "";
   $("edit-body").value = c.body || "";
+  $("edit-ai-toolbar").style.display = State.ai ? "" : "none";
   $("edit-modal").classList.add("active");
 }
 
 function closeEditSheet() {
+  State.pendingEditPicks = null;
   $("edit-modal").classList.remove("active");
 }
 
@@ -1220,6 +1384,12 @@ async function saveEditSheet() {
     c.body = res.body;
     c.title = res.title;
     c.revision = res.revision;
+    if (State.pendingEditPicks && State.pendingEditPicks.length) {
+      State.picksByCard[c.id] = State.pendingEditPicks;
+    } else {
+      delete State.picksByCard[c.id];
+    }
+    State.pendingEditPicks = null;
     toast("保存成功");
     closeEditSheet();
     render();
@@ -1227,6 +1397,154 @@ async function saveEditSheet() {
   } catch (e) {
     alert("保存失败: " + e.message);
     return false;
+  }
+}
+
+async function toolAiRewrite(mode) {
+  const c = State.current;
+  if (!c || State.busy) return;
+  const area = $("edit-body");
+  const draft = area.value;
+  if (!draft.trim()) {
+    toast("没有可改写的正文");
+    return;
+  }
+  let custom = "";
+  if (mode === "custom") {
+    custom = (prompt("输入自定义改写提示词：") || "").trim();
+    if (!custom) return;
+  }
+  const s = area.selectionStart;
+  const e = area.selectionEnd;
+  const hasSel = s < e;
+  const params = { text: draft, mode };
+  if (custom) params.custom = custom;
+  if (hasSel) {
+    params.start = String(Array.from(draft.slice(0, s)).length);
+    params.end = String(Array.from(draft.slice(0, e)).length);
+  }
+  const serial = ++State.editAiSerial;
+  toast(hasSel ? "✨ AI 正在改写选区…" : "✨ AI 正在改写正文…", 4000);
+  try {
+    const res = await API.call(`/api/ai/rewrite/${encodeURIComponent(c.id)}`, params);
+    if (serial !== State.editAiSerial || area.value !== draft) {
+      toast("草稿已手动修改，已忽略旧的 AI 结果");
+      return;
+    }
+    area.value = res.body;
+    State.pendingEditPicks = Array.isArray(res.picks) ? res.picks : [];
+    toast(State.pendingEditPicks.length
+          ? `✨ 已改写，保存后将标出 ${State.pendingEditPicks.length} 处建议画线`
+          : "✨ 已改写草稿，确认后点保存");
+  } catch (err) {
+    toast("AI 改写失败: " + err.message);
+  }
+}
+
+/* ---------------------- AI Suggest & Explain ---------------------- */
+
+function dismissPick(cardId, sel) {
+  const list = State.picksByCard[cardId] || [];
+  State.picksByCard[cardId] = list.filter(p => !(p.start === sel.start && p.end === sel.end));
+  clearBodySelection();
+}
+
+async function requestSuggest() {
+  const c = State.current;
+  if (!c || State.busy) return;
+  State.busy = true;
+  render();
+  toast("✨ 正在找值得摘录的句子…", 4000);
+  try {
+    const res = await API.call(`/api/ai/suggest/${encodeURIComponent(c.id)}`, {});
+    const picks = Array.isArray(res.picks) ? res.picks : [];
+    State.picksByCard[c.id] = picks;
+    if (!picks.length) {
+      toast("本卡没有需要额外标出的句子");
+    } else {
+      const first = picks[0];
+      State.selection = { start: first.start, end: first.end, text: first.quote, why: first.why };
+      toast(`✨ 标出 ${picks.length} 处画线建议，点选即可摘成子卡`);
+    }
+  } catch (e) {
+    toast("AI 画线失败: " + e.message);
+  } finally {
+    State.busy = false;
+    render();
+  }
+}
+
+function renderExplainChat(chat, loading) {
+  const box = $("explain-body");
+  if (!chat) {
+    box.innerHTML = `<div class="mono-box">${loading ? "正在请导师解释…" : "暂无对话"}</div>`;
+    return;
+  }
+  const quoteHtml = chat.passage
+    ? `<div class="explain-quote">${esc(chat.passage)}</div>`
+    : "";
+  const turnsHtml = (chat.turns || []).map(t =>
+    `<div class="chat-msg ${t.role === "user" ? "user" : "assistant"}">${esc(t.text)}</div>`
+  ).join("");
+  const waitHtml = loading ? `<div class="mono-box">导师思考中…</div>` : "";
+  box.innerHTML = quoteHtml + turnsHtml + waitHtml;
+  box.scrollTop = box.scrollHeight;
+}
+
+async function openExplainSheet(sel, forceReset) {
+  const c = State.current;
+  if (!c || State.busy) return;
+  $("explain-modal").classList.add("active");
+  const existing = State.chatsByCard[c.id];
+  if (existing && !sel && !forceReset) {
+    renderExplainChat(existing, false);
+    return;
+  }
+  renderExplainChat(null, true);
+  $("btn-explain-send").disabled = true;
+  try {
+    const params = sel ? { start: String(sel.start), end: String(sel.end) } : {};
+    const res = await API.call(`/api/ai/explain/${encodeURIComponent(c.id)}`, params);
+    const chat = {
+      passage: res.passage || (sel ? sel.text : c.body),
+      turns: [{ role: "assistant", text: res.reply || "" }]
+    };
+    State.chatsByCard[c.id] = chat;
+    renderExplainChat(chat, false);
+  } catch (e) {
+    $("explain-body").innerHTML = `<div class="mono-box">解释请求失败: ${esc(e.message)}</div>`;
+  } finally {
+    $("btn-explain-send").disabled = false;
+  }
+}
+
+function closeExplainSheet() {
+  $("explain-modal").classList.remove("active");
+}
+
+async function sendExplainFollowup() {
+  const c = State.current;
+  const chat = c && State.chatsByCard[c.id];
+  const input = $("explain-input");
+  const text = (input.value || "").trim();
+  if (!c || !chat || !text || $("btn-explain-send").disabled) return;
+  input.value = "";
+  chat.turns.push({ role: "user", text });
+  renderExplainChat(chat, true);
+  $("btn-explain-send").disabled = true;
+  try {
+    const res = await API.call(`/api/ai/explain/${encodeURIComponent(c.id)}`, {
+      reply: text
+    });
+    chat.turns.push({ role: "assistant", text: res.reply || "" });
+    renderExplainChat(chat, false);
+  } catch (e) {
+    chat.turns.pop();
+    input.value = text;
+    renderExplainChat(chat, false);
+    toast("发送失败: " + e.message);
+  } finally {
+    $("btn-explain-send").disabled = false;
   }
 }
 
@@ -1389,7 +1707,7 @@ async function syncPush() {
 /* ---------------------- Keyboard & Boot ---------------------- */
 
 function anySheetOpen() {
-  return ["edit-modal", "sync-modal", "relic-modal"]
+  return ["edit-modal", "sync-modal", "relic-modal", "explain-modal"]
     .some(id => $(id).classList.contains("active"));
 }
 
@@ -1433,9 +1751,21 @@ $("btn-edit-save").onclick = async () => {
 $("btn-tool-cloze").onpointerdown = e => e.preventDefault();
 $("btn-tool-extract-topic").onpointerdown = e => e.preventDefault();
 $("btn-tool-extract-cloze").onpointerdown = e => e.preventDefault();
+$("btn-ai-refine").onpointerdown = e => e.preventDefault();
+$("btn-ai-simplify").onpointerdown = e => e.preventDefault();
+$("btn-ai-custom").onpointerdown = e => e.preventDefault();
 $("btn-tool-cloze").onclick = toolWrapCloze;
 $("btn-tool-extract-topic").onclick = () => toolExtract("topic");
 $("btn-tool-extract-cloze").onclick = () => toolExtract("cloze");
+$("btn-ai-refine").onclick = () => toolAiRewrite("refine");
+$("btn-ai-simplify").onclick = () => toolAiRewrite("simplify");
+$("btn-ai-custom").onclick = () => toolAiRewrite("custom");
+$("btn-explain-close").onclick = closeExplainSheet;
+$("btn-explain-reset").onclick = () => openExplainSheet(State.selection, true);
+$("btn-explain-send").onclick = sendExplainFollowup;
+$("explain-input").onkeydown = e => {
+  if (e.key === "Enter") { e.preventDefault(); sendExplainFollowup(); }
+};
 $("btn-open-sync").onclick = openSyncModal;
 $("btn-sync-close").onclick = closeSyncModal;
 $("btn-sync-refresh").onclick = loadGitDiff;
@@ -1463,6 +1793,7 @@ async function init() {
     // Accept both {cards, hud} and the legacy bare array.
     State.all = Array.isArray(res) ? res : (res.cards || []);
     State.hud = Array.isArray(res) ? null : (res.hud || null);
+    State.ai = Array.isArray(res) ? true : (res.ai !== false);
     startQueue();
     render();
   } catch (e) {

@@ -45,7 +45,11 @@
 (defvar gptel-context)
 (defvar gptel-use-context)
 (defvar gptel-use-tools)
+(defvar gptel-confirm-tool-calls)
+(defvar gptel-include-reasoning)
+(defvar gptel-post-response-functions)
 (defvar gptel-system-prompt)
+(declare-function gptel--fsm-live-p "gptel")
 
 ;;;; ---- Customization -------------------------------------------------------
 
@@ -227,13 +231,15 @@ Enough for the argument the passage belongs to, short enough that a long
 article does not drown the question."
   :type 'integer :group 'org-sm-gptel)
 
-(defun org-sm-gptel--passage ()
-  "Return (PASSAGE . CONTEXT) for the text the reader is stuck on.
-PASSAGE is the region, else the paragraph at point; CONTEXT is up to
-`org-sm-gptel-explain-context' characters of the card body around it."
-  (let* ((span (if (use-region-p)
-                   (cons (region-beginning) (region-end))
-                 (org-sm-paragraph-bounds)))
+(defun org-sm-gptel--passage (&optional beg end)
+  "Return (PASSAGE . CONTEXT) for BEG..END, or region/paragraph at point.
+CONTEXT is up to `org-sm-gptel-explain-context' characters of the card body
+around the span."
+  (let* ((span (if (and beg end)
+                   (cons beg end)
+                 (if (use-region-p)
+                     (cons (region-beginning) (region-end))
+                   (org-sm-paragraph-bounds))))
          (body (org-sm-body-bounds))
          (from (max (car body) (- (car span) org-sm-gptel-explain-context)))
          (to   (min (cdr body) (+ (cdr span) org-sm-gptel-explain-context))))
@@ -254,11 +260,63 @@ onto, and sent along with, half a sentence the user was still writing."
                                (point-max)))))
       (not (member tail (list "" (string-trim (gptel-prompt-prefix-string))))))))
 
-(defun org-sm-gptel--open-chat (kind system message)
+(defun org-sm-gptel--parse-json (response)
+  "Parse a JSON object plist from RESPONSE (raw or fenced), or return nil."
+  (when (stringp response)
+    (or (ignore-errors
+          (json-parse-string response :object-type 'plist :array-type 'list))
+        (when-let* ((beg (string-search "{" response))
+                    (end (string-match "}[^}]*\\'" response)))
+          (ignore-errors
+            (json-parse-string (substring response beg (1+ end))
+                               :object-type 'plist :array-type 'list))))))
+
+(defun org-sm-gptel--request (prompt system schema callback)
+  "Send isolated JSON/text PROMPT to gptel and call CALLBACK with (TEXT ERR).
+Disables external context, agent tools, and reasoning blocks so structured
+single-turn requests stay fast and deterministic."
+  (let ((gptel-use-context nil)
+        (gptel-use-tools nil)
+        (gptel-include-reasoning nil))
+    (gptel-request prompt
+      :system system
+      :schema schema
+      :transforms nil
+      :callback
+      (lambda (response info)
+        (cond
+         ((eq (car-safe response) 'reasoning) nil)
+         ;; On Anthropic backends `:schema' is emulated via a `response_json'
+         ;; tool call; if the model emits preamble text in the same message,
+         ;; gptel fires the text callback before `gptel--handle-tool-use'
+         ;; delivers the tool JSON.  Skip that non-JSON preamble while the
+         ;; tool call is still pending.
+         ((and schema
+               (stringp response)
+               (plist-get info :tool-use)
+               (null (org-sm-gptel--parse-json response)))
+          nil)
+         ((stringp response)
+          (funcall callback response nil))
+         (t
+          (funcall callback nil
+                   (format "%s" (or (plist-get info :status)
+                                    "AI request failed")))))))))
+
+(defun org-sm-gptel--clean-chat-reply (beg end)
+  "Return assistant reply in BEG..END without tool or reasoning blocks."
+  (let ((raw (buffer-substring-no-properties beg end)))
+    (string-trim
+     (replace-regexp-in-string
+      "\\(?:#\\+begin_\\(?:tool\\|reasoning\\)\\(?:.*\n\\)*?#\\+end_\\(?:tool\\|reasoning\\)\n?\\|``` *tool[^\n]*\n\\(?:.*\n\\)*?```\n?\\)"
+      "" raw))))
+
+(defun org-sm-gptel--open-chat (kind system message &optional callback)
   "Open the KIND chat for the current card and send MESSAGE to it.
 SYSTEM is the system prompt.  One chat per card, reused across calls, so
 a second question about another paragraph continues the conversation
-instead of starting over."
+instead of starting over.  When CALLBACK is non-nil, run without popping
+up a window and call CALLBACK with (REPLY ERR) when the response finishes."
   (let* ((heading  (save-excursion
                      (org-back-to-heading t)
                      (org-get-heading t t t t)))
@@ -283,15 +341,42 @@ instead of starting over."
       ;; the inbox -- every turn.
       (setq-local gptel-system-prompt system
                   gptel-context nil)
-      (if (org-sm-gptel--draft-p)
-          (message "org-sm: 聊天里有未发送的草稿，先发送或删除它")
+      (cond
+       ((org-sm-gptel--draft-p)
+        (if callback
+            (funcall callback nil "unsent draft in chat buffer")
+          (message "org-sm: 聊天里有未发送的草稿，先发送或删除它")))
+       ((and (fboundp 'gptel--fsm-live-p) (gptel--fsm-live-p))
+        (if callback
+            (funcall callback nil "chat request already in progress")
+          (message "org-sm: 聊天正在等待回复")))
+       (t
         (goto-char (point-max))
-        (unless (bolp) (insert "\n"))
-        (insert message)
-        (gptel-send)))
-    (display-buffer chat-buf
-                    '(display-buffer-in-side-window
-                      (side . right) (window-width . 0.45)))))
+        (let ((pos (point)))
+          (unless (bolp) (insert "\n"))
+          (insert message)
+          (if (not callback)
+              (gptel-send)
+            (let ((gptel-confirm-tool-calls nil))
+              (letrec ((done (lambda (beg end)
+                               (remove-hook 'gptel-post-response-functions done t)
+                               (let ((reply (and beg end (<= beg end)
+                                                 (org-sm-gptel--clean-chat-reply beg end))))
+                                 (if (org-string-nw-p reply)
+                                     (funcall callback reply nil)
+                                   (delete-region pos (point-max))
+                                   (funcall callback nil "empty response"))))))
+                (add-hook 'gptel-post-response-functions done nil t)
+                (condition-case err
+                    (gptel-send)
+                  (error
+                   (remove-hook 'gptel-post-response-functions done t)
+                   (delete-region pos (point-max))
+                   (signal (car err) (cdr err)))))))))))
+    (unless callback
+      (display-buffer chat-buf
+                      '(display-buffer-in-side-window
+                        (side . right) (window-width . 0.45))))))
 
 ;;;; ---- Commands ------------------------------------------------------------
 
@@ -337,6 +422,34 @@ and vault directory so it can pull wider context on demand."
                      "，")
                     "。若以上上下文不够，可主动用 Read 读取该文件相邻部分、用 Grep 搜索笔记库，或按需查 PDF / Zotero 原书。】")))))))
 
+(defun org-sm-gptel-explain-card (&optional beg end reply callback)
+  "Explain BEG..END of card at point (or send follow-up REPLY) in its chat.
+Uses the card's `*org-sm-explain: ...*' buffer with `org-sm-gptel-agent-preset'
+tools enabled.  When CALLBACK is non-nil, call it with (PASSAGE ANSWER ERR);
+otherwise display the chat side window."
+  (let* ((followup (org-string-nw-p reply))
+         (pair     (unless followup (org-sm-gptel--passage beg end)))
+         (passage  (car pair))
+         (msg      (if followup
+                       (string-trim reply)
+                     (when (and callback (string-blank-p (or passage "")))
+                       (user-error "Nothing to explain"))
+                     (let ((origin (org-sm-gptel--origin-block (org-sm-extract-origin)))
+                           (coords (org-sm-gptel--card-coordinates)))
+                       (concat
+                        "我读到这一段卡住了，请按三层极简解释（重点②③，①一句带过，不要制卡、不要总结）：\n\n"
+                        "#+begin_quote\n" passage "\n#+end_quote\n\n"
+                        "【前后文，供理解，不必解释】\n#+begin_example\n" (cdr pair) "\n#+end_example"
+                        (when origin (concat "\n\n【这张卡在原文里的位置】\n" origin))
+                        (when coords (concat "\n\n" coords))))))
+         (sys      (concat org-sm-gptel-system-explain "\n\n" org-sm-gptel-style)))
+    (if callback
+        (org-sm-gptel--open-chat
+         "explain" sys msg
+         (lambda (ans err)
+           (funcall callback passage ans err)))
+      (org-sm-gptel--open-chat "explain" sys msg))))
+
 ;;;###autoload
 (defun org-sm-gptel-explain ()
   "Explain the paragraph at point, or the region, in this card's chat.
@@ -346,17 +459,7 @@ search.  Applies `org-sm-gptel-agent-preset' so the AI can consult book
 skills, read PDF pages or query Zotero, and search the vault when the
 immediate neighbourhood is not enough."
   (interactive)
-  (pcase-let ((`(,passage . ,context) (org-sm-gptel--passage))
-              (origin (org-sm-gptel--origin-block (org-sm-extract-origin)))
-              (coords (org-sm-gptel--card-coordinates)))
-    (org-sm-gptel--open-chat
-     "explain" (concat org-sm-gptel-system-explain "\n\n" org-sm-gptel-style)
-     (concat
-      "我读到这一段卡住了，请按三层极简解释（重点②③，①一句带过，不要制卡、不要总结）：\n\n"
-      "#+begin_quote\n" passage "\n#+end_quote\n\n"
-      "【前后文，供理解，不必解释】\n#+begin_example\n" context "\n#+end_example"
-      (when origin (concat "\n\n【这张卡在原文里的位置】\n" origin))
-      (when coords (concat "\n\n" coords))))))
+  (org-sm-gptel-explain-card))
 
 ;;;; ---- Suggestions: the AI underlines, the reader extracts ------------------
 
@@ -392,29 +495,58 @@ so an already highlighted passage can still be found."
 
 (defun org-sm-gptel--parse-picks (response)
   "Return the (QUOTE . WHY) pairs in RESPONSE, nil when it cannot be read."
-  (when (stringp response)
-    (let ((data (ignore-errors
-                  (json-parse-string response :object-type 'plist
-                                     :array-type 'list))))
-      (delq nil (mapcar (lambda (p)
-                          (let ((q (plist-get p :quote)) (w (plist-get p :why)))
-                            (and (stringp q) (stringp w) (cons q w))))
-                        (plist-get data :picks))))))
+  (when-let* ((data (org-sm-gptel--parse-json response)))
+    (delq nil (mapcar (lambda (p)
+                        (let ((q (plist-get p :quote)) (w (plist-get p :why)))
+                          (and (stringp q) (stringp w) (cons q w))))
+                      (plist-get data :picks)))))
+
+(defun org-sm-gptel--resolve-picks (picks beg end)
+  "Locate PICKS within BEG..END as 0-based (:start S :end E :quote Q :why W).
+Drops any pick whose quote cannot be found or overlaps an already-extracted
+`⌈...[[id:...][<T>/<C>]]' span."
+  (let (out)
+    (dolist (pick picks (nreverse out))
+      (when-let* ((span (org-sm-gptel--locate (car pick) beg end))
+                  (slice (buffer-substring-no-properties (car span) (cdr span))))
+        (unless (string-match-p "⌈\\|\\[\\[id:[^]\n]+\\]\\[<[TC]>\\]\\]" slice)
+          (push (list :start (- (car span) beg)
+                      :end   (- (cdr span) beg)
+                      :quote slice
+                      :why   (cdr pick))
+                out))))))
+
+(defun org-sm-gptel--draw-resolved-picks (resolved beg end)
+  "Draw already-resolved 0-based PICKS within BEG..END; return count drawn."
+  (org-sm-pencils-clear beg end)
+  (dolist (p resolved (length resolved))
+    (org-sm-pencil-add (+ beg (plist-get p :start))
+                       (+ beg (plist-get p :end))
+                       (plist-get p :why))))
 
 (defun org-sm-gptel--draw-picks (picks beg end)
   "Underline PICKS found between BEG and END; return how many were drawn.
 A pick whose quote is not in the text, or that overlaps an already-extracted
 `⌈...[[id:...][<T>/<C>]]' span, is dropped: a suggestion must point at
 unextracted text the reader can see."
-  (org-sm-pencils-clear beg end)
-  (let ((n 0))
-    (dolist (pick picks)
-      (when-let* ((span (org-sm-gptel--locate (car pick) beg end))
-                  (slice (buffer-substring-no-properties (car span) (cdr span))))
-        (unless (string-match-p "⌈\\|\\[\\[id:[^]\n]+\\]\\[<[TC]>\\]\\]" slice)
-          (org-sm-pencil-add (car span) (cdr span) (cdr pick))
-          (setq n (1+ n)))))
-    n))
+  (org-sm-gptel--draw-resolved-picks
+   (org-sm-gptel--resolve-picks picks beg end) beg end))
+
+(defun org-sm-gptel-request-suggest (text callback)
+  "Ask the AI for verbatim extraction picks in TEXT and call CALLBACK.
+Resolves quotes against TEXT at the seam; CALLBACK receives (PICKS ERR) where
+each pick is a 0-based (:start S :end E :quote Q :why W) plist."
+  (org-sm-gptel--request
+   text org-sm-gptel-system-suggest org-sm-gptel--suggest-schema
+   (lambda (response err)
+     (if err
+         (funcall callback nil err)
+       (let ((raw (org-sm-gptel--parse-picks response)))
+         (funcall callback
+                  (with-temp-buffer
+                    (insert text)
+                    (org-sm-gptel--resolve-picks raw (point-min) (point-max)))
+                  nil))))))
 
 ;;;###autoload
 (defun org-sm-gptel-suggest ()
@@ -432,26 +564,18 @@ underlines vanish with the buffer, so nothing half-decided reaches a file."
          (buf (current-buffer)))
     (when (string-blank-p text) (user-error "Nothing to read here"))
     (message "org-sm: 找值得摘的段落...")
-    (let ((gptel-use-context nil)
-          (gptel-use-tools nil))
-      (gptel-request text
-        :system org-sm-gptel-system-suggest
-        :schema org-sm-gptel--suggest-schema
-        :transforms nil
-        :callback
-        (lambda (response info)
-          (cond
-           ((not (buffer-live-p buf)) nil)
-           ((not (stringp response))
-            (message "org-sm AI failed: %s" (plist-get info :status)))
-           (t
-            (with-current-buffer buf
-              (let ((n (org-sm-gptel--draw-picks
-                        (org-sm-gptel--parse-picks response) beg end)))
-                (if (zerop n)
-                    (message "org-sm: 这一屏没有值得单独摘的")
-                  (goto-char beg)
-                  (org-sm-pencil-next)))))))))))
+    (org-sm-gptel-request-suggest
+     text
+     (lambda (picks err)
+       (cond
+        ((not (buffer-live-p buf)) nil)
+        (err (message "org-sm AI failed: %s" err))
+        (t
+         (with-current-buffer buf
+           (if (zerop (org-sm-gptel--draw-resolved-picks picks beg end))
+               (message "org-sm: 这一屏没有值得单独摘的")
+             (goto-char beg)
+             (org-sm-pencil-next)))))))))
 
 ;;;; ---- Rewriting a body in the workbench -------------------------------------
 
@@ -471,40 +595,109 @@ underlines vanish with the buffer, so nothing half-decided reaches a file."
 
 (defun org-sm-gptel--parse-card-response (response)
   "Return (BODY . PICKS) in RESPONSE, or nil when it cannot be read."
-  (when (stringp response)
-    (let* ((data (ignore-errors
-                   (json-parse-string response :object-type 'plist
-                                      :array-type 'list)))
-           (body (plist-get data :body)))
-      (when (and (stringp body) (org-string-nw-p body))
-        (cons (string-trim body) (org-sm-gptel--parse-picks response))))))
+  (when-let* ((data (org-sm-gptel--parse-json response))
+              (body (plist-get data :body))
+              ((and (stringp body) (org-string-nw-p body))))
+    (cons (string-trim body) (org-sm-gptel--parse-picks response))))
+
+(defun org-sm-gptel--span-context (bounds full)
+  "Return (BEFORE . AFTER) around BOUNDS within FULL bounds, or nil."
+  (let ((beg (car bounds)) (end (cdr bounds))
+        (full-beg (car full)) (full-end (cdr full)))
+    (when (or (> beg full-beg) (< end full-end))
+      (let ((before (string-trim
+                     (buffer-substring-no-properties
+                      (max full-beg (- beg org-sm-extract-origin-chars)) beg)))
+            (after  (string-trim
+                     (buffer-substring-no-properties
+                      end (min full-end (+ end org-sm-extract-origin-chars))))))
+        (when (or (org-string-nw-p before) (org-string-nw-p after))
+          (cons (or before "") (or after "")))))))
 
 (defun org-sm-gptel--card-request (text type mode custom callback)
   "Ask the AI to rewrite TEXT per MODE and call CALLBACK with the result.
 TYPE and MODE/CUSTOM select the system prompt (see
-`org-sm-gptel--card-system').  CALLBACK receives (BODY PICKS ERR).
+`org-sm-gptel--card-system').  CALLBACK receives (BODY PICKS ERR)."
+  (org-sm-gptel--request
+   text (org-sm-gptel--card-system type mode custom) org-sm-gptel--card-schema
+   (lambda (response err)
+     (if err
+         (funcall callback nil nil err)
+       (let ((parsed (org-sm-gptel--parse-card-response response)))
+         (cond
+          ((null parsed)
+           (funcall callback nil nil "parse failed"))
+          ((and (eq type 'cloze)
+                (not (string-match-p "{{[^}\n]+}}" (car parsed))))
+           (funcall callback nil nil "AI dropped {{cloze}} markers; draft kept"))
+          (t
+           (funcall callback (car parsed) (cdr parsed) nil))))))))
 
-Context is bound here rather than inherited: with added context and agent
-tools off and no prompt transforms, this stays one plain text-in, JSON-out
-request that never picks up whatever the user attached elsewhere."
-  (let ((gptel-use-context nil)
-        (gptel-use-tools nil))
-    (gptel-request text
-      :system (org-sm-gptel--card-system type mode custom)
-      :schema org-sm-gptel--card-schema
-      :transforms nil
-      :callback
-      (lambda (response info)
-        (let ((parsed (org-sm-gptel--parse-card-response response)))
-          (cond
-           ((null parsed)
-            (funcall callback nil nil (if (stringp response) "parse failed"
-                                        (format "%s" (plist-get info :status)))))
-           ((and (eq type 'cloze)
-                 (not (string-match-p "{{[^}\n]+}}" (car parsed))))
-            (funcall callback nil nil "AI dropped {{cloze}} markers; draft kept"))
-           (t
-            (funcall callback (car parsed) (cdr parsed) nil))))))))
+(defun org-sm-gptel--rewrite-span (bounds full type origin mode custom callback)
+  "Rewrite buffer BOUNDS within FULL bounds and call CALLBACK.
+Assembles local surrounding context (when BOUNDS is a sub-span of FULL) plus
+parent ORIGIN, then dispatches `org-sm-gptel--card-request'."
+  (let* ((mode-sym (pcase mode
+                     ((or 'refine "refine") 'refine)
+                     ((or 'simplify "simplify") 'simplify)
+                     ((or 'custom "custom") 'custom)
+                     (_ (user-error "Unknown AI rewrite mode: %s" mode))))
+         (raw      (string-trim (buffer-substring-no-properties
+                                 (car bounds) (cdr bounds))))
+         (local    (org-sm-gptel--span-context bounds full))
+         (ctx      (string-join
+                    (delq nil (list (org-sm-gptel--origin-block local)
+                                    (org-sm-gptel--origin-block origin)))
+                    "\n\n")))
+    (when (and (eq mode-sym 'custom) (string-blank-p (or custom "")))
+      (user-error "Custom mode needs a prompt"))
+    (when (string-empty-p raw)
+      (user-error "No body text to rewrite"))
+    (org-sm-gptel--card-request
+     (if (org-string-nw-p ctx)
+         (concat raw "\n\n【出处上下文：只用来补全正文里的代词和省略的主语，"
+                 "其中的其他内容不要写进正文】\n" ctx)
+       raw)
+     type mode-sym custom callback)))
+
+(defun org-sm-gptel-request-rewrite (text mode custom start end callback)
+  "Rewrite draft TEXT (or START..END in it) for card at point and call CALLBACK.
+Resolves parent extract origin, splices region rewrites back into TEXT, and
+resolves picks into 0-based (:start S :end E :quote Q :why W) offsets in the
+returned full body.  CALLBACK receives (BODY PICKS ERR)."
+  (unless (org-string-nw-p text)
+    (user-error "No body text to rewrite"))
+  (let* ((type   (org-sm-type))
+         (origin (org-sm-extract-origin))
+         (len    (length text))
+         (sub-p  (and start end))
+         (s      (or start 0))
+         (e      (or end len)))
+    (unless (and (<= 0 s e len) (< s e))
+      (user-error "Selection out of range"))
+    (with-temp-buffer
+      (insert text)
+      (org-sm-gptel--rewrite-span
+       (cons (+ (point-min) s) (+ (point-min) e))
+       (cons (point-min) (point-max))
+       type origin mode custom
+       (lambda (body picks err)
+         (if err
+             (funcall callback nil nil err)
+           (let* ((final (if sub-p
+                             (concat (substring text 0 s) body (substring text e))
+                           body))
+                  (resolved (with-temp-buffer
+                              (insert body)
+                              (mapcar
+                               (lambda (p)
+                                 (list :start (+ s (plist-get p :start))
+                                       :end   (+ s (plist-get p :end))
+                                       :quote (plist-get p :quote)
+                                       :why   (plist-get p :why)))
+                               (org-sm-gptel--resolve-picks
+                                picks (point-min) (point-max))))))
+             (funcall callback final resolved nil))))))))
 
 ;;;###autoload
 (defun org-sm-gptel-card-ai ()
@@ -521,77 +714,52 @@ back and extracts the surviving underlines in place."
   (interactive)
   (org-sm-gptel--workbench-only)
   (let* ((region (use-region-p))
-         (bounds (if region
-                     (cons (region-beginning) (region-end))
-                   (org-sm-capture-preamble-bounds)))
-         (raw    (string-trim (buffer-substring-no-properties
-                               (car bounds) (cdr bounds))))
+         (full   (org-sm-capture-preamble-bounds))
+         (bounds (if region (cons (region-beginning) (region-end)) full))
          (label  (completing-read (if region "AI 动作（选区）：" "AI 动作：")
                                   (mapcar #'car org-sm-gptel--card-modes)
                                   nil t))
          (mode   (or (cdr (assoc label org-sm-gptel--card-modes)) 'custom))
-         (custom (and (eq mode 'custom) (read-string "提示词："))))
-    (when (and (eq mode 'custom) (string-blank-p (or custom "")))
-      (user-error "Custom mode needs a prompt"))
-    (when (string-empty-p raw) (user-error "No body text to rewrite"))
+         (custom (and (eq mode 'custom) (read-string "提示词：")))
+         (beg    (car bounds))
+         (end    (cdr bounds))
+         (origin (when-let* ((card (org-sm--capture-live-marker)))
+                   (org-with-point-at card (org-sm-extract-origin))))
+         (buf    (current-buffer))
+         (tick   (buffer-chars-modified-tick))
+         (serial (cl-incf org-sm-gptel--request-serial)))
     (when region (deactivate-mark))
-    (let* ((beg    (car bounds))
-           (end    (cdr bounds))
-           (full   (org-sm-capture-preamble-bounds))
-           (before (and region
-                        (string-trim
-                         (buffer-substring-no-properties
-                          (max (car full) (- beg org-sm-extract-origin-chars))
-                          beg))))
-           (after  (and region
-                        (string-trim
-                         (buffer-substring-no-properties
-                          end
-                          (min (cdr full) (+ end org-sm-extract-origin-chars))))))
-           (local  (and (or (org-string-nw-p before) (org-string-nw-p after))
-                        (org-sm-gptel--origin-block (cons (or before "") (or after "")))))
-           (origin (org-sm-gptel--origin-block
-                    (when-let* ((card (org-sm--capture-live-marker)))
-                      (org-with-point-at card (org-sm-extract-origin)))))
-           (ctx    (string-join (delq nil (list local origin)) "\n\n"))
-           (buf    (current-buffer))
-           (tick   (buffer-chars-modified-tick))
-           (serial (cl-incf org-sm-gptel--request-serial)))
-      (message "org-sm: asking AI (%s)..." label)
-      (org-sm-gptel--card-request
-       (if (org-string-nw-p ctx)
-           (concat raw "\n\n【出处上下文：只用来补全正文里的代词和省略的主语，"
-                   "其中的其他内容不要写进正文】\n" ctx)
-         raw)
-       org-sm-capture-card-type mode custom
-       (lambda (body picks err)
-         (cond
-          (err (message "org-sm AI failed: %s" err))
-          ((not (buffer-live-p buf)) (message "org-sm AI: buffer gone"))
-          ;; An async reply must never clobber what the user typed meanwhile.
-          ((with-current-buffer buf
-             (or (/= serial org-sm-gptel--request-serial)
-                 (/= tick (buffer-chars-modified-tick))))
-           (message "org-sm AI: draft changed or newer request exists; result ignored"))
-          (t
-           (with-current-buffer buf
-             (let (span-beg span-end)
-               (if region
-                   (progn
-                     (org-sm-pencils-clear beg end)
-                     (goto-char beg)
-                     (delete-region beg end)
-                     (insert (string-trim body))
-                     (setq span-beg beg span-end (point)))
-                 (org-sm-capture-set-preamble body)
-                 (setq span-beg (point-min) span-end (point-max)))
-               (let ((n (org-sm-gptel--draw-picks picks span-beg span-end)))
-                 (if (> n 0)
-                     (progn (goto-char span-beg) (org-sm-pencil-next))
-                   (goto-char span-beg)
-                   (message "%s" (substitute-command-keys
-                                  (format "org-sm: AI %s done — edit, then \\<org-sm-capture-mode-map>\\[org-sm-capture-commit]"
-                                          label))))))))))))))
+    (message "org-sm: asking AI (%s)..." label)
+    (org-sm-gptel--rewrite-span
+     bounds full org-sm-capture-card-type origin mode custom
+     (lambda (body picks err)
+       (cond
+        (err (message "org-sm AI failed: %s" err))
+        ((not (buffer-live-p buf)) (message "org-sm AI: buffer gone"))
+        ;; An async reply must never clobber what the user typed meanwhile.
+        ((with-current-buffer buf
+           (or (/= serial org-sm-gptel--request-serial)
+               (/= tick (buffer-chars-modified-tick))))
+         (message "org-sm AI: draft changed or newer request exists; result ignored"))
+        (t
+         (with-current-buffer buf
+           (let (span-beg span-end)
+             (if region
+                 (progn
+                   (org-sm-pencils-clear beg end)
+                   (goto-char beg)
+                   (delete-region beg end)
+                   (insert (string-trim body))
+                   (setq span-beg beg span-end (point)))
+               (org-sm-capture-set-preamble body)
+               (setq span-beg (point-min) span-end (point-max)))
+             (let ((n (org-sm-gptel--draw-picks picks span-beg span-end)))
+               (if (> n 0)
+                   (progn (goto-char span-beg) (org-sm-pencil-next))
+                 (goto-char span-beg)
+                 (message "%s" (substitute-command-keys
+                                (format "org-sm: AI %s done — edit, then \\<org-sm-capture-mode-map>\\[org-sm-capture-commit]"
+                                        label)))))))))))))
 
 ;; Wire the AI actions into the workbench and the review repeat map.
 (with-eval-after-load 'org-sm

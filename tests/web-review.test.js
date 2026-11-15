@@ -16,6 +16,8 @@ const context = vm.createContext({
     getElementById(id) {
       if (!elements.has(id)) elements.set(id, {
         value: '', selectionStart: 0, selectionEnd: 0,
+        innerHTML: '', textContent: '', scrollTop: 0, scrollHeight: 0,
+        style: {}, disabled: false,
         classList: { add() {}, remove() {}, contains: () => false },
         focus() {}, querySelectorAll: () => []
       });
@@ -68,6 +70,60 @@ const element = id => context.document.getElementById(id);
   assert.equal(calls[0].params.revision, 'v3');
   context.resolveReview({ 'interval-days': 3 });
   await Promise.all([first, second]);
+
+  // AI Suggest stores picks and selects the first candidate with its reason.
+  calls.length = 0;
+  evaluate(`State.queue = [{id:"c-ai", type:"topic", title:"T", body:"前文。关键因果句子。后文。", revision:"v1"}];
+    State.index = 0;
+    API.call = async (path, params) => {
+      globalThis.calls.push({path, params});
+      return {ok: true, picks: [{start: 3, end: 10, quote: "关键因果句子。", why: "核心机制"}]};
+    };`);
+  await evaluate('requestSuggest()');
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].path, /\/api\/ai\/suggest\/c-ai/);
+  assert.equal(evaluate('State.selection.why'), '核心机制');
+  assert.equal(evaluate('State.selection.start'), 3);
+  evaluate('dismissPick("c-ai", State.selection)');
+  assert.equal(evaluate('State.picksByCard["c-ai"].length'), 0);
+  assert.equal(evaluate('State.selection'), null);
+
+  // AI Rewrite converts UTF-16 selection offsets to code-point offsets and
+  // refuses to overwrite manual edits made while the request is in flight.
+  calls.length = 0;
+  element('edit-body').value = '😀第一段。需要改写的第二段。';
+  element('edit-body').selectionStart = 6; // after '😀' (2 UTF-16 units) + '第一段。' (4)
+  element('edit-body').selectionEnd = 15;
+  evaluate(`API.call = (path, params) => {
+    globalThis.calls.push({path, params});
+    return new Promise(resolve => { globalThis.resolveRewrite = resolve; });
+  };`);
+  const rw1 = evaluate('toolAiRewrite("refine")');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].params.start, '5', 'emoji counts as 1 code point');
+  assert.equal(calls[0].params.end, '14');
+  // User edits textarea before AI finishes -> AI result must be ignored.
+  element('edit-body').value = '😀用户手动改了草稿';
+  context.resolveRewrite({ ok: true, body: 'AI覆盖结果', picks: [] });
+  await rw1;
+  assert.equal(element('edit-body').value, '😀用户手动改了草稿');
+
+  // Explain sheet initializes and sends follow-up reply to the Emacs chat buffer.
+  calls.length = 0;
+  evaluate(`API.call = async (path, params) => {
+    globalThis.calls.push({path, params});
+    if (params.reply) return {ok: true, reply: "回答正确"};
+    return {ok: true, passage: "关键因果句子。", reply: "① 定义..."};
+  };`);
+  await evaluate('openExplainSheet({start: 3, end: 10, text: "关键因果句子。"})');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].params.start, '3');
+  element('explain-input').value = '去掉前提就不成立';
+  await evaluate('sendExplainFollowup()');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].params.reply, '去掉前提就不成立');
+  assert.equal(evaluate('State.chatsByCard["c-ai"].turns.length'), 3);
+
   console.log('web review interaction tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 
@@ -120,3 +176,21 @@ console.log("reading tests passed");
   assert.equal(toks[toks.length - 1].end, Array.from(body).length);
 }
 console.log("bracket tests passed");
+
+// applyPicksToTokens splits plain text around AI picks while preserving exact offsets.
+{
+  const body = "⌈已摘录[[id:x][<T>]] 前文。核心机制句子。后文。";
+  const base = evaluate(`tokenizeBody(${JSON.stringify(body)}, false)`);
+  const pickStart = Array.from("⌈已摘录[[id:x][<T>]] 前文。").length;
+  const pickEnd = pickStart + Array.from("核心机制句子。").length;
+  const withPicks = evaluate(
+    `applyPicksToTokens(${JSON.stringify(base)}, [{start:${pickStart}, end:${pickEnd}, why:"核心"}])`
+  );
+  const pickTok = withPicks.find(t => t.kind === "pick");
+  assert.ok(pickTok);
+  assert.equal(pickTok.text, "核心机制句子。");
+  assert.equal(pickTok.start, pickStart);
+  assert.equal(pickTok.end, pickEnd);
+  assert.equal(withPicks[withPicks.length - 1].end, Array.from(body).length);
+}
+console.log("AI pick token tests passed");

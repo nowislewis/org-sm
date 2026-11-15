@@ -299,6 +299,11 @@ Local-network mobile UI (requires [[https://github.com/skeeto/emacs-web-server][
   (~POST /api/readpoint/:id~), priority buttons ~A~ / ~B~ / ~C~
   (~POST /api/priority/:id~), allowlisted image serving (~GET /api/image~), and
   revision-checked edits (~POST /api/patch/:id~).
+- Shares ~org-sm-gptel~'s three AI actions asynchronously via
+  ~httpd-discard-buffer~: wavy-underline extraction suggestions
+  (~POST /api/ai/suggest/:id~), draft/selection rewriting in the edit sheet
+  (~POST /api/ai/rewrite/:id~), and multi-turn why-first explanations
+  (~POST /api/ai/explain/:id~).
 
 * Extension Interfaces
 
