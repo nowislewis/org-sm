@@ -71,26 +71,11 @@ const element = id => context.document.getElementById(id);
   context.resolveReview({ 'interval-days': 3 });
   await Promise.all([first, second]);
 
-  // AI Suggest stores picks and selects the first candidate with its reason.
-  calls.length = 0;
-  evaluate(`State.queue = [{id:"c-ai", type:"topic", title:"T", body:"前文。关键因果句子。后文。", revision:"v1"}];
-    State.index = 0;
-    API.call = async (path, params) => {
-      globalThis.calls.push({path, params});
-      return {ok: true, picks: [{start: 3, end: 10, quote: "关键因果句子。", why: "核心机制"}]};
-    };`);
-  await evaluate('requestSuggest()');
-  assert.equal(calls.length, 1);
-  assert.match(calls[0].path, /\/api\/ai\/suggest\/c-ai/);
-  assert.equal(evaluate('State.selection.why'), '核心机制');
-  assert.equal(evaluate('State.selection.start'), 3);
-  evaluate('dismissPick("c-ai", State.selection)');
-  assert.equal(evaluate('State.picksByCard["c-ai"].length'), 0);
-  assert.equal(evaluate('State.selection'), null);
-
   // AI Rewrite converts UTF-16 selection offsets to code-point offsets and
   // refuses to overwrite manual edits made while the request is in flight.
   calls.length = 0;
+  evaluate(`State.queue = [{id:"c-ai", type:"topic", title:"T", body:"前文。关键因果句子。后文。", revision:"v1"}];
+    State.index = 0;`);
   element('edit-body').value = '😀第一段。需要改写的第二段。';
   element('edit-body').selectionStart = 6; // after '😀' (2 UTF-16 units) + '第一段。' (4)
   element('edit-body').selectionEnd = 15;
@@ -108,9 +93,46 @@ const element = id => context.document.getElementById(id);
   await rw1;
   assert.equal(element('edit-body').value, '😀用户手动改了草稿');
 
+  // Workbench commit: AI refine populates picks in Edit Sheet, and saveEditSheet
+  // patches the body then extracts surviving picks from end to start.
+  calls.length = 0;
+  evaluate(`State.queue = [{id:"c-wb", type:"topic", title:"T", body:"旧正文", revision:"r1"}]; State.index = 0;`);
+  element('edit-title').value = 'T';
+  element('edit-body').value = '旧正文';
+  element('edit-body').selectionStart = 0;
+  element('edit-body').selectionEnd = 0;
+  evaluate(`API.call = async (path, params) => {
+    globalThis.calls.push({path, params});
+    if (path.includes('/ai/rewrite/')) {
+      return {
+        ok: true,
+        body: "第一句。核心句A。核心句B。",
+        picks: [
+          {start: 4, end: 9, quote: "核心句A。", why: "原因A"},
+          {start: 9, end: 14, quote: "核心句B。", why: "原因B"}
+        ]
+      };
+    }
+    if (path.includes('/patch/')) {
+      return {ok: true, title: "T", body: params.body, revision: "r2"};
+    }
+    if (path.includes('/extract/')) {
+      return {ok: true, parent: {title: "T", body: "extracted", revision: params.revision + "x"}};
+    }
+  };`);
+  await evaluate('toolAiRewrite("refine")');
+  assert.equal(evaluate('State.pendingEditPicks.length'), 2);
+  await evaluate('saveEditSheet()');
+  // 1 rewrite + 1 patch + 2 extracts (end-to-start: B at [9,14] first, then A at [4,9])
+  assert.equal(calls.length, 4);
+  assert.match(calls[1].path, /\/api\/patch\/c-wb/);
+  assert.equal(calls[2].params.start, '9', 'extracts from end to start');
+  assert.equal(calls[3].params.start, '4');
+
   // Explain sheet initializes and sends follow-up reply to the Emacs chat buffer.
   calls.length = 0;
-  evaluate(`API.call = async (path, params) => {
+  evaluate(`State.queue = [{id:"c-ai", type:"topic", title:"T", body:"前文。关键因果句子。后文。", revision:"v1"}];
+    API.call = async (path, params) => {
     globalThis.calls.push({path, params});
     if (params.reply) return {ok: true, reply: "回答正确"};
     return {ok: true, passage: "关键因果句子。", reply: "① 定义..."};
@@ -176,21 +198,3 @@ console.log("reading tests passed");
   assert.equal(toks[toks.length - 1].end, Array.from(body).length);
 }
 console.log("bracket tests passed");
-
-// applyPicksToTokens splits plain text around AI picks while preserving exact offsets.
-{
-  const body = "⌈已摘录[[id:x][<T>]] 前文。核心机制句子。后文。";
-  const base = evaluate(`tokenizeBody(${JSON.stringify(body)}, false)`);
-  const pickStart = Array.from("⌈已摘录[[id:x][<T>]] 前文。").length;
-  const pickEnd = pickStart + Array.from("核心机制句子。").length;
-  const withPicks = evaluate(
-    `applyPicksToTokens(${JSON.stringify(base)}, [{start:${pickStart}, end:${pickEnd}, why:"核心"}])`
-  );
-  const pickTok = withPicks.find(t => t.kind === "pick");
-  assert.ok(pickTok);
-  assert.equal(pickTok.text, "核心机制句子。");
-  assert.equal(pickTok.start, pickStart);
-  assert.equal(pickTok.end, pickEnd);
-  assert.equal(withPicks[withPicks.length - 1].end, Array.from(body).length);
-}
-console.log("AI pick token tests passed");

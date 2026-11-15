@@ -1,4 +1,4 @@
-;;; org-sm-gptel-test.el --- AI actions: suggest, explain, rewrite -*- lexical-binding: t; -*-
+;;; org-sm-gptel-test.el --- AI actions: explain and workbench rewrite -*- lexical-binding: t; -*-
 
 (require 'ert)
 (let ((root (file-name-directory (or load-file-name buffer-file-name))))
@@ -21,7 +21,7 @@
          (kill-buffer buf))
        (delete-file file))))
 
-;;;; ---- Suggest: the AI quotes, the reader extracts ------------------------
+;;;; ---- Inline underline picks: the AI quotes, the reader extracts ----------
 
 (ert-deftest org-sm-gptel-test-locate-is-exact-then-loose ()
   (with-temp-buffer
@@ -38,7 +38,7 @@
     ;; Hallucinated: not in the text, so no span at all.
     (should-not (org-sm-gptel--locate "A sentence that never appears." 1 (point-max)))))
 
-(ert-deftest org-sm-gptel-test-suggest-draws-only-real-quotes ()
+(ert-deftest org-sm-gptel-test-draw-picks-keeps-only-unextracted-quotes ()
   (org-sm-gptel-test--with-card
       "⌈已摘过的第一句。[[id:old][<T>]]\n\n缓存子问题的解，避免重复计算。\n\n例子从略。"
     (let ((beg (point)) (end (point-max)))
@@ -54,31 +54,6 @@
         (should (equal (overlay-get ov 'org-sm-pencil) "核心机制")))
       ;; Underlines are display only: the text is untouched.
       (should-not (string-match-p "核心机制" (buffer-string))))))
-
-(ert-deftest org-sm-gptel-test-accepting-a-pencil-is-a-normal-extract ()
-  (org-sm-gptel-test--with-card
-      "引言。\n\n缓存子问题的解，避免重复计算。\n\n结尾。"
-    (org-sm-gptel--draw-picks '(("缓存子问题的解，避免重复计算。" . "核心")) (point) (point-max))
-    (goto-char (overlay-start (car (org-sm-pencils))))
-    (org-sm-pencil-accept)
-    (should (null (org-sm-pencils)))
-    (goto-char (point-min))
-    ;; Same evidence as a manual extract: highlighted in place, child below.
-    (should (string-match-p "⌈缓存子问题的解，避免重复计算。\\[\\[id:[^]]+\\]\\[<T>\\]\\]"
-                            (org-sm-body-text)))
-    (should (= (plist-get (org-sm-card-at-point) :child-topics) 1))))
-
-(ert-deftest org-sm-gptel-test-suggest-sends-only-the-reading-span ()
-  (org-sm-gptel-test--with-card "第一段。\n\n第二段很重要。\n\n第三段。"
-    (let (sent)
-      (cl-letf (((symbol-function 'gptel-request)
-                 (lambda (text &rest _) (setq sent text))))
-        (search-forward "第二段")
-        (set-mark (line-beginning-position))
-        (goto-char (line-end-position))
-        (activate-mark)
-        (org-sm-gptel-suggest))
-      (should (equal sent "第二段很重要。")))))
 
 ;;;; ---- Explain: the paragraph, with its neighbourhood ----------------------
 
@@ -269,8 +244,6 @@
                  (lambda (_kind sys _msg) (setq system sys))))
         (org-sm-gptel-explain))
       (should (string-search org-sm-gptel-style system))))
-  ;; ... but suggestions quote verbatim, so their prompt must not ask for rewriting.
-  (should-not (string-search org-sm-gptel-style org-sm-gptel-system-suggest))
   ;; The explain prompt no longer sends the model after a retired skill.
   (should-not (string-match-p "learning-coach" org-sm-gptel-system-explain)))
 

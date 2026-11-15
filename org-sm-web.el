@@ -30,7 +30,6 @@
 (require 'simple-httpd)
 (require 'org-sm)
 
-(declare-function org-sm-gptel-request-suggest "org-sm-gptel")
 (declare-function org-sm-gptel-request-rewrite "org-sm-gptel")
 (declare-function org-sm-gptel-explain-card "org-sm-gptel")
 
@@ -69,6 +68,9 @@ or a trusted LAN.  A token in an HTTP URL does not replace TLS."
 
 (defvar org-sm-web--token nil
   "Token actually enforced by the running server, or nil.")
+
+(defvar org-sm-web--httpd-buffer nil
+  "Active `httpd-with-buffer' response buffer for the current servlet call.")
 
 (defvar org-sm-web-hud-function nil
   "Optional function returning climb and relic HUD plist for the web UI.
@@ -214,27 +216,28 @@ suppresses that auto-send.  Raw `error-message-string' is never echoed, because
 on a LAN-facing server it leaks absolute filesystem paths."
   (declare (indent 2) (debug (form sexp body)))
   `(httpd-servlet* ,endpoint application/json ,args
-     (condition-case err
-         (progn
-           (org-sm-web--authorize!)
-           (unless (equal (caar httpd-request)
-                          ,(if (memq endpoint '(api/session api/hud api/git/diff)) "GET" "POST"))
-             (user-error "Wrong HTTP method"))
-           (let ((res (progn ,@body)))
-             (unless httpd--header-sent
-               (insert (org-sm-web--json res)))))
-       (org-sm-web-denied
-        (insert (org-sm-web--json (list :error "unauthorized")))
-        (httpd-send-header t 'application/json 401))
-       (org-sm-web-conflict
-        ;; The one error the browser must tell apart: it has to keep the user's
-        ;; text and show it against the newer server copy instead of retrying.
-        (insert (org-sm-web--json (list :error "conflict" :retry nil)))
-        (httpd-send-header t 'application/json 409))
-       (error
-        (httpd-log `(error ,(error-message-string err) ,(car err)))
-        (insert (org-sm-web--json (list :error "bad request")))
-        (httpd-send-header t 'application/json 400)))))
+     (let ((org-sm-web--httpd-buffer (current-buffer)))
+       (condition-case err
+           (progn
+             (org-sm-web--authorize!)
+             (unless (equal (caar httpd-request)
+                            ,(if (memq endpoint '(api/session api/hud api/git/diff)) "GET" "POST"))
+               (user-error "Wrong HTTP method"))
+             (let ((res (progn ,@body)))
+               (unless httpd--header-sent
+                 (insert (org-sm-web--json res)))))
+         (org-sm-web-denied
+          (insert (org-sm-web--json (list :error "unauthorized")))
+          (httpd-send-header t 'application/json 401))
+         (org-sm-web-conflict
+          ;; The one error the browser must tell apart: it has to keep the user's
+          ;; text and show it against the newer server copy instead of retrying.
+          (insert (org-sm-web--json (list :error "conflict" :retry nil)))
+          (httpd-send-header t 'application/json 409))
+         (error
+          (httpd-log `(error ,(error-message-string err) ,(car err)))
+          (insert (org-sm-web--json (list :error "bad request")))
+          (httpd-send-header t 'application/json 400))))))
 
 (org-sm-web--json-servlet api/session ()
   (list :cards (org-sm-web--session)
@@ -368,8 +371,9 @@ extract on such a card would silently mark the wrong span."
   "Require `org-sm-gptel', defer HTTP response, and pass responder to FN."
   (unless (featurep 'org-sm-gptel)
     (user-error "org-sm-gptel is not loaded"))
-  (let ((proc (httpd-discard-buffer)))
-    (setq httpd--buffer-proc nil)
+  (let ((proc (with-current-buffer (or org-sm-web--httpd-buffer (current-buffer))
+                (prog1 (httpd-discard-buffer)
+                  (setq httpd--buffer-proc nil)))))
     (funcall
      fn
      (lambda (payload &optional err)
@@ -400,20 +404,6 @@ extract on such a card would silently mark the wrong span."
             (user-error "Selection out of range"))
           (cons s e))
       (cons body-beg body-end))))
-
-(org-sm-web--json-servlet api/ai/suggest/:id ()
-  (org-sm-web--with-card id
-    (let ((text (org-sm-body-text)))
-      (when (string-blank-p text)
-        (user-error "Nothing to read here"))
-      (org-sm-web--async-reply
-       (lambda (done)
-         (org-sm-gptel-request-suggest
-          text
-          (lambda (picks err)
-            (funcall done
-                     (and (not err) (list :ok t :picks (vconcat picks)))
-                     err))))))))
 
 (org-sm-web--json-servlet api/ai/rewrite/:id (text mode custom start end)
   (org-sm-web--with-card id

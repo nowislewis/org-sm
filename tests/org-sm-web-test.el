@@ -171,48 +171,31 @@
       (should (string-match-p "alpha \\[\\[rp:card-fw\\]\\[📖\\]\\]beta"
                               (org-sm-body-text))))))
 
-;;;; ---- Browser AI: suggest, rewrite, explain ------------------------------
-
-(ert-deftest org-sm-web-test-ai-suggest-returns-cleaned-body-offsets ()
-  (with-temp-buffer
-    (org-mode)
-    (insert "* [T] Suggest\n:PROPERTIES:\n:ID: s1\n:SRS_TYPE: topic\n:END:\n\n"
-            "⌈已摘录首句。[[id:c1][<T>]]\n\n缓存子问题的解以消除重复计算。\n")
-    (goto-char (point-min))
-    (let ((body (org-sm-body-text))
-          picks)
-      (cl-letf (((symbol-function 'gptel-request)
-                 (lambda (_text &rest args)
-                   (funcall (plist-get args :callback)
-                            (json-encode
-                             '(:picks [(:quote "⌈已摘录首句。[[id:c1][<T>]]" :why "跳过")
-                                       (:quote "缓存子问题的解以消除重复计算。" :why "核心机制")
-                                       (:quote "不存在的句子" :why "幻觉")]))
-                            nil))))
-        (org-sm-gptel-request-suggest body (lambda (p _err) (setq picks p))))
-      (let ((pick (car picks)))
-        (should (= (length picks) 1))
-        (should (equal (substring body (plist-get pick :start) (plist-get pick :end))
-                       "缓存子问题的解以消除重复计算。"))
-        (should (equal (plist-get pick :why) "核心机制"))))))
+;;;; ---- Browser AI: rewrite and explain ------------------------------------
 
 (ert-deftest org-sm-web-test-ai-rewrite-region-splices-and-shifts-picks ()
   (org-sm-web-test--with-card
     (let* ((draft "第一段保持不变。\n\n第二段需要改写。\n\n第三段保持不变。")
            (s     (string-search "第二段" draft))
            (e     (+ s (length "第二段需要改写。")))
-           sent out-body out-picks)
+           sent req-buf deferred-cb out-body out-picks)
       (cl-letf (((symbol-function 'gptel-request)
                  (lambda (text &rest args)
-                   (setq sent text)
-                   (funcall (plist-get args :callback)
-                            (json-encode
-                             '(:body "改写后的第二段，含关键机制。"
-                               :picks [(:quote "改写后的第二段，含关键机制。" :why "关键因果")]))
-                            nil))))
+                   (setq sent text
+                         req-buf (plist-get args :buffer)
+                         deferred-cb (plist-get args :callback)))))
         (org-sm-gptel-request-rewrite
          draft "refine" nil s e
-         (lambda (b p _err) (setq out-body b out-picks p))))
+         (lambda (b p _err) (setq out-body b out-picks p)))
+        ;; `:buffer' passed to `gptel-request' must stay live after
+        ;; `org-sm-gptel-request-rewrite''s `with-temp-buffer' returns, or
+        ;; `gptel--handle-tool-use' fails with `Selecting deleted buffer'.
+        (should (buffer-live-p req-buf))
+        (funcall deferred-cb
+                 (json-encode
+                  '(:body "改写后的第二段，含关键机制。"
+                    :picks [(:quote "改写后的第二段，含关键机制。" :why "关键因果")]))
+                 nil))
       (should (string-prefix-p "第二段需要改写。\n\n【出处上下文" sent))
       (should (string-match-p "第一段保持不变。" sent))
       (should (equal out-body
@@ -268,6 +251,40 @@
       (should-not (string-match-p "begin_tool" reply1))
       (should (string-match-p "哪个词去掉了" reply1))
       (should (string-match-p "回答正确" reply2)))))
+
+(ert-deftest org-sm-web-test-async-servlet-discards-outer-httpd-buffer ()
+  ;; Regression test: `org-sm-web--with-card' switches `(current-buffer)' to the
+  ;; card's Org buffer; `org-sm-web--async-reply' must still mark the outer
+  ;; `httpd-buffer' as deferred so the servlet does not prematurely send `null'.
+  (let ((file (make-temp-file "org-sm-web-async-" nil ".org"))
+        (sent-headers nil)
+        (sent-bodies nil)
+        (deferred-cb nil))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert "* [T] Async Card\n:PROPERTIES:\n:ID: async-1\n:SRS_TYPE: topic\n:END:\n正文句子。\n"))
+          (with-current-buffer (find-file-noselect file)
+            (org-id-add-location "async-1" file))
+          (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                    ((symbol-function 'httpd-send-header)
+                     (lambda (_proc _mime status &rest _)
+                       (push status sent-headers)
+                       (push (buffer-string) sent-bodies)))
+                    ((symbol-function 'org-sm-gptel-request-rewrite)
+                     (lambda (_text _mode _custom _s _e cb)
+                       (setq deferred-cb cb))))
+            (let ((httpd-query '(("text" "正文句子。") ("mode" "refine"))))
+              (httpd/api/ai/rewrite 'fake-proc "/api/ai/rewrite/async-1" httpd-query
+                                    '(("POST" "/api/ai/rewrite/async-1" "HTTP/1.1"))))
+            ;; Before the async callback fires, NO HTTP response (especially not
+            ;; `null') may be sent.
+            (should (null sent-headers))
+            (funcall deferred-cb "改写句子。" '((:start 0 :end 4 :quote "改写句子" :why "核心")) nil)
+            (should (equal sent-headers '(200)))
+            (should (string-match-p "\"picks\":" (car sent-bodies)))))
+      (when-let* ((b (get-file-buffer file))) (kill-buffer b))
+      (delete-file file))))
 
 (provide 'org-sm-web-test)
 ;;; org-sm-web-test.el ends here

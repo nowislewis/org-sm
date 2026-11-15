@@ -211,37 +211,7 @@
   .card-body.markable { touch-action: manipulation; }
   .body-link { color: var(--teal); border-bottom: 1px dotted var(--teal); cursor: pointer; }
   .body-image { display: block; max-width: 100%; height: auto; margin: 10px auto; border-radius: 8px; }
-  .read-tools { align-items: center; }
-  .prio-group { display: inline-flex; gap: 6px; flex: none; }
-  .prio {
-    width: 40px; min-height: 52px;
-    border: 1px solid var(--border); border-radius: 10px;
-    background: var(--card); color: var(--dim);
-    font: 700 15px/1 var(--mono); cursor: pointer;
-  }
-  .prio.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
   .extracted.cloze { background: var(--teal-soft); }
-  .ai-pick {
-    text-decoration: underline wavy var(--gold);
-    text-underline-offset: 4px;
-    background: var(--gold-soft);
-    border-radius: 3px;
-    cursor: pointer;
-  }
-  .ai-pick.selected {
-    background: var(--teal-soft);
-    text-decoration-color: var(--teal);
-  }
-  .pick-banner {
-    font-size: 13px;
-    line-height: 1.5;
-    color: var(--gold);
-    background: var(--gold-soft);
-    border: 1px solid var(--gold);
-    border-radius: 8px;
-    padding: 6px 10px;
-    margin-bottom: 8px;
-  }
   .explain-quote {
     font-size: 14px;
     line-height: 1.6;
@@ -291,18 +261,30 @@
     flex: 1;
     border: 1px solid var(--border);
     border-radius: 10px;
-    padding: 10px 4px;
-    font-size: 15px;
+    padding: 9px 4px;
+    font-size: 14px;
     font-weight: 600;
     cursor: pointer;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    min-height: 52px;
+    min-height: 50px;
     touch-action: manipulation;
     background: var(--card);
     color: var(--text);
+  }
+  .btn-tool {
+    min-height: 40px;
+    padding: 6px 4px;
+    font-size: 13px;
+    color: var(--dim);
+    background: var(--surface);
+  }
+  .btn-tool.prio-a {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--accent);
   }
   .btn:active { filter: brightness(0.9); }
   .btn:disabled { opacity: 0.5; }
@@ -449,6 +431,35 @@
     font-weight: 600;
     cursor: pointer;
   }
+  .edit-picks {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+  .edit-pick-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--gold-soft);
+    border: 1px solid var(--gold);
+    border-radius: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .edit-pick-text { flex: 1; min-width: 0; cursor: pointer; }
+  .edit-pick-quote { font-weight: 600; color: var(--text); }
+  .edit-pick-why { color: var(--gold); font-size: 12px; margin-top: 2px; }
+  .edit-pick-del {
+    background: transparent;
+    border: 0;
+    color: var(--dim);
+    font-size: 14px;
+    padding: 0 4px;
+    cursor: pointer;
+  }
   .mono-box {
     font: 12px/1.6 ui-monospace, Menlo, monospace;
     color: var(--dim);
@@ -501,7 +512,6 @@
     <div class="hud-actions">
       <button id="btn-mode" title="切换 6 卡轻远征 / 全量">🎲 6</button>
       <button id="btn-open-sync" title="Git 同步">🔄</button>
-      <button id="btn-open-edit" title="编辑卡片">✎</button>
     </div>
   </div>
 </header>
@@ -558,6 +568,7 @@
     <input type="text" id="edit-title" class="edit-title-input" autocorrect="off">
     <label>正文 (Org-mode 源码)</label>
     <textarea id="edit-body" class="edit-body-textarea" spellcheck="false"></textarea>
+    <div id="edit-picks" class="edit-picks" style="display:none"></div>
   </div>
   <div class="edit-toolbar" id="edit-ai-toolbar">
     <button id="btn-ai-refine">✨ 润色</button>
@@ -609,7 +620,7 @@ const API = {
     const res = await fetch(url, opt);
     if (res.status === 401) throw new Error("令牌无效或已过期");
     if (res.status === 409) throw new Error("卡片已被修改或评分，请刷新队列后重试");
-    const json = JSON.parse(await res.text() || "{}");
+    const json = JSON.parse(await res.text() || "{}") || {};
     if (!res.ok || json.error) throw new Error(json.error || ("HTTP " + res.status));
     return json;
   }
@@ -624,9 +635,8 @@ const State = {
   totalInitial: 0,
   busy: false,
   ai: true,
-  picksByCard: {},
   chatsByCard: {},
-  pendingEditPicks: null,
+  pendingEditPicks: [],
   editAiSerial: 0,
   light: sessionStorage.getItem("org_sm_mode") !== "all",
   scrolledFor: null,
@@ -708,50 +718,6 @@ function tokenizeBody(text, isCloze) {
   }
   if (last < text.length) plain(text.slice(last));
   return parts;
-}
-
-/* Overlay non-overlapping AI suggestion picks onto plain-text tokens while
-   preserving exact [start, end] Emacs character offsets on every span. */
-function applyPicksToTokens(tokens, picks) {
-  if (!picks || !picks.length) return tokens;
-  const sorted = picks.slice().sort((a, b) => a.start - b.start);
-  const out = [];
-  for (const tok of tokens) {
-    if (tok.kind !== "text") {
-      out.push(tok);
-      continue;
-    }
-    const chars = Array.from(tok.text);
-    let cursor = tok.start;
-    for (const p of sorted) {
-      if (p.start < cursor || p.end > tok.end || p.start >= p.end) continue;
-      if (p.start > cursor) {
-        out.push({
-          kind: "text",
-          text: chars.slice(cursor - tok.start, p.start - tok.start).join(""),
-          start: cursor,
-          end: p.start
-        });
-      }
-      out.push({
-        kind: "pick",
-        text: chars.slice(p.start - tok.start, p.end - tok.start).join(""),
-        start: p.start,
-        end: p.end,
-        why: p.why
-      });
-      cursor = p.end;
-    }
-    if (cursor < tok.end) {
-      out.push({
-        kind: "text",
-        text: chars.slice(cursor - tok.start).join(""),
-        start: cursor,
-        end: tok.end
-      });
-    }
-  }
-  return out;
 }
 
 function domPointToCharOffset(bodyEl, node, offset) {
@@ -856,7 +822,6 @@ function render() {
   const main = $("main");
   const footer = $("footer");
 
-  $("btn-open-edit").style.display = c ? "" : "none";
   renderHud();
 
   if (!c) {
@@ -898,24 +863,12 @@ function render() {
 
   const body = document.createElement("div");
   body.className = "card-body";
-  const picks = State.picksByCard[c.id] || [];
-  applyPicksToTokens(tokenizeBody(c.body || "", c.type === "cloze"), picks).forEach(tok => {
+  tokenizeBody(c.body || "", c.type === "cloze").forEach(tok => {
     const span = document.createElement("span");
     span.dataset.start = tok.start;
     span.dataset.end = tok.end;
     if (tok.kind === "text") {
       span.textContent = tok.text;
-    } else if (tok.kind === "pick") {
-      const active = State.selection &&
-        State.selection.start === tok.start && State.selection.end === tok.end;
-      span.className = "ai-pick" + (active ? " selected" : "");
-      span.textContent = tok.text;
-      span.title = tok.why || "";
-      span.onclick = e => {
-        e.stopPropagation();
-        State.selection = { start: tok.start, end: tok.end, text: tok.text, why: tok.why };
-        render();
-      };
     } else if (tok.kind === "extracted") {
       span.className = "extracted " + (tok.ref === "C" ? "cloze" : "topic");
       span.textContent = tok.text;
@@ -1036,44 +989,32 @@ function showLinkDetails(tok) {
   toast(target);
 }
 
-/* Reading aids belong to topics: a cloze has nothing to resume. */
-function readingToolbar(c) {
-  if (c.type !== "topic") return "";
-  const cookie = c.cookie || "";
-  const prio = ["A", "B", "C"].map(letter =>
-    `<button class="prio${cookie === letter ? " on" : ""}" data-prio="${letter}">${letter}</button>`
-  ).join("");
-  const aiRow = State.ai ? `<div class="btn-row">
-      <button class="btn" id="btn-ai-suggest">✨ AI 画线建议<span class="sub">标出 1–3 处核心句</span></button>
-      <button class="btn" id="btn-ai-explain">❓ 解释本卡<span class="sub">三层因果与追问</span></button>
-    </div>` : "";
-  return `<div class="btn-row read-tools">
-      <button class="btn" id="btn-rp-now">📍 记到屏幕顶部<span class="sub">双击正文可精确标记</span></button>
-      <span class="prio-group" title="优先级：A 最常回看">${prio}</span>
-    </div>` + aiRow;
-}
-
 function ratingButton(cls, rating, label, iv) {
   return `<button class="btn ${cls}" data-rating="${rating}">${label}` +
     `<span class="sub">${esc(iv || "")}</span></button>`;
+}
+
+function nextPriorityCookie(cookie) {
+  if (cookie === "C") return "B";
+  if (cookie === "A") return "C";
+  return "A";
 }
 
 function renderButtons(footer, c) {
   footer.innerHTML = "";
   const iv = c.intervals || {};
 
+  // Mode 1: Active text selection -> Extract or Explain
   if (State.selection) {
     const sel = State.selection;
-    footer.innerHTML =
-      (sel.why ? `<div class="pick-banner">💡 ${esc(sel.why)}</div>` : "") + `
+    footer.innerHTML = `
       <div class="btn-row">
         <button class="btn btn-good" id="btn-sel-topic">📖 摘为阅读卡<span class="sub">Extract 子卡</span></button>
         <button class="btn btn-easy" id="btn-sel-cloze">🌱 挖空为填空卡<span class="sub">Cloze 子卡</span></button>
       </div>
       <div class="btn-row">
-        ${State.ai ? `<button class="btn" id="btn-sel-explain">❓ 解释选区</button>` : ""}
-        ${sel.why ? `<button class="btn" id="btn-sel-dismiss-pick">✕ 擦掉画线</button>` : ""}
-        <button class="btn" id="btn-sel-clear">取消选区</button>
+        ${State.ai ? `<button class="btn btn-tool" id="btn-sel-explain">❓ 解释选区</button>` : ""}
+        <button class="btn btn-tool" id="btn-sel-clear">取消选区</button>
       </div>`;
     const keepSel = e => e.preventDefault();
     $("btn-sel-topic").onpointerdown = keepSel;
@@ -1084,85 +1025,86 @@ function renderButtons(footer, c) {
       $("btn-sel-explain").onpointerdown = keepSel;
       $("btn-sel-explain").onclick = () => openExplainSheet(sel);
     }
-    if ($("btn-sel-dismiss-pick")) {
-      $("btn-sel-dismiss-pick").onclick = () => dismissPick(c.id, sel);
-    }
     $("btn-sel-clear").onclick = clearBodySelection;
     return;
   }
 
+  // Mode 2: Unrevealed Cloze -> Reveal + Workbench
   if (c.type === "cloze" && !State.revealed) {
-    footer.innerHTML = `<div class="btn-row"><button class="btn btn-good" id="btn-show-cloze">显示答案 (空格)</button></div>`;
+    footer.innerHTML = `
+      <div class="btn-row">
+        <button class="btn btn-good" id="btn-show-cloze">显示答案<span class="sub">空格或点遮罩</span></button>
+      </div>
+      <div class="btn-row">
+        <button class="btn btn-tool" id="btn-open-edit">✎ 工作台 · 改卡</button>
+      </div>`;
     $("btn-show-cloze").onclick = () => { State.revealed = true; render(); };
+    $("btn-open-edit").onclick = openEditSheet;
     return;
   }
 
+  // Mode 3: Revealed Cloze -> Row 1: 4 FSRS ratings | Row 2: Explain & Workbench
   if (c.type === "cloze") {
-    const row = document.createElement("div");
-    row.className = "btn-row";
-    row.innerHTML =
-      ratingButton("btn-again", "again", "重来", iv.again) +
-      ratingButton("btn-hard", "hard", "困难", iv.hard) +
-      ratingButton("btn-good", "good", "良好", iv.good) +
-      ratingButton("btn-easy", "easy", "简单", iv.easy);
-    footer.appendChild(row);
-    row.querySelectorAll("button").forEach(btn => {
+    footer.innerHTML = `
+      <div class="btn-row" id="cloze-rate-row">
+        ${ratingButton("btn-again", "again", "重来", iv.again)}
+        ${ratingButton("btn-hard", "hard", "困难", iv.hard)}
+        ${ratingButton("btn-good", "good", "良好", iv.good)}
+        ${ratingButton("btn-easy", "easy", "简单", iv.easy)}
+      </div>
+      <div class="btn-row">
+        ${State.ai ? `<button class="btn btn-tool" id="btn-ai-explain">❓ 解释</button>` : ""}
+        <button class="btn btn-tool" id="btn-open-edit">✎ 工作台 · AI 改写</button>
+      </div>`;
+    $("cloze-rate-row").querySelectorAll("button").forEach(btn => {
       btn.onclick = () => reviewCloze(btn.dataset.rating);
     });
-    if (State.ai) {
-      const aiRow = document.createElement("div");
-      aiRow.className = "btn-row";
-      aiRow.innerHTML = `<button class="btn" id="btn-ai-explain">❓ 解释这道卡（不推进队列）</button>`;
-      footer.appendChild(aiRow);
-      $("btn-ai-explain").onclick = () => openExplainSheet(null);
-    }
+    if ($("btn-ai-explain")) $("btn-ai-explain").onclick = () => openExplainSheet(null);
+    $("btn-open-edit").onclick = openEditSheet;
     return;
   }
 
-  const r1 = document.createElement("div");
-  r1.className = "btn-row";
-  r1.innerHTML = `
-    <button class="btn btn-good" id="btn-topic-rsch">已读 · 下一轮<span class="sub">间隔 ${esc(iv.reschedule || "自动")}</span></button>
-    <button class="btn btn-hard" id="btn-topic-postpone">重排期<span class="sub">指定间隔天数</span></button>`;
-  footer.appendChild(r1);
-  const r2 = document.createElement("div");
-  r2.className = "btn-row";
-  r2.innerHTML = `
-    <button class="btn" id="btn-topic-skip">跳过本卡</button>
-    <button class="btn" id="btn-topic-dismiss">不再复习</button>`;
-  footer.appendChild(r2);
-  const tools = document.createElement("div");
-  tools.innerHTML = readingToolbar(c);
-  Array.from(tools.children).forEach(child => footer.appendChild(child));
-  const rpNow = $("btn-rp-now");
-  if (rpNow) {
-    rpNow.onclick = () => {
-      const bodyEl = document.querySelector(".card-body");
-      const off = bodyEl && topVisibleOffset(bodyEl);
-      if (off == null) { toast("双击正文某处来标记阅读位置"); return; }
-      moveReadpoint(c, off);
-    };
-  }
-  if ($("btn-ai-suggest")) $("btn-ai-suggest").onclick = () => requestSuggest();
+  // Mode 4: Topic -> Row 1: 4 Schedule actions | Row 2: Explain, Workbench, Bookmark, Priority
+  const cookie = c.cookie || "B";
+  footer.innerHTML = `
+    <div class="btn-row">
+      <button class="btn btn-good" id="btn-topic-rsch">已读<span class="sub">${esc(iv.reschedule || "下一轮")}</span></button>
+      <button class="btn btn-hard" id="btn-topic-postpone">重排期<span class="sub">指定天数</span></button>
+      <button class="btn" id="btn-topic-skip">跳过<span class="sub">移至队尾</span></button>
+      <button class="btn" id="btn-topic-dismiss">归档<span class="sub">不再复习</span></button>
+    </div>
+    <div class="btn-row">
+      ${State.ai ? `<button class="btn btn-tool" id="btn-ai-explain">❓ 解释</button>` : ""}
+      <button class="btn btn-tool" id="btn-open-edit">✎ 工作台 · AI</button>
+      <button class="btn btn-tool" id="btn-rp-now" title="双击正文任意处也可标记">📍 记书签</button>
+      <button class="btn btn-tool${cookie === "A" ? " prio-a" : ""}" id="btn-prio-cycle" title="点按循环 C → B → A">优先级 #${esc(cookie)}</button>
+    </div>`;
+
   if ($("btn-ai-explain")) $("btn-ai-explain").onclick = () => openExplainSheet(null);
-  footer.querySelectorAll(".prio").forEach(btn => {
-    btn.onclick = async () => {
-      if (State.busy) return;
-      State.busy = true;
-      try {
-        const res = await API.call(`/api/priority/${encodeURIComponent(c.id)}`,
-                                   { cookie: btn.dataset.prio, revision: c.revision });
-        c.cookie = res.cookie;
-        c.revision = res.revision;
-        toast("优先级 [#" + btn.dataset.prio + "]");
-      } catch (e) {
-        toast("优先级保存失败: " + e.message);
-      } finally {
-        State.busy = false;
-        render();
-      }
-    };
-  });
+  $("btn-open-edit").onclick = openEditSheet;
+  $("btn-rp-now").onclick = () => {
+    const bodyEl = document.querySelector(".card-body");
+    const off = bodyEl && topVisibleOffset(bodyEl);
+    if (off == null) { toast("双击正文某处来标记阅读位置"); return; }
+    moveReadpoint(c, off);
+  };
+  $("btn-prio-cycle").onclick = async () => {
+    if (State.busy) return;
+    const next = nextPriorityCookie(c.cookie || "B");
+    State.busy = true;
+    try {
+      const res = await API.call(`/api/priority/${encodeURIComponent(c.id)}`,
+                                 { cookie: next, revision: c.revision });
+      c.cookie = res.cookie;
+      c.revision = res.revision;
+      toast("优先级 [#" + (c.cookie || "B") + "]");
+    } catch (e) {
+      toast("优先级保存失败: " + e.message);
+    } finally {
+      State.busy = false;
+      render();
+    }
+  };
 
   $("btn-topic-rsch").onclick = () => reviewTopic("next");
   $("btn-topic-postpone").onclick = promptPostpone;
@@ -1246,7 +1188,6 @@ async function extractSelection(type, sel) {
     c.title = res.parent.title;
     c.badge = res.parent.badge;
     c.revision = res.parent.revision;
-    delete State.picksByCard[c.id];
     State.selection = null;
     try { window.getSelection().removeAllRanges(); } catch (_) {}
     toast(type === "cloze" ? "🌱 已创建填空子卡" : "📖 已创建阅读子卡");
@@ -1350,22 +1291,78 @@ function closeRelic() {
   $("relic-modal").classList.remove("active");
 }
 
-/* ---------------------- Editing sheet ---------------------- */
+/* ---------------------- Editing sheet (Workbench) ---------------------- */
+
+function renderEditPicks() {
+  const box = $("edit-picks");
+  const picks = State.pendingEditPicks || [];
+  if (!picks.length) {
+    box.style.display = "none";
+    box.innerHTML = "";
+    return;
+  }
+  box.style.display = "";
+  box.innerHTML = `<label>💡 保存时将自动摘为子卡的画线建议（点 ✕ 可擦掉）</label>` +
+    picks.map((p, idx) => `
+      <div class="edit-pick-item">
+        <div class="edit-pick-text" data-idx="${idx}">
+          <div class="edit-pick-quote">⌈${esc(p.quote)}⌋</div>
+          <div class="edit-pick-why">💡 ${esc(p.why || "")}</div>
+        </div>
+        <button class="edit-pick-del" data-idx="${idx}" title="擦掉这条建议">✕</button>
+      </div>`).join("");
+  box.querySelectorAll(".edit-pick-text").forEach(el => {
+    el.onclick = () => {
+      const p = picks[Number(el.dataset.idx)];
+      const area = $("edit-body");
+      const pos = area.value.indexOf(p.quote);
+      if (pos >= 0) {
+        area.focus();
+        area.setSelectionRange(pos, pos + p.quote.length);
+      }
+    };
+  });
+  box.querySelectorAll(".edit-pick-del").forEach(btn => {
+    btn.onclick = () => {
+      State.pendingEditPicks.splice(Number(btn.dataset.idx), 1);
+      renderEditPicks();
+    };
+  });
+}
 
 function openEditSheet() {
   const c = State.current;
   if (!c || State.busy) return;
   clearBodySelection();
-  State.pendingEditPicks = null;
+  State.pendingEditPicks = [];
   $("edit-title").value = c.title || "";
   $("edit-body").value = c.body || "";
   $("edit-ai-toolbar").style.display = State.ai ? "" : "none";
+  renderEditPicks();
   $("edit-modal").classList.add("active");
 }
 
 function closeEditSheet() {
-  State.pendingEditPicks = null;
+  State.pendingEditPicks = [];
+  renderEditPicks();
   $("edit-modal").classList.remove("active");
+}
+
+/* Locate surviving workbench picks in the saved body (sorted end-to-start so
+   earlier character offsets never shift when later spans are extracted). */
+function resolveSurvivingPicks(body, picks) {
+  const spans = [];
+  for (const p of (picks || [])) {
+    if (!p || !p.quote) continue;
+    const idx = body.indexOf(p.quote);
+    if (idx < 0) continue;
+    const start = Array.from(body.slice(0, idx)).length;
+    const end = start + Array.from(p.quote).length;
+    if (!spans.some(s => start < s.end && end > s.start)) {
+      spans.push({ start, end, quote: p.quote, why: p.why });
+    }
+  }
+  return spans.sort((a, b) => b.start - a.start);
 }
 
 async function saveEditSheet() {
@@ -1373,24 +1370,35 @@ async function saveEditSheet() {
   if (!c) return false;
   const newTitle = $("edit-title").value.trim();
   const newBody = $("edit-body").value;
-  if (newTitle === c.title && newBody === c.body) {
+  const picks = (State.pendingEditPicks || []).slice();
+  if (newTitle === c.title && newBody === c.body && !picks.length) {
     closeEditSheet();
     return true;
   }
   try {
-    const res = await API.call(`/api/patch/${encodeURIComponent(c.id)}`, {
-      title: newTitle, body: newBody, revision: c.revision
-    });
-    c.body = res.body;
-    c.title = res.title;
-    c.revision = res.revision;
-    if (State.pendingEditPicks && State.pendingEditPicks.length) {
-      State.picksByCard[c.id] = State.pendingEditPicks;
-    } else {
-      delete State.picksByCard[c.id];
+    if (newTitle !== c.title || newBody !== c.body) {
+      const res = await API.call(`/api/patch/${encodeURIComponent(c.id)}`, {
+        title: newTitle, body: newBody, revision: c.revision
+      });
+      c.body = res.body;
+      c.title = res.title;
+      c.revision = res.revision;
     }
-    State.pendingEditPicks = null;
-    toast("保存成功");
+    const spans = resolveSurvivingPicks(c.body, picks);
+    for (const span of spans) {
+      const ex = await API.call(`/api/extract/${encodeURIComponent(c.id)}`, {
+        start: String(span.start),
+        end: String(span.end),
+        type: "topic",
+        revision: c.revision
+      });
+      c.body = ex.parent.body;
+      c.title = ex.parent.title;
+      c.badge = ex.parent.badge;
+      c.revision = ex.parent.revision;
+      applyHud(ex.hud);
+    }
+    toast(spans.length ? `保存成功，已提取 ${spans.length} 张子卡` : "保存成功");
     closeEditSheet();
     render();
     return true;
@@ -1424,7 +1432,9 @@ async function toolAiRewrite(mode) {
     params.end = String(Array.from(draft.slice(0, e)).length);
   }
   const serial = ++State.editAiSerial;
-  toast(hasSel ? "✨ AI 正在改写选区…" : "✨ AI 正在改写正文…", 4000);
+  const aiBtns = ["btn-ai-refine", "btn-ai-simplify", "btn-ai-custom"].map($);
+  aiBtns.forEach(b => { if (b) b.disabled = true; });
+  toast(hasSel ? "✨ AI 正在改写选区…" : "✨ AI 正在改写正文…", 15000);
   try {
     const res = await API.call(`/api/ai/rewrite/${encodeURIComponent(c.id)}`, params);
     if (serial !== State.editAiSerial || area.value !== draft) {
@@ -1433,46 +1443,18 @@ async function toolAiRewrite(mode) {
     }
     area.value = res.body;
     State.pendingEditPicks = Array.isArray(res.picks) ? res.picks : [];
+    renderEditPicks();
     toast(State.pendingEditPicks.length
-          ? `✨ 已改写，保存后将标出 ${State.pendingEditPicks.length} 处建议画线`
+          ? `✨ 已改写并标出 ${State.pendingEditPicks.length} 处画线建议，点保存自动摘为子卡`
           : "✨ 已改写草稿，确认后点保存");
   } catch (err) {
     toast("AI 改写失败: " + err.message);
-  }
-}
-
-/* ---------------------- AI Suggest & Explain ---------------------- */
-
-function dismissPick(cardId, sel) {
-  const list = State.picksByCard[cardId] || [];
-  State.picksByCard[cardId] = list.filter(p => !(p.start === sel.start && p.end === sel.end));
-  clearBodySelection();
-}
-
-async function requestSuggest() {
-  const c = State.current;
-  if (!c || State.busy) return;
-  State.busy = true;
-  render();
-  toast("✨ 正在找值得摘录的句子…", 4000);
-  try {
-    const res = await API.call(`/api/ai/suggest/${encodeURIComponent(c.id)}`, {});
-    const picks = Array.isArray(res.picks) ? res.picks : [];
-    State.picksByCard[c.id] = picks;
-    if (!picks.length) {
-      toast("本卡没有需要额外标出的句子");
-    } else {
-      const first = picks[0];
-      State.selection = { start: first.start, end: first.end, text: first.quote, why: first.why };
-      toast(`✨ 标出 ${picks.length} 处画线建议，点选即可摘成子卡`);
-    }
-  } catch (e) {
-    toast("AI 画线失败: " + e.message);
   } finally {
-    State.busy = false;
-    render();
+    aiBtns.forEach(b => { if (b) b.disabled = false; });
   }
 }
+
+/* ---------------------- AI Explain ---------------------- */
 
 function renderExplainChat(chat, loading) {
   const box = $("explain-body");
@@ -1741,7 +1723,6 @@ $("btn-mode").onclick = () => {
 };
 $("btn-open-relic").onclick = openRelic;
 $("btn-relic-close").onclick = closeRelic;
-$("btn-open-edit").onclick = openEditSheet;
 $("btn-edit-cancel").onclick = closeEditSheet;
 $("btn-edit-save").onclick = async () => {
   if (State.busy) return;

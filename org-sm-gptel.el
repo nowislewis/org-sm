@@ -11,19 +11,14 @@
 ;;   (with-eval-after-load 'gptel (require 'org-sm-gptel))
 ;;
 ;; Commands:
-;;   org-sm-gptel-suggest   - (x while reviewing a topic) the AI underlines up
-;;                            to three passages worth extracting in the text
-;;                            on screen or the region, each with a reason.
-;;                            It quotes; it never writes a card.  RET on an
-;;                            underline extracts it with `org-sm-extract',
-;;                            DEL erases it, TAB moves to the next.
 ;;   org-sm-gptel-explain   - (?) explain the paragraph or region you are stuck
 ;;                            on, with the surrounding text, parent extract
 ;;                            origin, and card coordinates for on-demand lookup.
 ;;                            Persistent side-window chat.
 ;;   org-sm-gptel-card-ai   - (C-c C-a in a card workbench) rewrite the body
 ;;                            you are editing: refine, simplify, or a custom
-;;                            instruction.  Cards you typed below are kept.
+;;                            instruction, underlining 1-3 passages worth
+;;                            extracting on topic refine.
 ;;
 ;; Division of labour: the AI points at text and rewrites prose on request;
 ;; deciding what becomes a card, and cloze deletion, stay with the reader,
@@ -160,23 +155,6 @@ More aggressive than `org-sm-gptel-system-topic'/`-cloze': cuts length, not
 just noise."
   :type 'string :group 'org-sm-gptel)
 
-(defcustom org-sm-gptel-system-suggest
-  "你是 SuperMemo 渐进阅读专家。用户正在读一段文字，想知道哪些句子最值得画线摘录成独立的子卡。
-
-任务：从给定原文中挑出 1 到 3 段最值得单独摘录的核心句子（除非原文只有一句话且毫无信息量，否则至少挑 1 条）。
-挑选优先级：可迁移的规律与因果机制（什么条件下 A 导致 B） > 关键概念边界 > 核心结论或定义。细节、铺垫不挑。
-
-硬约束：
-1. quote 必须逐字复制原文中连续的一段（一到三句），不改一个字、不加省略号、不拼接。
-   程序会丢弃对不上原文的引文。
-2. 跳过已经带有 `⌈…[[id:…][<T>/<C>]]` 标记的句子（那些已经摘成子卡了），只从未摘录的句子里挑。
-3. why 用一句话说明它为什么值得单独复习，不复述原文。"
-  "System prompt for `org-sm-gptel-suggest'.
-Asks for verbatim quotes only, which are then located in the source: a
-quote that cannot be found is dropped, so a suggestion can never point at
-text that is not there."
-  :type 'string :group 'org-sm-gptel)
-
 (defconst org-sm-gptel--card-modes
   '(("refine" . refine)
     ("简化"   . simplify)
@@ -274,11 +252,14 @@ onto, and sent along with, half a sentence the user was still writing."
 (defun org-sm-gptel--request (prompt system schema callback)
   "Send isolated JSON/text PROMPT to gptel and call CALLBACK with (TEXT ERR).
 Disables external context, agent tools, and reasoning blocks so structured
-single-turn requests stay fast and deterministic."
+single-turn requests stay fast and deterministic.  Uses a persistent hidden
+buffer so `gptel--handle-tool-use' (used by Anthropic's `:schema' emulation)
+never fails with `Selecting deleted buffer' if the caller's temp buffer exits."
   (let ((gptel-use-context nil)
         (gptel-use-tools nil)
         (gptel-include-reasoning nil))
     (gptel-request prompt
+      :buffer (get-buffer-create " *org-sm-gptel*")
       :system system
       :schema schema
       :transforms nil
@@ -461,17 +442,7 @@ immediate neighbourhood is not enough."
   (interactive)
   (org-sm-gptel-explain-card))
 
-;;;; ---- Suggestions: the AI underlines, the reader extracts ------------------
-
-(defconst org-sm-gptel--suggest-schema
-  '(:type "object"
-    :properties
-    (:picks (:type "array"
-             :items (:type "object"
-                     :properties (:quote (:type "string") :why (:type "string"))
-                     :required ["quote" "why"])))
-    :required ["picks"])
-  "JSON schema for `org-sm-gptel-suggest': verbatim quotes with reasons.")
+;;;; ---- Inline underline picks ----------------------------------------------
 
 (defun org-sm-gptel--locate (quote beg end)
   "Return (START . END) of QUOTE between BEG and END, or nil.
@@ -516,66 +487,17 @@ Drops any pick whose quote cannot be found or overlaps an already-extracted
                       :why   (cdr pick))
                 out))))))
 
-(defun org-sm-gptel--draw-resolved-picks (resolved beg end)
-  "Draw already-resolved 0-based PICKS within BEG..END; return count drawn."
-  (org-sm-pencils-clear beg end)
-  (dolist (p resolved (length resolved))
-    (org-sm-pencil-add (+ beg (plist-get p :start))
-                       (+ beg (plist-get p :end))
-                       (plist-get p :why))))
-
 (defun org-sm-gptel--draw-picks (picks beg end)
   "Underline PICKS found between BEG and END; return how many were drawn.
 A pick whose quote is not in the text, or that overlaps an already-extracted
 `⌈...[[id:...][<T>/<C>]]' span, is dropped: a suggestion must point at
 unextracted text the reader can see."
-  (org-sm-gptel--draw-resolved-picks
-   (org-sm-gptel--resolve-picks picks beg end) beg end))
-
-(defun org-sm-gptel-request-suggest (text callback)
-  "Ask the AI for verbatim extraction picks in TEXT and call CALLBACK.
-Resolves quotes against TEXT at the seam; CALLBACK receives (PICKS ERR) where
-each pick is a 0-based (:start S :end E :quote Q :why W) plist."
-  (org-sm-gptel--request
-   text org-sm-gptel-system-suggest org-sm-gptel--suggest-schema
-   (lambda (response err)
-     (if err
-         (funcall callback nil err)
-       (let ((raw (org-sm-gptel--parse-picks response)))
-         (funcall callback
-                  (with-temp-buffer
-                    (insert text)
-                    (org-sm-gptel--resolve-picks raw (point-min) (point-max)))
-                  nil))))))
-
-;;;###autoload
-(defun org-sm-gptel-suggest ()
-  "Underline passages worth extracting in the text on screen or the region.
-The AI quotes; nothing is written.  Accept an underline with `M-z' to extract
-it through `org-sm-extract', erase it with `M-k', move on with `M-n'.  The
-underlines vanish with the buffer, so nothing half-decided reaches a file."
-  (interactive)
-  (unless (save-excursion (org-sm--goto-enclosing-card))
-    (user-error "Not inside an org-sm card"))
-  (let* ((span (org-sm-reading-bounds))
-         (beg (copy-marker (car span)))
-         (end (copy-marker (cdr span) t))
-         (text (buffer-substring-no-properties beg end))
-         (buf (current-buffer)))
-    (when (string-blank-p text) (user-error "Nothing to read here"))
-    (message "org-sm: 找值得摘的段落...")
-    (org-sm-gptel-request-suggest
-     text
-     (lambda (picks err)
-       (cond
-        ((not (buffer-live-p buf)) nil)
-        (err (message "org-sm AI failed: %s" err))
-        (t
-         (with-current-buffer buf
-           (if (zerop (org-sm-gptel--draw-resolved-picks picks beg end))
-               (message "org-sm: 这一屏没有值得单独摘的")
-             (goto-char beg)
-             (org-sm-pencil-next)))))))))
+  (org-sm-pencils-clear beg end)
+  (let ((resolved (org-sm-gptel--resolve-picks picks beg end)))
+    (dolist (p resolved (length resolved))
+      (org-sm-pencil-add (+ beg (plist-get p :start))
+                         (+ beg (plist-get p :end))
+                         (plist-get p :why)))))
 
 ;;;; ---- Rewriting a body in the workbench -------------------------------------
 
@@ -764,8 +686,7 @@ back and extracts the surviving underlines in place."
 ;; Wire the AI actions into the workbench and the review repeat map.
 (with-eval-after-load 'org-sm
   (keymap-set org-sm-capture-mode-map "C-c C-a" #'org-sm-gptel-card-ai)
-  (keymap-set org-sm-review-repeat-map "?" #'org-sm-gptel-explain)
-  (keymap-set org-sm-review-repeat-map "x" #'org-sm-gptel-suggest))
+  (keymap-set org-sm-review-repeat-map "?" #'org-sm-gptel-explain))
 
 (provide 'org-sm-gptel)
 ;;; org-sm-gptel.el ends here

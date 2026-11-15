@@ -54,7 +54,6 @@
 (declare-function org-sm-neural-start "org-sm-neural")
 (autoload 'org-sm-neural-start "org-sm-neural" nil t)
 (autoload 'org-sm-sectionize-card "org-sm-import" nil t)
-(declare-function org-sm-gptel-suggest "org-sm-gptel")
 (declare-function org-sm-gptel-card-ai "org-sm-gptel")
 (declare-function notifications-notify "notifications")
 
@@ -511,18 +510,6 @@ own `org-entry-end-position' reaches past the whole subtree, and callers like
   "Return the current entry's trimmed body, excluding metadata and descendants."
   (let ((bounds (org-sm-body-bounds)))
     (string-trim (buffer-substring-no-properties (car bounds) (cdr bounds)))))
-
-(defun org-sm-reading-bounds ()
-  "Return the part of the current card the reader is looking at.
-The active region when there is one; otherwise the card body clipped to
-the window, i.e. the text on screen.  For a long topic that is the next
-screenful from the read point, not the whole article, which is what a
-suggestion should be about and what keeps the request short."
-  (let ((body (org-sm-body-bounds)))
-    (if (use-region-p)
-        (cons (max (car body) (region-beginning)) (min (cdr body) (region-end)))
-      (cons (max (car body) (window-start))
-            (min (cdr body) (window-end nil t))))))
 
 (defun org-sm-paragraph-bounds ()
   "Return (START . END) of the paragraph at point, clipped to the card body.
@@ -1273,12 +1260,10 @@ callers needing their own buffer back must `set-buffer' it explicitly."
 
 ;;;###autoload
 (defun org-sm-item-extract ()
-  "Extract a passage, or mark a span in the workbench, or accept a suggestion.
-One key (`M-z') handles all three:
+  "Extract a passage from a card, or underline a span in the workbench.
+One key (`M-z') handles both:
 - In a workbench with an active region: underline the region as a child-card
   span (committed on \\<org-sm-capture-mode-map>\\[org-sm-capture-commit]).
-- On a suggestion underline with no region (in a source card): accept it
-  into a child topic card immediately (`org-sm-pencil-accept').
 - With an active region on a source card: prompt for topic/cloze and extract
   immediately via `org-sm-extract'."
   (interactive)
@@ -1292,8 +1277,6 @@ One key (`M-z') handles all three:
           (message "%s" (org-sm-pencil-hint)))
       (if (org-sm-pencils) (org-sm-pencil-next)
         (user-error "Select text to mark as a child card, or C-c C-a for AI"))))
-   ((and (not (region-active-p)) (org-sm--pencil-here))
-    (org-sm-pencil-accept))
    ((not (region-active-p))
     (user-error "Select text to extract first"))
    (t
@@ -1593,11 +1576,10 @@ waits), so it must cost one keystroke, not a confirmation."
                                  (if stalled "push again" "next") auto-ivl))
                      (?j "reschedule")
                      (?e "explain")
-                     ,@(when (fboundp 'org-sm-gptel-suggest) '((?x "suggest")))
                      ,@(when (fboundp 'org-sm-card-workbench)
                          '((?w "workbench"))))))
     (org-sm--prompt-choice (if stalled
-                               (format "Topic (⚠ 空读 %d 次、无子卡，建议 d 或 x): "
+                               (format "Topic (⚠ 空读 %d 次、无子卡，建议 w 或 d): "
                                        (plist-get card :reviews))
                              "Topic: ")
                            choices
@@ -1613,12 +1595,7 @@ waits), so it must cost one keystroke, not a confirmation."
                   (progn (org-sm--log-review 'explain)
                          (org-sm-gptel-explain))
                 (user-error "org-sm-gptel not loaded")))
-          (?w (org-sm-card-workbench))
-          ;; Suggest does not advance: the suggestions are drawn on this card
-          ;; and the reader decides about each before moving on.
-          (?x (if (fboundp 'org-sm-gptel-suggest)
-                  (org-sm-gptel-suggest)
-                (user-error "org-sm-gptel not loaded"))))))))
+          (?w (org-sm-card-workbench)))))))
 
 (defun org-sm--cloze-rating-label (rating secs)
   "Format a menu LABEL for RATING with interval SECS."
@@ -1843,13 +1820,9 @@ Point must be on the card heading."
 (defun org-sm-pencil-hint ()
   "Return the key hint and reason for the suggestion at point."
   (let ((all (org-sm-pencils))
-        (here (org-sm--pencil-at-point))
-        (wb (and (derived-mode-p 'org-sm-capture-mode)
-                 org-sm-capture-parent-marker)))
+        (here (org-sm--pencil-at-point)))
     (concat (substitute-command-keys
-             (if wb
-                 "\\<org-sm-capture-mode-map>\\[org-sm-capture-commit] 提交时摘为子卡  \\[org-sm-pencil-dismiss] 擦掉  \\[org-sm-pencil-next] 下一条"
-               "\\[org-sm-item-extract] 摘为子卡  \\<org-sm-mode-map>\\[org-sm-pencil-dismiss] 擦掉  \\[org-sm-pencil-next] 下一条"))
+             "\\<org-sm-capture-mode-map>\\[org-sm-capture-commit] 提交时摘为子卡  \\[org-sm-pencil-dismiss] 擦掉  \\[org-sm-pencil-next] 下一条")
             (format "  (%d/%d) 💡 %s"
                     (1+ (seq-position all here)) (length all)
                     (overlay-get here 'org-sm-pencil)))))
@@ -1862,29 +1835,6 @@ Point must be on the card heading."
                    (car all))))
     (goto-char (overlay-start next))
     (message "%s" (org-sm-pencil-hint))))
-
-(defun org-sm-pencil-accept ()
-  "Extract the suggestion at point into a child topic card.
-Goes through `org-sm-extract', so the passage is highlighted in place and
-the child records where it came from, exactly as a manual extraction.
-In a workbench buffer, underlines are committed together on `C-c C-c', so
-this simply advances to the next underline."
-  (interactive)
-  (if (and (derived-mode-p 'org-sm-capture-mode) org-sm-capture-parent-marker)
-      (org-sm-pencil-next)
-    (let* ((ov (org-sm--pencil-at-point))
-           (beg (overlay-start ov))
-           (end (overlay-end ov))
-           (text (buffer-substring-no-properties beg end)))
-      (delete-overlay ov)
-      (save-excursion
-        (goto-char beg)
-        (org-sm--goto-enclosing-card)
-        (let ((body (car (org-sm-body-bounds))))
-          (org-sm-extract 'topic text (- beg body) (- end body))))
-      (if (org-sm-pencils)
-          (org-sm-pencil-next)
-        (message "org-sm: 已摘为子卡。没有剩余建议")))))
 
 (defun org-sm-pencil-dismiss ()
   "Remove the suggestion at point without extracting anything."
