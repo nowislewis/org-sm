@@ -554,17 +554,19 @@ three, so a non-zero count means `org-sm-sectionize-card' is due."
   "Replace the current heading's body text with NEW-BODY.
 Point must be on the heading.  Metadata (planning line, drawer) is
 preserved; only the body region from `org-sm-body-bounds' is replaced.
-Used by `org-sm--capture-commit-body' for manual or AI-assisted workbench
-edits."
-  (let* ((bounds (org-sm-body-bounds))
-         (start  (car bounds))
-         (end    (cdr bounds)))
-    (goto-char start)
-    (delete-region start end)
-    (insert (org-sm-body-clean new-body))
-    ;; keep a trailing newline so the subtree stays well-formed
-    (unless (bolp) (insert "\n"))
-    (org-sm--card-changed 'edit)))
+Used by `org-sm--capture-commit-workbench' for manual or AI-assisted
+workbench edits."
+  (save-excursion
+    (org-back-to-heading t)
+    (let* ((bounds (org-sm-body-bounds))
+           (start  (car bounds))
+           (end    (cdr bounds)))
+      (goto-char start)
+      (delete-region start end)
+      (insert (org-sm-body-clean new-body))
+      ;; keep a trailing newline so the subtree stays well-formed
+      (unless (bolp) (insert "\n"))))
+  (org-sm--card-changed 'edit))
 
 (defun org-sm--cloze-markers-p ()
   "Return non-nil if current heading body contains {{cloze}} markers."
@@ -763,6 +765,7 @@ the same result as extracting by hand."
        (lambda ()
          (org-sm-set-body body)
          (dolist (span spans)
+           (goto-char marker)
            (apply #'org-sm-extract 'topic span))))
       (set-buffer buf)
       (erase-buffer)
@@ -1122,28 +1125,43 @@ no prompt, no overlay/UI.
                                          (substring body-raw sel-end))))))))
     (when (string-empty-p clean-sel)
       (user-error "Empty selection"))
-    ;; Mark end before start so SEL-START is not shifted by insertion.
-    (save-excursion
-      (goto-char (+ (car bounds) sel-end))
-      (insert (format "[[id:%s][%s]]" id (pcase type ('topic "<T>") ('cloze "<C>"))))
-      (let ((span-end (point)))
-        (when (looking-at-p "\\*+ ") (insert "\n"))
-        (goto-char (+ (car bounds) sel-start))
-        (insert "⌈")
-        ;; Tag with `font-lock-multiline' so built-in
-        ;; `font-lock-extend-region-multiline' extends single-line passes.
-        (put-text-property (1- (point)) (1+ span-end) 'font-lock-multiline t)
-        (when org-sm-mode
-          (font-lock-flush (1- (point)) (1+ span-end)))))
-    ;; Append child heading at end of current subtree.
-    (save-excursion
-      (org-sm--insert-child level type title child-body id)
-      ;; [#C] marks material nobody has vouched for yet (imports start there,
-      ;; see `org-sm-import-priority').  Extracting is the reader vouching
-      ;; for a passage, so the child leaves C behind instead of inheriting it.
-      (goto-char (org-find-property "ID" id))
-      (when (eql (plist-get (org-sm-card-at-point) :priority) ?C)
-        (org-priority 'remove)))
+    (let ((parent (copy-marker (save-excursion (org-back-to-heading t) (point)))))
+      (unwind-protect
+          (progn
+            ;; Mark end before start so SEL-START is not shifted by insertion.
+            (save-excursion
+              (goto-char (+ (car bounds) sel-end))
+              (insert (format "[[id:%s][%s]]" id (pcase type ('topic "<T>") ('cloze "<C>"))))
+              (let ((span-end (point)))
+                (when (looking-at-p "\\*+ ") (insert "\n"))
+                (goto-char (+ (car bounds) sel-start))
+                (insert "⌈")
+                ;; Tag with `font-lock-multiline' so built-in
+                ;; `font-lock-extend-region-multiline' extends single-line passes.
+                (put-text-property (1- (point)) (1+ span-end) 'font-lock-multiline t)
+                (when org-sm-mode
+                  (font-lock-flush (1- (point)) (1+ span-end)))))
+            ;; Append child heading at end of current subtree, widening
+            ;; temporarily if narrowed so `org-end-of-subtree' + insertion
+            ;; never shifts the narrowing boundary or strands point inside
+            ;; the newly created child.
+            (org-with-wide-buffer
+             (goto-char parent)
+             (org-sm--insert-child level type title child-body id)
+             ;; [#C] marks material nobody has vouched for yet (imports start there,
+             ;; see `org-sm-import-priority').  Extracting is the reader vouching
+             ;; for a passage, so the child leaves C behind instead of inheriting it.
+             (goto-char (org-find-property "ID" id))
+             (when (eql (plist-get (org-sm-card-at-point) :priority) ?C)
+               (org-priority 'remove)))
+            (goto-char parent)
+            (when (and (buffer-narrowed-p)
+                       (eq (marker-buffer org-sm--current-card-marker) (current-buffer))
+                       (= org-sm--current-card-marker parent))
+              (widen)
+              (goto-char parent)
+              (org-narrow-to-subtree)))
+        (set-marker parent nil)))
     (org-sm--card-changed 'extract)
     id))
 

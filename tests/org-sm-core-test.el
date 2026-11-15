@@ -306,13 +306,24 @@
                 (goto-char (match-beginning 0))
                 (org-sm-pencil-dismiss)
                 (should (= (length (org-sm-pencils)) 1))
+                ;; Add a third underline so commit extracts 2 sibling children
+                ;; while the parent card buffer is narrowed (as during review).
+                (search-forward "值得摘的结论。")
+                (org-sm-pencil-add (match-beginning 0) (match-end 0) "保留的第二条")
+                (with-current-buffer card-buf
+                  (goto-char (point-min))
+                  (org-narrow-to-subtree))
                 (org-sm-capture-commit))
               (with-current-buffer card-buf
+                (widen)
                 (goto-char (point-min))
                 (should (string-match-p
-                         "引言。\n\n⌈核心机制是缓存子问题的解。\\[\\[id:[^]]+\\]\\[<T>\\]\\]\n\n再加一段值得摘的结论。"
+                         "引言。\n\n⌈核心机制是缓存子问题的解。\\[\\[id:[^]]+\\]\\[<T>\\]\\]\n\n再加一段⌈值得摘的结论。\\[\\[id:[^]]+\\]\\[<T>\\]\\]"
                          (org-sm-body-text)))
-                (should (= (plist-get (org-sm-card-at-point) :child-topics) 1))))
+                (should (= (plist-get (org-sm-card-at-point) :child-topics) 2))
+                ;; Both children must be direct level-2 siblings, never nested
+                ;; under each other (`***').
+                (should-not (re-search-forward "^\\*\\*\\* " nil t))))
           (when (buffer-live-p buf)
             (with-current-buffer buf (erase-buffer))
             (kill-buffer buf))))))
