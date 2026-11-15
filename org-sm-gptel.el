@@ -480,31 +480,41 @@ request that never picks up whatever the user attached elsewhere."
 
 ;;;###autoload
 (defun org-sm-gptel-card-ai ()
-  "Rewrite the body in this card workbench with the AI, underlining child picks.
-Choose refine (clean up, keep every causal link, underline 0-3 passages worth
-extracting), 简化 (cut to the core) or a custom instruction.  An extract also
-sends the parent text around it, so \"it\" and \"these neurons\" can be
-resolved from the source rather than guessed.  Nothing reaches the source
-card until \\<org-sm-capture-mode-map>\\[org-sm-capture-commit], which writes
-the body back and extracts the surviving underlines in place."
+  "Rewrite the body (or active region) in this card workbench with the AI.
+When a region is active, only that span is rewritten and underlined,
+leaving surrounding text and underlines untouched; otherwise the whole
+workbench body is rewritten.  Choose refine (clean up, keep every causal
+link, underline 0-3 passages worth extracting), 简化 (cut to the core) or a
+custom instruction.  An extract also sends the parent text around it, so
+\"it\" and \"these neurons\" can be resolved from the source rather than
+guessed.  Nothing reaches the source card until
+\\<org-sm-capture-mode-map>\\[org-sm-capture-commit], which writes the body
+back and extracts the surviving underlines in place."
   (interactive)
   (org-sm-gptel--workbench-only)
-  (let* ((label  (completing-read "AI 动作：" (mapcar #'car org-sm-gptel--card-modes)
+  (let* ((region (use-region-p))
+         (bounds (if region
+                     (cons (region-beginning) (region-end))
+                   (org-sm-capture-preamble-bounds)))
+         (raw    (string-trim (buffer-substring-no-properties
+                               (car bounds) (cdr bounds))))
+         (label  (completing-read (if region "AI 动作（选区）：" "AI 动作：")
+                                  (mapcar #'car org-sm-gptel--card-modes)
                                   nil t))
          (mode   (or (cdr (assoc label org-sm-gptel--card-modes)) 'custom))
          (custom (and (eq mode 'custom) (read-string "提示词："))))
     (when (and (eq mode 'custom) (string-blank-p (or custom "")))
       (user-error "Custom mode needs a prompt"))
-    (let* ((bounds (org-sm-capture-preamble-bounds))
-           (raw    (string-trim (buffer-substring-no-properties
-                                 (car bounds) (cdr bounds))))
+    (when (string-empty-p raw) (user-error "No body text to rewrite"))
+    (when region (deactivate-mark))
+    (let* ((beg    (car bounds))
+           (end    (cdr bounds))
            (origin (org-sm-gptel--origin-block
                     (when-let* ((card (org-sm--capture-live-marker)))
                       (org-with-point-at card (org-sm-extract-origin)))))
            (buf    (current-buffer))
            (tick   (buffer-chars-modified-tick))
            (serial (cl-incf org-sm-gptel--request-serial)))
-      (when (string-empty-p raw) (user-error "No body text to rewrite"))
       (message "org-sm: asking AI (%s)..." label)
       (org-sm-gptel--card-request
        (if origin
@@ -523,13 +533,23 @@ the body back and extracts the surviving underlines in place."
            (message "org-sm AI: draft changed or newer request exists; result ignored"))
           (t
            (with-current-buffer buf
-             (org-sm-capture-set-preamble body)
-             (let ((n (org-sm-gptel--draw-picks picks (point-min) (point-max))))
-               (if (> n 0)
-                   (progn (goto-char (point-min)) (org-sm-pencil-next))
-                 (message "%s" (substitute-command-keys
-                                (format "org-sm: AI %s done — edit, then \\<org-sm-capture-mode-map>\\[org-sm-capture-commit]"
-                                        label)))))))))))))
+             (let (span-beg span-end)
+               (if region
+                   (progn
+                     (org-sm-pencils-clear beg end)
+                     (goto-char beg)
+                     (delete-region beg end)
+                     (insert (string-trim body))
+                     (setq span-beg beg span-end (point)))
+                 (org-sm-capture-set-preamble body)
+                 (setq span-beg (point-min) span-end (point-max)))
+               (let ((n (org-sm-gptel--draw-picks picks span-beg span-end)))
+                 (if (> n 0)
+                     (progn (goto-char span-beg) (org-sm-pencil-next))
+                   (goto-char span-beg)
+                   (message "%s" (substitute-command-keys
+                                  (format "org-sm: AI %s done — edit, then \\<org-sm-capture-mode-map>\\[org-sm-capture-commit]"
+                                          label))))))))))))))
 
 ;; Wire the AI actions into the workbench and the review repeat map.
 (with-eval-after-load 'org-sm

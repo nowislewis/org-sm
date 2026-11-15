@@ -160,6 +160,34 @@
             (with-current-buffer wb (erase-buffer))
             (kill-buffer wb)))))))
 
+(ert-deftest org-sm-gptel-test-rewrite-region-keeps-outside-text-and-underlines ()
+  (with-temp-buffer
+    (org-sm-capture-mode)
+    (insert "第一段保持不变。\n\n第二段需要改写。\n\n第三段也保持不变。\n")
+    (setq-local org-sm-capture-parent-marker (point-marker))
+    ;; Manual underline on the first paragraph must survive rewriting the second.
+    (goto-char (point-min))
+    (org-sm-pencil-add 1 9 "保留的手动标记")
+    (search-forward "第二段需要改写。")
+    (set-mark (match-beginning 0))
+    (goto-char (match-end 0))
+    (activate-mark)
+    (let ((transient-mark-mode t))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "refine"))
+                ((symbol-function 'org-sm-gptel--card-request)
+                 (lambda (text _type _mode _custom cb)
+                   (should (equal text "第二段需要改写。"))
+                   (funcall cb "改写后的第二段，含关键机制。"
+                            '(("改写后的第二段，含关键机制。" . "新标记"))
+                            nil))))
+        (org-sm-gptel-card-ai)))
+    (should (equal (buffer-string)
+                   "第一段保持不变。\n\n改写后的第二段，含关键机制。\n\n第三段也保持不变。\n"))
+    (should (equal (mapcar (lambda (ov) (overlay-get ov 'org-sm-pencil))
+                           (org-sm-pencils))
+                   '("保留的手动标记" "新标记")))
+    (set-marker org-sm-capture-parent-marker nil)))
+
 (ert-deftest org-sm-gptel-test-async-response-does-not-erase-manual-edits ()
   (with-temp-buffer
     (org-sm-capture-mode)
