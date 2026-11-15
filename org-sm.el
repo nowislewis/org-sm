@@ -342,8 +342,14 @@ without counting as a repetition."
 
 ;;;; ---- Cloze overlays ------------------------------------------------------
 
-(defvar org-sm--cloze-regexp "{{\\([^}]+\\)}}"
-  "Regexp matching {{cloze}} markup; group 1 is the answer.")
+(defvar org-sm--cloze-regexp "{{\\([^}\n]+\\)}}"
+  "Regexp matching {{answer}} or {{answer::hint}}; group 1 is the inner content.")
+
+(defun org-sm--parse-cloze (raw)
+  "Split inner cloze text RAW into (ANSWER . HINT) at the last `::'."
+  (if (string-match "\\`\\(.+\\)::\\([^:\n]+\\)\\'" raw)
+      (cons (match-string 1 raw) (match-string 2 raw))
+    (cons raw nil)))
 
 (defface org-sm-cloze-face '((t :inherit bold :box t))
   "Face for {{cloze}} markers during normal reading."
@@ -370,11 +376,11 @@ without counting as a repetition."
     t))
 
 (defvar org-sm--font-lock-keywords
-  (let ((re "\\({{\\)\\([^}]+\\)\\(}}\\)"))
+  (let ((re "\\({{\\)\\([^}\n]+?\\)\\(\\(?:\\(?:::\\)[^}:\n]+\\)?}}\\)"))
     `((,re
        (1 '(face nil display "") prepend)   ; hide "{{"
        (2 'org-sm-cloze-face    prepend)    ; show answer with face
-       (3 '(face nil display "") prepend))  ; hide "}}"
+       (3 '(face nil display "") prepend))  ; hide "::hint}}"
       ("⌈"
        (0 'shadow prepend))                 ; dim "⌈" delimiter
       (org-sm--match-extracted
@@ -387,14 +393,17 @@ without counting as a repetition."
               (overlays-in (org-entry-beginning-position) (org-entry-end-position))))
 
 (defun org-sm-cloze-apply-overlays ()
-  "Hide all {{cloze}} answers in current heading."
+  "Hide all {{cloze}} answers in current heading, showing optional ::hint."
   (save-excursion
     (goto-char (org-entry-beginning-position))
     (while (re-search-forward org-sm--cloze-regexp (org-entry-end-position) t)
-      (let ((ov (make-overlay (match-beginning 0) (match-end 0))))
+      (pcase-let ((ov (make-overlay (match-beginning 0) (match-end 0)))
+                  (`(,ans . ,hint) (org-sm--parse-cloze (match-string 1))))
         (overlay-put ov 'category      'org-sm-cloze)
-        (overlay-put ov 'display       (propertize "[___]" 'face '(bold highlight)))
-        (overlay-put ov 'org-sm-answer (match-string 1))
+        (overlay-put ov 'display
+                     (propertize (if hint (format "[___ · %s]" hint) "[___]")
+                                 'face '(bold highlight)))
+        (overlay-put ov 'org-sm-answer ans)
         (overlay-put ov 'evaporate     t)))))
 
 (defun org-sm-cloze-reveal-overlays ()
@@ -1625,6 +1634,8 @@ Rating computation is delegated to `org-sm-preview-cloze' and
                          (let ((secs (plist-get (cdr (assq (cdr kr) preview)) :interval-secs)))
                            (list (car kr) (org-sm--cloze-rating-label (cdr kr) secs))))
                        keymap)
+                      (when (fboundp 'org-sm-gptel-explain)
+                        '((?x "explain")))
                       ;; A leech has failed recall twice already; offer the
                       ;; repair instead of another rating round.
                       (when leech '((?w "rewrite"))))))
@@ -1636,11 +1647,15 @@ Rating computation is delegated to `org-sm-preview-cloze' and
           "Rate: ")
         choices
          (lambda (key)
-           (if (eq key ?w)
-               (org-sm-card-workbench)
-             (let* ((rating (cdr (assq key keymap)))
-                    (r      (org-sm-grade-cloze rating preview)))
-               (org-sm--advance (funcall org-sm-feedback-function r))))))))))
+           (pcase key
+             (?w (org-sm-card-workbench))
+             (?x (if (fboundp 'org-sm-gptel-explain)
+                     (progn (org-sm--log-review 'explain)
+                            (org-sm-gptel-explain))
+                   (user-error "org-sm-gptel not loaded")))
+             (_ (let* ((rating (cdr (assq key keymap)))
+                       (r      (org-sm-grade-cloze rating preview)))
+                  (org-sm--advance (funcall org-sm-feedback-function r)))))))))))
 
 ;;;###autoload
 (defun org-sm-review-confirm ()
@@ -1751,13 +1766,25 @@ any previous read point.  Clear it by deleting its 📖 anchor."
     (message "org-sm: read point set")))
 
 (defun org-sm--readpoint-target ()
-  "Return the position of the current card's read-point anchor, or nil.
+  "Return the position to resume reading in the current card, or nil.
+Prefers an explicit `[[rp:ID][📖]]' anchor; falls back to the end of the
+last extracted span (`[[id:...][<T>/<C>]]') in the card body, so extracting
+acts as an automatic read point when no manual bookmark was placed.
 Point must be on the card heading."
-  (when-let* ((id (org-id-get)))
+  (let* ((id (org-id-get))
+         (bounds (org-sm-body-bounds))
+         (beg (car bounds))
+         (end (cdr bounds)))
     (save-excursion
-      (let ((end (save-excursion (org-end-of-subtree t t) (point))))
-        (when (search-forward (org-sm--readpoint-anchor id) end t)
-          (match-beginning 0))))))
+      (or (and id
+               (progn (goto-char beg)
+                      (when (search-forward (org-sm--readpoint-anchor id) end t)
+                        (match-beginning 0))))
+          (let (last)
+            (goto-char beg)
+            (while (re-search-forward org-sm--extracted-end-regexp end t)
+              (setq last (match-end 0)))
+            last)))))
 
 
 

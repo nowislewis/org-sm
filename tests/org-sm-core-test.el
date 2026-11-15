@@ -336,4 +336,39 @@
           (with-current-buffer buf (erase-buffer))
           (kill-buffer buf))))))
 
+(ert-deftest org-sm-core-cloze-hint-and-auto-readpoint ()
+  ;; {{answer::hint}} masks with `[___ · hint]' and reveals `[answer]' only.
+  (with-temp-buffer
+    (org-mode)
+    (insert "* [C] Hint card\n:PROPERTIES:\n:SRS_TYPE: cloze\n:END:\n"
+            "前提 → {{写缓冲合并::填硬件机制}} 与 {{普通空}}\n")
+    (goto-char (point-min))
+    (org-sm-cloze-apply-overlays)
+    (let ((ovs (sort (org-sm--cloze-overlays)
+                     (lambda (a b) (< (overlay-start a) (overlay-start b))))))
+      (should (= (length ovs) 2))
+      (should (equal (overlay-get (car ovs) 'display) "[___ · 填硬件机制]"))
+      (should (equal (overlay-get (cadr ovs) 'display) "[___]"))
+      (org-sm-cloze-reveal-overlays)
+      (should (equal (overlay-get (car ovs) 'display) "[写缓冲合并]"))
+      (should (equal (overlay-get (cadr ovs) 'display) "[普通空]"))))
+  ;; Automatic readpoint falls back to the end of the last extracted span,
+  ;; while an explicit `[[rp:ID][📖]]' anchor still wins.
+  (with-temp-buffer
+    (org-mode)
+    (insert "* [T] Long topic\n:PROPERTIES:\n:ID: t1\n:SRS_TYPE: topic\n:END:\n"
+            "第一段 ⌈已摘一[[id:c1][<T>]] 第二段 ⌈已摘二[[id:c2][<C>]] 第三段未读\n")
+    (goto-char (point-min))
+    (let ((rp (org-sm--readpoint-target)))
+      (should rp)
+      (goto-char rp)
+      (should (looking-at " 第三段未读")))
+    (goto-char (point-min))
+    (search-forward "第一段 ")
+    (org-sm-set-readpoint)
+    (goto-char (point-min))
+    (let ((rp (org-sm--readpoint-target)))
+      (goto-char rp)
+      (should (looking-at "\\[\\[rp:t1\\]\\[📖\\]\\]⌈已摘一")))))
+
 ;;; org-sm-core-test.el ends here

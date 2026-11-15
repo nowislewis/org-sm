@@ -96,8 +96,13 @@ const element = id => context.document.getElementById(id);
   assert.equal(toks[5].desc, "《b》p.3");
   // {{c}} is plain text on a topic, a cloze on a cloze card.
   assert.equal(toks[6].text.includes("{{c}}"), true);
-  const clozeToks = evaluate(`tokenizeBody("x {{c}}", true)`);
+  const clozeToks = evaluate(`tokenizeBody("x {{c}} {{答案::提示}}", true)`);
   assert.equal(clozeToks[1].kind, "cloze");
+  assert.equal(clozeToks[1].cloze, "c");
+  assert.equal(clozeToks[1].hint, null);
+  assert.equal(clozeToks[3].kind, "cloze");
+  assert.equal(clozeToks[3].cloze, "答案");
+  assert.equal(clozeToks[3].hint, "提示");
   // Offsets end exactly at the code-point length of the body.
   assert.equal(toks[toks.length - 1].end, Array.from(body).length);
 }

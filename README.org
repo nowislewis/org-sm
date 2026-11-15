@@ -101,7 +101,7 @@ Requires Emacs 29.1+, Org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
 | ~org-sm-review-confirm~           | ~r~                      | Confirm topic read / reveal & rate cloze                     |
 | ~org-sm-review-abort~             | ~a~                      | Abort the active review session                              |
 | ~org-sm-cycle-priority~           | ~p~                      | Step priority upward: ~C → B → A → C~                        |
-| ~org-sm-sectionize-card~          | ~s~                      | Split plain subheadings inside a topic into child cards      |
+| ~org-sm-sectionize-card~          | ~t~                      | Split plain subheadings inside a topic into child cards      |
 | ~org-sm-card-workbench~           | ~w~                      | Open side workbench to edit/rewrite body and mark extracts   |
 | ~org-sm-gptel-suggest~            | ~x~                      | Underline 1–3 verbatim spans worth extracting on screen      |
 | ~org-sm-gptel-explain~            | ~?~                      | Explain paragraph/region in a per-card chat                  |

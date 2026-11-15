@@ -611,8 +611,12 @@ function tokenizeBody(text, isCloze) {
     } else if (m[3] !== undefined) {
       parts.push({ kind: "ref", ref: m[3], start, end });
     } else if (m[4] !== undefined) {
-      if (isCloze) parts.push({ kind: "cloze", cloze: m[4], start, end });
-      else plain(m[0]);
+      if (isCloze) {
+        const sep = m[4].lastIndexOf("::");
+        const cloze = sep >= 0 ? m[4].slice(0, sep) : m[4];
+        const hint = sep >= 0 ? m[4].slice(sep + 2) : null;
+        parts.push({ kind: "cloze", cloze, hint, start, end });
+      } else plain(m[0]);
     } else if (m[5] !== undefined) {
       parts.push({ kind: "rp", start, end });
     } else {
@@ -807,7 +811,7 @@ function render() {
       span.textContent = tok.cloze;
     } else {
       span.className = "cloze-hide";
-      span.textContent = "[___]";
+      span.textContent = tok.hint ? `[___ · ${tok.hint}]` : "[___]";
       span.onclick = (e) => {
         e.stopPropagation();
         State.revealed = true;
@@ -839,9 +843,11 @@ function attachReadingControls(c, bodyEl) {
       moveReadpoint(c, off);
     };
   }
-  if (c.readpoint != null && State.scrolledFor !== c.id) {
+  if (State.scrolledFor !== c.id) {
     State.scrolledFor = c.id;
-    const mark = bodyEl.querySelector(".readpoint");
+    const refs = bodyEl.querySelectorAll(".back-ref");
+    const mark = (c.readpoint != null && bodyEl.querySelector(".readpoint"))
+              || (c.type === "topic" && refs.length ? refs[refs.length - 1] : null);
     if (mark) mark.scrollIntoView({ block: "center" });
   }
 }
