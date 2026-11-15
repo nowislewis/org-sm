@@ -59,9 +59,16 @@ Press ~p~ during review (or ~org-sm-cycle-priority~) to step priority upward:
 (extracting is the reader vouching for the passage); other cookies are
 inherited.
 
-*cloze* — active-recall card with one or more ~{{answer}}~ markers, scheduled by
-[[https://github.com/bohonghuang/fsrs.el][FSRS]].  Answers are masked as
-~[...]~ until revealed with ~r~, then rated ~again~ / ~hard~ / ~good~ / ~easy~.
+*cloze* — active-recall card with one or more ~{{answer}}~ or
+~{{answer::hint}}~ markers, scheduled by
+[[https://github.com/bohonghuang/fsrs.el][FSRS]].
+- Before reveal (~r~), ~{{answer}}~ is masked as ~[___]~ and ~{{answer::hint}}~
+  shows its disambiguation cue as ~[___ · hint]~ (during normal Org reading,
+  ~::hint~ is hidden by font-lock so the sentence reads naturally).
+- On reveal (~r~), only ~[answer]~ is shown and the prompt offers FSRS ratings
+  (~a~ again / ~h~ hard / ~g~ good / ~e~ easy), plus ~x~ (~explain~ — logs
+  ~- explain~ to ~:LOGBOOK:~ and opens the card chat) and, on a leech, ~w~
+  (~rewrite~ in the workbench).
 
 * Properties
 
@@ -111,7 +118,7 @@ Requires Emacs 29.1+, Org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
 | ~org-sm-item-mark~                |                          | Mark current heading as ~topic~ or ~cloze~                   |
 | ~org-sm-item-dismiss~             | ~d~                      | Dismiss current card (:dismissed: tag)                       |
 | ~org-sm-item-undismiss~           |                          | Restore a dismissed card                                     |
-| ~org-sm-set-readpoint~            |                          | Place or move the ~📖~ read-point anchor at point             |
+| ~org-sm-set-readpoint~            | ~.~ (leader)             | Place or move the ~📖~ read-point anchor at point             |
 | ~org-sm-goto-source~              |                          | Grep the vault for links to this card's ID                   |
 | ~org-sm-neural-start~             | ~n~ (in tree)            | Walk a card's semantic neighbourhood (ignores due dates)     |
 | ~org-sm-tree~                     |                          | Foldable overview tree of all cards in the vault             |
@@ -142,6 +149,18 @@ The due pool is derived on the fly and never written back.  For sessions larger
 than ~org-sm-review-light-size~, the mode line displays only the completed count
 (~SM 12~ instead of ~SM 12/292~): because the most urgent cards are already at
 the head of the queue, stopping at any point is safe.
+
+** Read points: explicit ~📖~ anchor + automatic last-extract fallback
+
+When a topic card is opened for review (in Emacs or the mobile web UI), point
+jumps to where you left off via ~org-sm--readpoint-target~:
+1. *Explicit bookmark wins:* if you placed a ~[[rp:ID][📖]]~ anchor with
+   ~org-sm-set-readpoint~ (or double-tapped a paragraph in the web UI), review
+   resumes there.
+2. *Automatic fallback:* if no ~📖~ anchor exists, review automatically jumps to
+   the end of the last extracted span (~⌈…[[id:…][<T>/<C>]]~) in the card body,
+   so extracting a child card naturally advances your reading position without
+   manual bookmarking.
 
 ** Stalled topics and leeches (=org-sm-card.el=)
 
@@ -213,19 +232,35 @@ consequences instead of "crucial", causal connectives preserved).
 - *Preserving existing child links:* if a topic already contains
   ~⌈…[[id:…][<T>/<C>]]~ markers, prompts and ~org-sm-gptel--draw-picks~ keep
   those IDs intact and never draw new underlines over already-extracted spans.
-- *Cloze target conservation:* on a ~cloze~ card, ~C-c C-a~ anchors to the
-  existing ~{{...}}~ target(s) — whether a single blank or a multi-step
-  progressive chain (~A → {{B}} → {{C}}~) — and only trims surrounding fluff.
-  If a model response ever drops all ~{{...}}~ markers, the response is
-  rejected before it can touch your draft.
-- *Push + Pull context:* ~C-c C-a~ pushes deterministic neighbourhood context
-  (800 chars before/after the selection in the workbench plus 800 chars
-  before/after the extraction mark in the parent card) with tools disabled for
-  a fast single-turn JSON reply.  ~?~ (~explain~) additionally passes a
-  ~【卡片坐标：文件 … 第 N 行，ID …，笔记库 …】~ line with
-  ~org-sm-gptel-agent-preset~ enabled, so the agent can call ~Read~, ~Grep~,
-  book ~Skill~, ~zotero-skill~, or ~mutool~ on demand without pre-fetching PDF
-  pages or attaching a 200 KB file on every turn.
+- *Cloze target conservation & disambiguation hints:* on a ~cloze~ card,
+  ~C-c C-a~ anchors to the existing ~{{...}}~ target(s) — whether a single blank
+  or a multi-step progressive chain (~A → {{B}} → {{C}}~) — preserves any
+  ~{{answer::hint}}~ cues, prefers placing single-blank targets at the end of
+  the sentence (forcing full-premise reading before recall), and only trims
+  surrounding fluff.  If a model response ever drops all ~{{...}}~ markers, the
+  response is rejected before it can touch your draft.
+- *Push neighbourhood + 3-step provenance + Pull on demand:*
+  - ~C-c C-a~ (workbench rewrite) pushes deterministic neighbourhood context
+    (800 chars before/after the active region in the workbench plus 800 chars
+    before/after the extraction mark in the parent card via
+    ~org-sm-extract-origin~, widening automatically across narrowed subtrees)
+    with tools disabled for a fast single-turn JSON reply.
+  - ~?~ (~org-sm-gptel-explain~) sends the stuck paragraph, ±1500 chars of card
+    context, the parent extraction origin, and a one-line coordinate footer:
+    ~【卡片坐标：文件 … 第 N 行，ID …，出处 …，笔记库 …】~.
+  - Because child ~topic~ and ~cloze~ cards trimmed down from a parent often no
+    longer carry a source link in their own body, ~org-sm-gptel--card-provenance~
+    resolves ~出处~ in three steps (widening out of review narrowing):
+    1. the card's own ~来源：~ line or ~:zotero:~ property;
+    2. the nearest ancestor heading's ~来源：~ line or ~:zotero:~ property;
+    3. the file's top-level ~#+source:~, ~#+SOURCE_URL:~, or ~#+reference:~
+       keyword (e.g. a Citar/Denote bibliography note).
+  - With ~org-sm-gptel-agent-preset~ enabled, no truncated 4000-char PDF dump or
+    200 KB ~.org~ file is pre-attached on every turn: when local context is not
+    enough, the agent pulls exact pages on demand via
+    ~mutool draw -q -F txt -o - FILE N~ (including adjacent pages ~N-1~ / ~N+1~),
+    queries Zotero fulltext via ~zotero-skill~, or searches the vault with
+    ~Read~ / ~Grep~.
 
 * Provenance & Importing (=org-sm-source.el=, =org-sm-import.el=)
 
