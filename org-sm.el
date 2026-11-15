@@ -722,6 +722,9 @@ run without it.  Never reassigned.")
 Selects the AI prompt for the workbench's leading body text.  nil in plain
 capture buffers, where drafts have no type yet anyway.")
 
+(defvar-local org-sm-capture-source nil
+  "Provenance link written to `:SOURCE:' when committing a plain capture buffer.")
+
 (defun org-sm--capture-live-marker ()
   "Return `org-sm-capture-parent-marker' if its buffer is still alive.
 Read it in the capture buffer before switching buffers: it is buffer-local,
@@ -883,7 +886,7 @@ NAME defaults to a shared \"*org-sm capture*\" buffer.  SETUP, when given,
 is called with point in the new buffer after CONTENT is inserted -- use it
 to set `org-sm-capture-parent-marker' / `org-sm-capture-card-type'
 buffer-locally for callers that aren't the plain top-level capture flow.
-CONTEXT, from `org-sm-source-context', appends a provenance line and binds
+CONTEXT, from `org-sm-source-context', binds `org-sm-capture-source' and
 `org-sm-capture-file' in this buffer only, so routing one book's extract
 never changes where the next unrelated capture goes."
   (let* ((name (or name "*org-sm capture*"))
@@ -898,12 +901,13 @@ never changes where the next unrelated capture goes."
       (unless (derived-mode-p 'org-sm-capture-mode) (org-sm-capture-mode))
       (kill-local-variable 'org-sm-capture-parent-marker)
       (kill-local-variable 'org-sm-capture-card-type)
+      (kill-local-variable 'org-sm-capture-source)
       (kill-local-variable 'org-sm-capture-file)
       (kill-local-variable 'header-line-format)
       (erase-buffer)
       (insert content)
-      (when-let* ((footer (org-sm-source-footer context)))
-        (insert "\n\n" footer))
+      (when-let* ((source (org-sm-source-link context)))
+        (setq-local org-sm-capture-source source))
       (when target (setq-local org-sm-capture-file target))
       (goto-char (point-min))
       (when setup (funcall setup)))
@@ -1013,22 +1017,24 @@ TYPE is a symbol (`topic' or `cloze'); when nil, prompt interactively."
              (let ((n (and (eq type 'topic) (org-sm-section-count))))
                (if (and n (> n 0))
                    (substitute-command-keys
-                    (format " (%d plain section%s; \\[org-sm-sectionize-card] splits them)"
+                    (format " (%d plain section%s; \\[org-sm-sectionize-card] flattens them)"
                             n (if (= n 1) "" "s")))
                  "")))))
 
-(defun org-sm--insert-child (level type title body id &optional days)
+(defun org-sm--insert-child (level type title body id &optional days source priority)
   "Append a scheduled + inited SRS heading after point's subtree; return ID.
 Insert a heading at LEVEL+1 at the end of the current subtree, titled TITLE,
 typed TYPE, tagged with ID, scheduled DAYS from now (default 1), and filled
-with BODY.
-When point's heading is a card with a priority cookie, the child inherits it:
-an extract of an [#A] passage is usually just as urgent, and retyping that on
-every extraction is how a vault ends up almost entirely unprioritized.
+with BODY.  When SOURCE is non-empty, store it in `:SOURCE:'.
+When PRIORITY is given, set that cookie; otherwise when point's heading is a
+card with a priority cookie, the child inherits it: an extract of an [#A]
+passage is usually just as urgent, and retyping that on every extraction is
+how a vault ends up almost entirely unprioritized.
 Point-relative and excursion-agnostic: the caller owns buffer/point state
 (`save-excursion', `org-with-wide-buffer', etc.) and computes LEVEL."
-  (let ((priority (and (org-at-heading-p)
-                       (plist-get (org-sm-card-at-point) :priority))))
+  (let ((priority (or priority
+                      (and (org-at-heading-p)
+                           (plist-get (org-sm-card-at-point) :priority)))))
     (org-end-of-subtree t t)
     (unless (bolp) (insert "\n"))
     (org-insert-heading nil t (1+ level))
@@ -1040,6 +1046,8 @@ Point-relative and excursion-agnostic: the caller owns buffer/point state
   (org-sm--schedule (time-add (current-time) (days-to-time (or days 1))))
   (org-set-property "ID" id)
   (org-sm--init-item type)
+  (when (org-string-nw-p source)
+    (org-set-property "SOURCE" source))
   (org-end-of-meta-data t)
   (unless (bolp) (insert "\n"))
   (insert body "\n")
@@ -1228,19 +1236,22 @@ whenever the target tree is not the last one in the file."
                  (insert (make-string level ?*) " " head "\n")
                  (forward-line -1)))))))))
 
-(defun org-sm-capture-card (type body &optional file olp title)
+(defun org-sm-capture-card (type body &optional file olp title source days priority)
   "Create a new SRS card of TYPE with BODY under FILE / OLP; return its id.
 Insert a scheduled + inited heading as the last child of the deepest heading
 in OLP and fill it with BODY (via `org-sm--insert-child').  Like
 `org-sm-extract' but with no parent and no back-reference; saves nothing.
 FILE/OLP default to `org-sm-capture-target-file'/`org-sm-capture-olp'; the
 file and headings are created if missing.  TITLE, when blank, is derived
-from BODY.
+from BODY.  SOURCE defaults to `org-sm-capture-source' and is stored in
+`:SOURCE:'.  DAYS (default 1) and PRIORITY are passed to
+`org-sm--insert-child'.
 
 Contract: leaves the target file's buffer current (deliberately, so callers
 can save it), and that outlives any `with-current-buffer' around the call --
 callers needing their own buffer back must `set-buffer' it explicitly."
   (let* ((body   (org-sm-body-clean (or body "")))
+         (source (or source org-sm-capture-source))
          (id     (org-id-new))
          (prefix (pcase type
                    ('topic org-sm-topic-prefix)
@@ -1256,7 +1267,7 @@ callers needing their own buffer back must `set-buffer' it explicitly."
     (org-with-wide-buffer
      (goto-char target)
      (set-marker target nil)
-     (org-sm--insert-child (org-current-level) type title body id)
+     (org-sm--insert-child (org-current-level) type title body id days source priority)
      (org-sm--card-changed 'create)
      id)))
 
@@ -1438,7 +1449,7 @@ topic or a leech offers `w', everything else confirms."
              "\\[org-sm-review-confirm] " (org-sm--confirm-key-label)
              ", \\[org-sm-card-workbench] workbench"
              (when plain
-               (concat ", \\[org-sm-sectionize-card] 拆小节"))
+               (concat ", \\[org-sm-sectionize-card] 展平小节"))
              (when (fboundp 'org-sm-gptel-explain)
                ", \\[org-sm-gptel-explain] explain")
              ", \\[org-sm-item-dismiss] dismiss"
@@ -1889,12 +1900,19 @@ this simply advances to the next underline."
 
 ;;;###autoload
 (defun org-sm-goto-source ()
-  "Grep the vault for links to this card's ID and jump to its source."
+  "Jump to this card's parent extract link, or open its `:SOURCE:' link."
   (interactive)
-  (let ((id (or (org-id-get) (user-error "org-sm: current heading has no ID"))))
-    (grep (format "rg -n --glob '*.org' 'id:%s' %s"
-                  id (shell-quote-argument
-                      (expand-file-name (or org-sm-directory default-directory)))))))
+  (let* ((id (org-id-get))
+         (src (org-with-wide-buffer (org-entry-get nil "SOURCE" t))))
+    (cond
+     ((and id (org-sm-rg "-l" "--glob" "*.org" (concat "id:" id)))
+      (grep (format "rg -n --glob '*.org' 'id:%s' %s"
+                    id (shell-quote-argument
+                        (expand-file-name (or org-sm-directory default-directory))))))
+     ((and src (string-match org-link-bracket-re src))
+      (org-link-open-from-string (match-string 0 src)))
+     (src (message "org-sm source: %s" src))
+     (t (user-error "org-sm: no parent extract or :SOURCE: found")))))
 
 ;;;###autoload
 (defun org-sm-review-abort ()

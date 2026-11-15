@@ -84,7 +84,8 @@
 
 (ert-deftest org-sm-gptel-test-explain-sends-paragraph-and-context ()
   (org-sm-gptel-test--with-card
-      "前文铺垫。\n\n难懂的这一段。\n\n后文延伸。\n\n来源：[[page:/books/x.pdf::7][《x》p.7]]"
+      "前文铺垫。\n\n难懂的这一段。\n\n后文延伸。"
+    (org-entry-put nil "SOURCE" "[[page:/books/x.pdf::7][《x》p.7]]")
     (search-forward "难懂")
     (let (sent)
       (cl-letf (((symbol-function 'org-sm-gptel--open-chat)
@@ -97,7 +98,8 @@
 
 (ert-deftest org-sm-gptel-test-extracts-carry-their-origin ()
   (org-sm-gptel-test--with-card
-      "幼年神经元来自齿状回。这些年轻神经元更容易兴奋。后文。\n\n来源：[[page:/books/neuro.pdf::12][《神经》p.12]]"
+      "幼年神经元来自齿状回。这些年轻神经元更容易兴奋。后文。"
+    (org-entry-put nil "SOURCE" "[[page:/books/neuro.pdf::12][《神经》p.12]]")
     (let* ((body (org-sm-body-text))
            (from (string-match "这些" body))
            (to (+ from (length "这些年轻神经元更容易兴奋。"))))
@@ -105,7 +107,7 @@
       (org-sm-extract 'topic (substring body from to) from to))
     (re-search-forward "^\\*\\* ")
     ;; Even when narrowed to the child (as in a review session), explain still
-    ;; resolves both the parent extract origin and the ancestor's provenance.
+    ;; resolves both the parent extract origin and the ancestor's `:SOURCE:'.
     (org-narrow-to-subtree)
     (let (sent)
       (cl-letf (((symbol-function 'org-sm-gptel--open-chat)

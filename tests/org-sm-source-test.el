@@ -50,7 +50,7 @@
       (should (eq (plist-get ctx :kind) 'file))
       (should (string-match-p "notes.txt:2" (plist-get ctx :label)))
       (should (string-match-p "\\`file:/tmp/notes.txt::2\\'" (plist-get ctx :link)))
-      (should (string-match-p "notes.txt:2" (org-sm-source-footer ctx))))))
+      (should (string-match-p "notes.txt:2" (org-sm-source-link ctx))))))
 
 (ert-deftest org-sm-source-context-web ()
   (with-temp-buffer
@@ -119,7 +119,7 @@
   (skip-unless (file-exists-p (org-sm-source-test--fixture "scan.pdf")))
   (should-not (org-sm-source-page-text (org-sm-source-test--fixture "scan.pdf") 1)))
 
-(ert-deftest org-sm-source-capture-appends-footer-and-routes ()
+(ert-deftest org-sm-source-capture-stores-source-property-and-routes ()
   (org-sm-source-test--with-vault
       '(("inbox.org" "* inbox\n")
         ("book.org" "* 书\n见 [[page:/books/x.pdf::3][p3]]\n"))
@@ -131,10 +131,19 @@
              (buf (org-sm--capture-buffer "正文" nil nil ctx)))
         (unwind-protect
             (with-current-buffer buf
-              (should (string-match-p "\\`正文\n\n来源：\\[\\[page:/books/x.pdf::3\\]\\[《x》p.3\\]\\]"
-                                      (buffer-string)))
-              (should (equal (file-name-nondirectory org-sm-capture-file) "book.org")))
-          (kill-buffer buf))
+              ;; Body stays pure; provenance lives in `org-sm-capture-source'
+              ;; and is written to `:SOURCE:' on commit.
+              (should (equal (buffer-string) "正文"))
+              (should (equal org-sm-capture-source "[[page:/books/x.pdf::3][《x》p.3]]"))
+              (should (equal (file-name-nondirectory org-sm-capture-file) "book.org"))
+              (org-sm-capture-commit))
+          (when (buffer-live-p buf) (kill-buffer buf)))
+        (with-current-buffer (find-file-noselect (expand-file-name "book.org" dir))
+          (goto-char (point-min))
+          (re-search-forward ":SRS_TYPE: topic")
+          (should (equal (org-entry-get nil "SOURCE")
+                         "[[page:/books/x.pdf::3][《x》p.3]]"))
+          (should (equal (org-sm-body-text) "正文")))
         ;; Routing is buffer-local: the global target is untouched.
         (should (equal (file-name-nondirectory (org-sm-capture-target-file))
                        "inbox.org"))))))

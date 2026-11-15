@@ -137,7 +137,7 @@ quotes, which must stay verbatim to be located."
 2. 原文还没有任何 `{{...}}` 时：在最核心的因果机制（为什么/怎么做，而非名称定义）处打上 1 个 `{{...}}`。
 3. 括号内长度：如果某个 `{{...}}` 里的文字超过 5 个词，可以微调精简括号内的字词，但所测的意思不能变。
 4. 题干瘦身与线索锚点：删掉与考点无关的背景铺垫、套话和多余分句，只保留能唯一定位 `{{...}}` 的最短因果或对比结构。如果是递进多空（如 `起点 → {{步骤1}} → {{步骤2}}`），必须保留明文的「起点」锚点，保证把空遮住后读者仍知道从哪里开始推导。
-5. 句尾语义检索与消歧：单空卡片尽量调整为「前提/条件在前，`{{核心机制/结论}}` 在句尾」，迫使读者先读完整个前提再检索答案，防止靠前半句字面语感秒猜。若遮住答案后可能联想到其他领域的合法答案，可在空内补极短消歧提示 `{{答案::填机制而非现象}}`。
+5. 句尾语义检索与按需消歧：单空卡片尽量调整为「前提/条件在前，`{{核心机制/结论}}` 在句尾」，迫使读者先读完整个前提再检索答案，防止靠前半句字面语感秒猜。默认不加 `::提示`；仅当遮住答案后存在多个不同维度或粒度的合法答案时，才在双冒号后补极短的答案形状/类别约束（如 `{{答案::填机制而非现象}}`），题干已能唯一锁死答案则不加，严禁在提示里写同义词或泄露字面线索。
 6. 禁止代劳：题干只保留能触发用户自己推导的最小线索，不要在题干里把答案同义复述一遍。"
   "System prompt for cloze refine operations."
   :type 'string :group 'org-sm-gptel)
@@ -302,23 +302,12 @@ nil when ORIGIN is nil, so callers can `concat' it unconditionally."
     (concat "#+begin_example\n" (car origin) "\n【……这张卡摘自这里……】\n"
             (cdr origin) "\n#+end_example")))
 
-(defun org-sm-gptel--heading-source ()
-  "Return the source line or `:zotero:' property of current heading."
-  (let ((body (org-sm-body-text)))
-    (cond
-     ((string-match "^[ \t]*来源：[ \t]*\\(.+\\)$" body)
-      (org-string-nw-p (string-trim (match-string 1 body))))
-     ((org-string-nw-p (org-entry-get nil "zotero"))))))
-
 (defun org-sm-gptel--card-provenance ()
-  "Resolve provenance for card at point: self -> ancestors -> file header."
+  "Resolve provenance for card at point: `:SOURCE:' (inherited) -> file header."
   (org-with-wide-buffer
     (save-excursion
       (when (org-sm--goto-enclosing-card)
-        (or (let (found)
-              (while (and (not (setq found (org-sm-gptel--heading-source)))
-                          (org-up-heading-safe)))
-              found)
+        (or (org-string-nw-p (org-entry-get nil "SOURCE" t))
             (when-let* ((kw (org-collect-keywords
                              '("SOURCE" "SOURCE_URL" "REFERENCE")))
                         (val (cadr (car kw))))

@@ -21,8 +21,8 @@ low-friction over decades.
    ~⌈…[[id:CHILD][<T>/<C>]]~ highlight, and the child can always recover its
    surrounding parent context via ~org-sm-extract-origin~.
 4. *Inside a card, every Org heading is a card.*  Plain section headings in
-   imported articles are resolved once at entry by ~org-sm-sectionize~ (long
-   sections become child topic cards; short ones fold into ~§ Title~ lines).
+   imported articles are resolved once at entry by ~org-sm-sectionize~
+   (rewritten to ~§ Title~ lines so the whole article stays one topic card).
 5. *The AI points and polishes; you decide what becomes a card.*  The AI never
    fabricates ungrounded subcards or swaps your cloze targets.  It quotes
    verbatim spans as wavy underlines (hallucinated quotes and already-extracted
@@ -108,7 +108,7 @@ Requires Emacs 29.1+, Org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
 | ~org-sm-review-confirm~           | ~r~                      | Confirm topic read / reveal & rate cloze                     |
 | ~org-sm-review-abort~             | ~a~                      | Abort the active review session                              |
 | ~org-sm-cycle-priority~           | ~p~                      | Step priority upward: ~C → B → A → C~                        |
-| ~org-sm-sectionize-card~          | ~t~                      | Split plain subheadings inside a topic into child cards      |
+| ~org-sm-sectionize-card~          | ~t~                      | Flatten plain subheadings inside a topic into ~§~ lines      |
 | ~org-sm-card-workbench~           | ~w~                      | Open side workbench to edit/rewrite body and mark extracts   |
 | ~org-sm-gptel-suggest~            | ~x~                      | Underline 1–3 verbatim spans worth extracting on screen      |
 | ~org-sm-gptel-explain~            | ~?~                      | Explain paragraph/region in a per-card chat                  |
@@ -119,14 +119,16 @@ Requires Emacs 29.1+, Org 9.6+, [[https://github.com/bohonghuang/fsrs.el][fsrs]]
 | ~org-sm-item-dismiss~             | ~d~                      | Dismiss current card (:dismissed: tag)                       |
 | ~org-sm-item-undismiss~           |                          | Restore a dismissed card                                     |
 | ~org-sm-set-readpoint~            | ~.~ (leader)             | Place or move the ~📖~ read-point anchor at point             |
-| ~org-sm-goto-source~              |                          | Grep the vault for links to this card's ID                   |
+| ~org-sm-goto-source~              | ~o~ (leader)             | Jump to parent extract in vault, or open ~:SOURCE:~ link     |
 | ~org-sm-neural-start~             | ~n~ (in tree)            | Walk a card's semantic neighbourhood (ignores due dates)     |
 | ~org-sm-tree~                     |                          | Foldable overview tree of all cards in the vault             |
 | ~org-sm-capture~                  |                          | Capture region/clipboard into an editable side buffer        |
 | ~org-sm-capture-page~             |                          | Capture a PDF page's text layer (~mutool~) with ~page:~ link |
 | ~org-sm-capture-clipboard-notify~ |                          | Save clipboard immediately as a topic card and notify        |
-| ~org-sm-import-file~              |                          | Import EPUB/HTML/MD/DOCX/Org file as chapter topic cards     |
-| ~org-sm-import-url~               |                          | Fetch a web article and import it as chapter topic cards     |
+| ~org-sm-import-file~              | ~i~ (leader)             | Import HTML/MD/TXT/DOCX/Org file as one long-form topic card |
+| ~org-sm-import-url~               | ~I~ (leader)             | Fetch a web article and import it as one topic card          |
+| ~org-sm-weread-import~            | ~W~ (leader)             | Import WeRead highlights as ~[#C]~ topic cards               |
+| ~org-sm-zotero-import~            | ~Z~ (leader)             | Import Zotero annotations as ~[#C]~ topic cards              |
 
 * Review Flow & Queue Ordering
 
@@ -190,8 +192,8 @@ Grabs the active region or clipboard into `*org-sm capture*`.
   additional independent top-level topic cards.
 - ~C-c C-t~ (~org-sm-capture-change-target~) switches the target ~.org~ file.
 - Capturing from a PDF (~emureader~ / ~doc-view~), EPUB (~nov~) or web buffer
-  automatically appends a ~来源：~ link and routes the capture to the vault file
-  that already cites that book.
+  automatically records a ~:SOURCE:~ property link on commit and routes the
+  capture to the vault file that already cites that book.
 
 ** ~org-sm-card-workbench~ (refining and extracting in place)
 
@@ -248,12 +250,12 @@ consequences instead of "crucial", causal connectives preserved).
   - ~?~ (~org-sm-gptel-explain~) sends the stuck paragraph, ±1500 chars of card
     context, the parent extraction origin, and a one-line coordinate footer:
     ~【卡片坐标：文件 … 第 N 行，ID …，出处 …，笔记库 …】~.
-  - Because child ~topic~ and ~cloze~ cards trimmed down from a parent often no
-    longer carry a source link in their own body, ~org-sm-gptel--card-provenance~
-    resolves ~出处~ in three steps (widening out of review narrowing):
-    1. the card's own ~来源：~ line or ~:zotero:~ property;
-    2. the nearest ancestor heading's ~来源：~ line or ~:zotero:~ property;
-    3. the file's top-level ~#+source:~, ~#+SOURCE_URL:~, or ~#+reference:~
+  - Because child ~topic~ and ~cloze~ cards extracted under a parent inherit
+    structure rather than duplicating metadata in their body,
+    ~org-sm-gptel--card-provenance~ resolves ~出处~ in two steps (widening out
+    of review narrowing):
+    1. ~:SOURCE:~ on the card or its nearest ancestor heading (~(org-entry-get nil "SOURCE" t)~);
+    2. the file's top-level ~#+source:~, ~#+SOURCE_URL:~, or ~#+reference:~
        keyword (e.g. a Citar/Denote bibliography note).
   - With ~org-sm-gptel-agent-preset~ enabled, no truncated 4000-char PDF dump or
     200 KB ~.org~ file is pre-attached on every turn: when local context is not
@@ -265,16 +267,21 @@ consequences instead of "crucial", causal connectives preserved).
 * Provenance & Importing (=org-sm-source.el=, =org-sm-import.el=)
 
 - *PDF (~emureader~ / ~doc-view~):* ~M-z~ or ~org-sm-capture-page~ extracts the
-  page's text layer synchronously via ~mutool draw -F txt~ and appends
-  ~来源：[[page:/path/book.pdf::42][《book》p.42]]~.  Scanned pages without a
-  text layer are refused (no OCR, to avoid silent typos in cards).
+  page's text layer synchronously via ~mutool draw -F txt~ and stores
+  ~:SOURCE: [[page:/path/book.pdf::42][《book》p.42]]~ on commit.  Scanned pages
+  without a text layer are refused (no OCR, to avoid silent typos in cards).
 - *EPUB (~nov.el~) & Web (~eww~ / Copy-as-Org):* ~M-z~ records ~nov:~ or URL
   provenance and routes the card to the vault file that already cites the book
   (or matches ~#+reference:~).
-- *Bulk import (~org-sm-import-file~, ~org-sm-import-url~):* converts
-  EPUB/HTML/Markdown/DOCX/Copy-as-Org into a note of ~[#C]~ chapter topics via
-  ~org-sm-sectionize~, localises images into a sibling ~-media/~ directory, and
-  refuses duplicate imports via ~#+source:~.
+- *Article/note import (~org-sm-import-file~, ~org-sm-import-url~):* converts
+  HTML/Markdown/DOCX/TXT/Copy-as-Org into one long-form ~[#C]~ topic card with
+  internal headings rewritten to ~§ TITLE~ lines via ~org-sm-sectionize~,
+  localises images into a sibling ~-media/~ directory, and refuses duplicate
+  imports via ~#+source:~.
+- *External highlight importers (~org-sm-weread-import~, ~org-sm-zotero-import~):*
+  both share ~org-sm-import-highlights~ — deduplicating against ~:SOURCE:~
+  across the vault and inbox, marking new highlights ~[#C]~, and spreading due
+  dates across days.
 
 * Web Review & Mobile Editing (=org-sm-web.el=)
 

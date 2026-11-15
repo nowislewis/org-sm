@@ -10,23 +10,17 @@
 ;; A card's body ends at its first child heading, the capture workbench reads
 ;; `**' as "new card", and child counts drive stall detection and neural
 ;; review.  An article's own section headings would break each of those, so
-;; they are resolved once, where material enters, by one primitive:
+;; they are flattened into `§ TITLE' lines once, where material enters, keeping
+;; the whole article intact as one long-form topic card:
 ;;
-;;   `org-sm-sectionize'       pure: Org text -> (INTRO . CARDS)
-;;   `org-sm-sectionize-card'  applies it to the card at point
-;;   `org-sm-import-file'      EPUB, HTML, Markdown or Org file -> note
+;;   `org-sm-sectionize'       pure: Org text -> flattened text with `§ TITLE'
+;;   `org-sm-sectionize-card'  flattens plain subheadings in the card at point
+;;   `org-sm-import-file'      HTML, Markdown, TXT, DOCX or Org file -> note
 ;;   `org-sm-import-url'       fetch a static page -> note
+;;   `org-sm-import-highlights' shared highlight importer for WeRead & Zotero
 ;;
-;; Long sections become child topics, due one per day in reading order;
-;; short ones become `§ TITLE' lines; shallow container headings (book parts)
-;; prefix the titles beneath them.  Linked images are copied next to the note
-;; so the note survives link rot and the web reader can show them.
-;;
-;; Web pages are best extracted in the browser, which sees the rendered page
-;; (JavaScript, logins, lazy images).  A page saved by a Copy-as-Org exporter
-;; imports as a .org file directly, keeping its `#+SOURCE_URL'.
-;; `org-sm-import-url' remains as a fallback for static pages.  Import never
-;; calls AI and never makes clozes.
+;; Linked images are copied next to the note so the note survives link rot and
+;; the web reader can show them.  Import never calls AI and never makes clozes.
 
 ;;; Code:
 
@@ -43,25 +37,18 @@
 (declare-function eww-readable-dom "eww")
 (declare-function denote-sluggify-title "denote")
 
-(defcustom org-sm-import-min-chars 200
-  "Sections with less text than this are folded into their neighbour.
-Title pages, copyright notices and one-paragraph sections are not worth a
-review slot of their own."
-  :type 'integer
-  :group 'org-sm)
-
 (defcustom org-sm-import-priority ?C
-  "Priority cookie for imported articles and their sections, or nil.
+  "Priority cookie for imported articles and highlights, or nil.
 New material always feels urgent -- SuperMemo calls it priority bias --
-and an import arrives a whole book at a time.  At [#C] it waits behind
-what has already proved itself; an extract from it drops the C (see
-`org-sm-extract'), and `org-sm-cycle-priority' raises a chapter by hand."
+and an import arrives a whole article or book at a time.  At [#C] it waits
+behind what has already proved itself; an extract from it drops the C (see
+`org-sm-extract'), and `org-sm-cycle-priority' raises a card by hand."
   :type '(choice (const :tag "None" nil) character)
   :group 'org-sm)
 
 (defcustom org-sm-import-topics-per-day 1
-  "How many section cards from one import come due per day.
-Importing a long article must not dump all its sections into tomorrow."
+  "How many highlight cards from one batch import come due per day.
+Importing dozens of highlights must not dump all of them into tomorrow."
   :type 'integer
   :group 'org-sm)
 
@@ -71,12 +58,13 @@ Importing a long article must not dump all its sections into tomorrow."
 (defconst org-sm-import--lazy-image-attrs '(data-src data-original data-actualsrc)
   "Attributes that lazy-loading pages use for the real image URL.")
 
-;;;; ---- Sectionize: the one structural primitive ------------------------------
+;;;; ---- Sectionize: flatten internal headings into `§ TITLE' ------------------
 
-(defun org-sm-import--clean (text)
-  "Strip pandoc's anchor targets and property drawers from Org TEXT.
-They serve cross-references inside the original document and would only
-show up as noise in a card body."
+(defun org-sm-sectionize (text)
+  "Rewrite plain Org headings in TEXT to `§ TITLE' lines and strip noise.
+org-sm assumes every heading inside a card is itself a card: keeping an
+imported article or note as one long-form topic card therefore means
+turning its internal section headings into `§ TITLE' lines."
   (with-temp-buffer
     (insert text)
     (goto-char (point-min))
@@ -87,138 +75,38 @@ show up as noise in a card body."
             "^[ \t]*:PROPERTIES:[ \t]*\n\\(?:.*\n\\)*?[ \t]*:END:[ \t]*\n" nil t)
       (replace-match ""))
     (goto-char (point-min))
-    (while (re-search-forward "\n\\{3,\\}" nil t)
+    (while (re-search-forward "^\\*+ +\\(.*\\)$" nil t)
+      (let ((title (string-trim (match-string 1))))
+        (replace-match (concat "\n§ " title "\n") t t)))
+    (goto-char (point-min))
+    (while (re-search-forward "\n[ \t]*\n\\(?:[ \t]*\n\\)+" nil t)
       (replace-match "\n\n"))
     (string-trim (buffer-string))))
 
-(defun org-sm-import--segments (text)
-  "Split Org TEXT into (LEVEL TITLE BODY) segments, one per heading.
-Text before the first heading becomes a segment with LEVEL 0."
-  (let (segments (level 0) title (start 1))
-    (with-temp-buffer
-      (insert text "\n")
-      (goto-char (point-min))
-      (while (re-search-forward "^\\(\\*+\\) +\\(.*\\)$" nil t)
-        ;; Capture the match before `string-trim', which clobbers match data.
-        (let ((next-level (length (match-string 1)))
-              (next-title (match-string 2))
-              (head (match-beginning 0))
-              (after (match-end 0)))
-          (push (list level title
-                      (string-trim (buffer-substring-no-properties start head)))
-                segments)
-          (setq level next-level
-                title (string-trim next-title)
-                start (min (point-max) (1+ after)))))
-      (push (list level title
-                  (string-trim (buffer-substring-no-properties start (point-max))))
-            segments))
-    (nreverse segments)))
-
-(defun org-sm-import--substantial-p (segment)
-  "Return non-nil when SEGMENT has enough text to be its own card."
-  (>= (length (nth 2 segment)) org-sm-import-min-chars))
-
-(defun org-sm-import--split-level (segments)
-  "Return the heading level whose sections become cards, or nil.
-The shallowest level where at least two headings, and at least half of
-them, are substantial.  Parts and title pages fail the test; chapters pass.
-Nil means nothing deserves a card of its own."
-  (seq-find (lambda (lvl)
-              (let* ((at (seq-filter (lambda (s) (= (car s) lvl)) segments))
-                     (big (seq-count #'org-sm-import--substantial-p at)))
-                (and (>= big 2) (>= (* 2 big) (length at)))))
-            (sort (seq-uniq (seq-remove #'zerop (mapcar #'car segments))) #'<)))
-
-(defun org-sm-import--units (segments split)
-  "Merge SEGMENTS deeper than SPLIT into the section above them.
-Return (LEVEL TITLE BODY) units; deeper headings become `§ TITLE' lines."
-  (let (units)
-    (dolist (seg segments)
-      (pcase-let ((`(,level ,title ,body) seg))
-        (if (and units (> level split) (>= (car (car units)) split))
-            (setf (nth 2 (car units))
-                  (string-join (delq nil (list (org-string-nw-p (nth 2 (car units)))
-                                               (concat "§ " title)
-                                               (org-string-nw-p body)))
-                               "\n\n"))
-          (push (list level title body) units))))
-    (nreverse units)))
-
-(defun org-sm-sectionize (text)
-  "Plan how Org TEXT becomes one topic card and its child cards.
-Return (INTRO . CARDS), CARDS being (TITLE . BODY) pairs in reading order.
-Substantial sections at the chapter level become cards, titled with the
-container above them (\"Part One › Chapter A\") when there is one.  Every
-other heading becomes a `§ TITLE' line appended to whatever precedes it,
-so reading order survives and no plain heading is left inside a card."
-  (let* ((segments (org-sm-import--segments (org-sm-import--clean text)))
-         (split (org-sm-import--split-level segments))
-         intro cards prefix)
-    (cl-flet ((add (s)
-                (when (org-string-nw-p s)
-                  (if cards
-                      (setcdr (car cards) (concat (cdar cards) "\n\n" s))
-                    (push s intro))))
-              (section (title body)
-                (string-join (delq nil (list (concat "§ " title)
-                                             (org-string-nw-p body)))
-                             "\n\n")))
-      (dolist (unit (if split (org-sm-import--units segments split) segments))
-        (pcase-let ((`(,level ,title ,body) unit))
-          (cond
-           ((zerop level) (add body))
-           ((and split (< level split))
-            (setq prefix title)
-            (when (org-string-nw-p body) (add (section title body))))
-           ((and split (= level split) (org-sm-import--substantial-p unit))
-            (push (cons (if prefix (concat prefix " › " title) title) body)
-                  cards))
-           (t (add (section title body)))))))
-    (cons (string-join (nreverse intro) "\n\n") (nreverse cards))))
-
 ;;;###autoload
 (defun org-sm-sectionize-card ()
-  "Resolve the plain section headings inside the card at point.
-Substantial sections become child topics, due one per day in reading order;
-the rest fold into the text above them (see `org-sm-sectionize').  Existing
-child cards are left alone.  Return the number of cards created."
+  "Flatten plain section headings inside the card at point into `§ TITLE' lines.
+Existing child cards are left alone.  Return the number of headings flattened."
   (interactive)
   (save-excursion
     (org-back-to-heading t)
     (unless (org-sm-type) (user-error "Not on an org-sm card"))
-    ;; Pin the card: inserting children moves point, and `org-sm--insert-child'
-    ;; reads the priority from whichever heading point is on.
-    (let* ((card (copy-marker (point)))
-           (level (org-current-level))
+    (let* ((n (org-sm-section-count))
            (start (car (org-sm-body-bounds)))
            (end (save-excursion
                   (let ((limit (save-excursion (org-end-of-subtree t t))))
                     (while (and (outline-next-heading) (< (point) limit)
                                 (not (org-sm-type))))
                     (min (point) limit))))
-           (plan (org-sm-sectionize (buffer-substring-no-properties start end)))
-           (per-day (max 1 org-sm-import-topics-per-day))
-           (n 0))
-      (unwind-protect
-          (progn
-            (delete-region start end)
-            (goto-char start)
-            (when (org-string-nw-p (car plan)) (insert (car plan) "\n"))
-            (dolist (unit (cdr plan))
-              (save-excursion
-                (goto-char card)
-                (org-sm--insert-child level 'topic
-                                      (concat org-sm-topic-prefix (car unit))
-                                      (cdr unit) (org-id-new)
-                                      (1+ (/ n per-day))))
-              (setq n (1+ n)))
-            (org-sm--card-changed 'sectionize)
-            (when (called-interactively-p 'interactive)
-              (message "org-sm: %d section card%s, the rest folded into text"
-                       n (if (= n 1) "" "s")))
-            n)
-        (set-marker card nil)))))
+           (body (org-sm-sectionize (buffer-substring-no-properties start end))))
+      (delete-region start end)
+      (goto-char start)
+      (when (org-string-nw-p body) (insert body "\n"))
+      (org-sm--card-changed 'sectionize)
+      (when (called-interactively-p 'interactive)
+        (message "org-sm: flattened %d section heading%s into § lines"
+                 n (if (= n 1) "" "s")))
+      n)))
 
 ;;;; ---- Images ----------------------------------------------------------------
 
@@ -288,36 +176,34 @@ so a page saved from the browser and the same URL fetched here agree."
                   "-e" (concat "#+source_url: " source))))
 
 (defun org-sm-import--write (name title source text)
-  "Write TEXT as note NAME whose topic card is TITLE, imported from SOURCE.
-TEXT must already have its headings one level below the card.  The card
-is marked and sectionized by the same commands used on any card, so an
-imported note obeys the same invariant.  Return (FILE . CARD-COUNT)."
+  "Write TEXT as note NAME whose single topic card is TITLE, from SOURCE.
+Internal headings in TEXT are flattened to `§ TITLE' lines via
+`org-sm-sectionize-card'.  Return FILE."
   (let ((file (expand-file-name name org-sm-directory)))
     (with-temp-file file
-      (insert (format "#+title:      %s\n#+date:       %s\n#+filetags:   :import:\n#+source: %s\n\n* %s\n%s\n\n%s\n"
+      (insert (format "#+title:      %s\n#+date:       %s\n#+filetags:   :import:\n#+source: %s\n\n* %s\n%s\n"
                       title (format-time-string "[%F %a %H:%M]") source title
-                      text
-                      (org-sm-source-footer
-                       (list :link source :label (format "《%s》" title))))))
+                      text)))
     (with-current-buffer (find-file-noselect file)
       (goto-char (point-min))
       (re-search-forward "^\\* ")
       (org-sm-item-mark 'topic)
-      ;; Before sectionizing, so every section card inherits the cookie.
+      (org-set-property "SOURCE"
+                        (org-sm-source-link
+                         (list :link source :label (format "《%s》" title))))
       (when org-sm-import-priority (org-priority org-sm-import-priority))
-      (let ((n (org-sm-sectionize-card)))
-        (let ((save-silently t)) (save-buffer))
-        (cons file n)))))
+      (org-sm-sectionize-card)
+      (let ((save-silently t)) (save-buffer))
+      file)))
 
 (defun org-sm-import--media (name)
   "Return the image directory, relative to the vault, for note NAME."
   (concat (file-name-base name) "-media"))
 
-(defun org-sm-import--finish (result)
-  "Visit the imported note in RESULT and report how it was split."
-  (find-file (car result))
-  (message "org-sm: imported as one topic with %d section card%s"
-           (cdr result) (if (= (cdr result) 1) "" "s")))
+(defun org-sm-import--finish (file)
+  "Visit the imported note FILE and report."
+  (find-file file)
+  (message "org-sm: imported as one topic card"))
 
 ;;;; ---- Sources ------------------------------------------------------------------
 
@@ -377,28 +263,36 @@ Headings come back demoted one level, ready to sit under the note's card."
 
 ;;;###autoload
 (defun org-sm-import-file (file)
-  "Import FILE (EPUB, HTML, Markdown, DOCX or Org) as a note of topic cards.
-An Org file saved by a Copy-as-Org browser exporter keeps its `#+TITLE' and
-`#+SOURCE_URL'.  Refuses a second import of the same source: the existing
-note is where its cards already live."
+  "Import FILE (HTML, Markdown, DOCX, TXT, EPUB or Org) as one topic card.
+Internal headings are rewritten to `§ TITLE' lines so the whole article stays
+one long-form topic card.  An Org file saved by a Copy-as-Org browser
+exporter keeps its `#+TITLE' and `#+SOURCE_URL'.  Refuses a second import of
+the same source: the existing note is where its card already lives."
   (interactive (list (read-file-name "Import into org-sm: " nil nil t)))
   (unless org-sm-directory (user-error "Set `org-sm-directory' first"))
   (let* ((file (abbreviate-file-name (expand-file-name file)))
-         (org-p (string-suffix-p ".org" file t))
+         (ext (downcase (or (file-name-extension file) "")))
+         (org-p (equal ext "org"))
+         (txt-p (equal ext "txt"))
          (parsed (and org-p (org-sm-import--org-file file)))
          (source (or (nth 1 parsed) file))
          (title (org-sm-import--clean-title
-                 (or (nth 0 parsed) (org-sm-import--pandoc-title file)
+                 (or (nth 0 parsed)
+                     (and (not txt-p) (org-sm-import--pandoc-title file))
                      (file-name-base file))))
          (name (org-sm-import--file-name title)))
     (when-let* ((done (org-sm-import--existing source)))
       (user-error "Already imported in %s" (file-name-nondirectory done)))
     (pcase-let* ((`(,text . ,tmp)
-                  (if org-p
-                      (cons (nth 2 parsed) nil)
-                    (org-sm-import--pandoc
-                     file (pcase (downcase (file-name-extension file))
-                            ("md" "markdown") ("htm" "html") (ext ext))))))
+                  (cond
+                   (org-p (cons (nth 2 parsed) nil))
+                   (txt-p (cons (with-temp-buffer
+                                  (insert-file-contents file)
+                                  (org-sm-import-escape (buffer-string)))
+                                nil))
+                   (t (org-sm-import--pandoc
+                       file (pcase ext
+                              ("md" "markdown") ("htm" "html") (_ ext)))))))
       (unwind-protect
           (org-sm-import--finish
            (org-sm-import--write
@@ -480,9 +374,10 @@ repeats the title are all fixed up here, before pandoc sees the HTML."
 
 ;;;###autoload
 (defun org-sm-import-url (url)
-  "Fetch the static page at URL and import it as a note of topic cards.
-Pages that need JavaScript or a login extract better in the browser: save
-them with a Copy-as-Org exporter and use `org-sm-import-file'."
+  "Fetch the static page at URL and import it as one long-form topic card.
+Internal headings are rewritten to `§ TITLE' lines.  Pages that need
+JavaScript or a login extract better in the browser: save them with a
+Copy-as-Org exporter and use `org-sm-import-file'."
   (interactive (list (read-string "URL: " (or (thing-at-point 'url) ""))))
   (unless org-sm-directory (user-error "Set `org-sm-directory' first"))
   (when-let* ((done (org-sm-import--existing url)))
@@ -506,6 +401,87 @@ them with a Copy-as-Org exporter and use `org-sm-import-file'."
                    text dir (org-sm-import--media name))))
               (delete-directory dir t))))
       (delete-file tmp))))
+
+;;;; ---- External highlight importers (WeRead, Zotero) ------------------------
+
+(defun org-sm-import-heading (text)
+  "Return TEXT as a single-line Org heading safe for `org-find-olp', or nil.
+Remote book and chapter titles may wrap or end in a `:tag:'-shaped run,
+either of which would change the outline structure `org-find-olp' matches."
+  (and (stringp text)
+       (org-string-nw-p
+        (replace-regexp-in-string
+         "\\`[ \t*]+\\|[ \t:]+\\'" ""
+         (replace-regexp-in-string "[ \t\n\r]+" " " text)))))
+
+(defun org-sm-import-escape (text)
+  "Escape Org structural line-starts in remote TEXT without rewriting prose."
+  (replace-regexp-in-string
+   "^\\(\\*+ \\|#\\+\\|:[[:alnum:]_]+:\\)" ",\\1" (or text "")))
+
+(defun org-sm-import--seen-keys ()
+  "Index highlight keys from `:SOURCE:' across the vault and inbox.
+Reads live buffers when open so unsaved edits and refiles are respected."
+  (let ((seen (make-hash-table :test #'equal))
+        (files (delete-dups
+                (append (list (org-sm-capture-target-file))
+                        (org-sm-rg "-l" "--glob" "*.org" ":SOURCE:")
+                        (delq nil
+                              (mapcar (lambda (b)
+                                        (let ((f (buffer-file-name b)))
+                                          (and f org-sm-directory
+                                               (string-suffix-p ".org" f t)
+                                               (file-in-directory-p f org-sm-directory)
+                                               f)))
+                                      (buffer-list)))))))
+    (dolist (file files)
+      (when (or (file-exists-p file) (get-file-buffer file))
+        (with-current-buffer (find-file-noselect file)
+          (org-with-wide-buffer
+           (goto-char (point-min))
+           (while (re-search-forward "^[ \t]*:SOURCE:[ \t]+\\(.+\\)$" nil t)
+             (let ((src (string-trim (match-string 1))))
+               (puthash src t seen)
+               (when (string-match "\\(?:#\\|weread:\\)\\([^]\n ]+\\)" src)
+                 (puthash (match-string 1 src) t seen))
+               (when (string-match "[?&]annotation=\\([^]&\n ]+\\)" src)
+                 (puthash (match-string 1 src) t seen))))))))
+    seen))
+
+(defun org-sm-import-highlights (items)
+  "Import highlight ITEMS into the inbox; return count of created cards.
+Each element of ITEMS is `(:key KEY :text TEXT :olp OLP :source SOURCE)'.
+Items whose KEY already appears in a `:SOURCE:' property anywhere in the
+vault or inbox are skipped (including dismissed cards).  New cards receive
+`org-sm-import-priority' (`[#C]') and spread their due dates by
+`org-sm-import-topics-per-day'."
+  (unless org-sm-directory
+    (user-error "Set `org-sm-directory' for vault-wide deduplication"))
+  (let ((seen (org-sm-import--seen-keys))
+        (per-day (max 1 org-sm-import-topics-per-day))
+        (created 0)
+        touched)
+    (dolist (item items)
+      (let ((key (plist-get item :key))
+            (text (plist-get item :text))
+            (olp (plist-get item :olp))
+            (source (plist-get item :source)))
+        (unless (and (org-string-nw-p key) (org-string-nw-p source))
+          (error "Highlight import requires non-empty :key and :source"))
+        (when (and (org-string-nw-p text) (not (gethash key seen)))
+          (save-current-buffer
+            (let ((days (1+ (/ created per-day))))
+              (org-sm-capture-card 'topic (org-sm-import-escape text)
+                                   nil olp nil source days
+                                   org-sm-import-priority)
+              (cl-pushnew (current-buffer) touched)))
+          (puthash key t seen)
+          (cl-incf created))))
+    (dolist (buf touched)
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (let ((save-silently t)) (save-buffer)))))
+    created))
 
 (provide 'org-sm-import)
 ;;; org-sm-import.el ends here

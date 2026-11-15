@@ -61,8 +61,8 @@ which serves them; the two must agree on what an image is.")
 
 (defun org-sm-source--short (title)
   "Return TITLE trimmed of bracketed noise and capped at 40 columns.
-Download names carry publisher and mirror tags in parentheses; the footer
-only needs enough to recognise the book."
+Download names carry publisher and mirror tags in parentheses; the link
+label only needs enough to recognise the book."
   (truncate-string-to-width
    (string-trim (replace-regexp-in-string "[(（][^)）]*[)）]" "" (or title "")))
    40 nil nil "…"))
@@ -104,13 +104,13 @@ reader buffer is current.  Org buffers return nil on purpose."
             :link (format "file:%s::%d" file line)
             :label (format "%s:%d" (file-name-nondirectory file) line))))))
 
-(defun org-sm-source-footer (context)
-  "Return the provenance line for CONTEXT, or nil when CONTEXT is nil.
+(defun org-sm-source-link (context)
+  "Return the provenance Org link for CONTEXT, or nil when CONTEXT is nil.
 Built with `org-link-make-string', which escapes brackets: book titles
 such as \"[美] 作者\" are common and must not break the link."
   (when context
-    (concat "来源：" (org-link-make-string (plist-get context :link)
-                                        (plist-get context :label)))))
+    (org-link-make-string (plist-get context :link)
+                          (plist-get context :label))))
 
 ;;;; ---- Where does it go? --------------------------------------------------
 
